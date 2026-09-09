@@ -25,7 +25,22 @@ class HyperFramesBuilderTests(unittest.TestCase):
             self.assertIn('id="audio-1"', content)
             self.assertIn('window.__timelines["stock-debate"]', content)
             self.assertIn("<svg", content)
+            self.assertIn('data-topic="financial"', content)
+            self.assertIn('class="ma draw-line"', content)
+            self.assertTrue((project.directory / "stock-debate.css").is_file())
+            self.assertTrue((project.directory / "stock-debate.js").is_file())
             self.assertTrue((project.directory / "index.motion.json").is_file())
+
+    def test_uses_visual_prompt_to_select_risk_visual(self):
+        with tempfile.TemporaryDirectory() as temp:
+            project = HyperFramesBuilder(self._config(temp)).build_project(
+                {},
+                {"rounds": [{"bull": {"line": "需要审慎", "visual_prompt": "展示下行风险"}}]},
+                {},
+            )
+            content = project.composition_path.read_text(encoding="utf-8")
+            self.assertIn('data-topic="risk"', content)
+            self.assertIn("展示下行风险", content)
 
     def test_render_requires_nonempty_mp4(self):
         with tempfile.TemporaryDirectory() as temp:

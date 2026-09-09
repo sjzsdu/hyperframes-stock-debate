@@ -10,6 +10,7 @@ readme = "README.md"
 license = {text = "MIT"}
 requires-python = ">=3.12"
 dependencies = [
+    "jinja2>=3.1",
     "pyyaml>=6.0",
 ]
 
@@ -23,6 +24,9 @@ stocktalk = "stocktalk.cli:main"
 
 [tool.setuptools.packages.find]
 include = ["stocktalk*"]
+
+[tool.setuptools.package-data]
+stocktalk = ["templates/hyperframes/*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
