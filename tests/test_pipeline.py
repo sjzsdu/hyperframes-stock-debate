@@ -88,6 +88,7 @@ def test_pipeline_runs_e2e(tmp_path: Path) -> None:
     pipeline.compliance.review = MagicMock(return_value=FAKE_SCRIPT)
     pipeline.tts.synthesize = MagicMock(return_value=FAKE_AUDIO)
     pipeline.builder.build = MagicMock(return_value={"index_html": "ok"})
+    pipeline.builder.render_mp4 = MagicMock(return_value=tmp_path / "out" / "test.mp4")
 
     result = pipeline.run("000001", stock_name="平安银行")
 
@@ -108,6 +109,7 @@ def test_pipeline_stores_result_json(tmp_path: Path) -> None:
     pipeline.compliance.review = MagicMock(return_value=FAKE_SCRIPT)
     pipeline.tts.synthesize = MagicMock(return_value=FAKE_AUDIO)
     pipeline.builder.build = MagicMock(return_value={})
+    pipeline.builder.render_mp4 = MagicMock(return_value=tmp_path / "out2" / "x.mp4")
 
     pipeline.run("000001")
 

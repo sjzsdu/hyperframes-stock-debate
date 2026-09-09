@@ -95,10 +95,15 @@ class Pipeline:
         print(f"[StockTalk] TTS complete  segments={len(audio.get('segments', []))}")
 
         project_dir = self.output_dir / tag
+        self.builder.video_config["project_dir"] = str(project_dir)
         project = self.builder.build(
-            stock_data=stock_data, script=approved, audio=audio, output_dir=project_dir,
+            stock_data=stock_data, script=approved, tts_timeline=audio,
         )
         print(f"[StockTalk] HyperFrames project written to {project_dir}")
+
+        mp4_path = self.output_dir / f"{tag}.mp4"
+        self.builder.render_mp4(project, mp4_path)
+        print(f"[StockTalk] MP4 rendered  {mp4_path}")
 
         result = {
             "stock_code": stock_code,
@@ -109,6 +114,7 @@ class Pipeline:
             "audio": audio,
             "srt": str(srt_path),
             "project_dir": str(project_dir),
+            "mp4": str(mp4_path),
             "elapsed_seconds": round(time.monotonic() - t0, 1),
         }
         result_path = self.output_dir / f"{tag}.json"

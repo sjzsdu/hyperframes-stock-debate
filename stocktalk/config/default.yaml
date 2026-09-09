@@ -38,3 +38,7 @@ compliance:
 
 output:
   dir: output
+
+video:
+  output_dir: output
+  quality: high
