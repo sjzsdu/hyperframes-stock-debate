@@ -58,8 +58,8 @@ class Pipeline:
     def __init__(self, config: dict[str, Any] | None = None) -> None:
         self.config = config or {}
         self.stock_client = StockDataClient(StockDataConfig(
-            retries=self.config.get("stock_data", {}).get("retries", 2),
-            timeout_seconds=self.config.get("stock_data", {}).get("timeout_seconds", 20.0),
+            retries=self.config.get("stock_data", {}).get("retries", 0),
+            timeout_seconds=self.config.get("stock_data", {}).get("timeout_seconds", 60.0),
         ))
         self.dialogue_gen = DialogueGenerator(self.config)
         self.compliance = ComplianceAgent(self.config)
