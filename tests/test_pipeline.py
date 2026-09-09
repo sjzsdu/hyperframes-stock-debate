@@ -48,6 +48,7 @@ FAKE_AUDIO: dict[str, Any] = {
         {"character": "bull", "line": "平安银行净利润增长稳健", "start": 0.0, "end": 3.0},
         {"character": "bear", "line": "但不良贷款率仍需关注", "start": 3.0, "end": 6.0},
     ],
+    "srt_path": "/tmp/fake_subtitles.srt",
     "total_duration": 6.0,
 }
 
@@ -86,7 +87,6 @@ def test_pipeline_runs_e2e(tmp_path: Path) -> None:
     pipeline.dialogue_gen.generate = MagicMock(return_value=FAKE_SCRIPT)
     pipeline.compliance.review = MagicMock(return_value=FAKE_SCRIPT)
     pipeline.tts.synthesize = MagicMock(return_value=FAKE_AUDIO)
-    pipeline.tts.write_srt = MagicMock(return_value=tmp_path / "out" / "test.srt")
     pipeline.builder.build = MagicMock(return_value={"index_html": "ok"})
 
     result = pipeline.run("000001", stock_name="平安银行")
@@ -107,7 +107,6 @@ def test_pipeline_stores_result_json(tmp_path: Path) -> None:
     pipeline.dialogue_gen.generate = MagicMock(return_value=FAKE_SCRIPT)
     pipeline.compliance.review = MagicMock(return_value=FAKE_SCRIPT)
     pipeline.tts.synthesize = MagicMock(return_value=FAKE_AUDIO)
-    pipeline.tts.write_srt = MagicMock(return_value=tmp_path / "out2" / "x.srt")
     pipeline.builder.build = MagicMock(return_value={})
 
     pipeline.run("000001")
@@ -116,3 +115,4 @@ def test_pipeline_stores_result_json(tmp_path: Path) -> None:
     assert len(results) == 1
     data = json.loads(results[0].read_text(encoding="utf-8"))
     assert data["stock_code"] == "000001"
+    assert data["srt"] == FAKE_AUDIO["srt_path"]

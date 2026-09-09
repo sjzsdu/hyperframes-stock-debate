@@ -91,7 +91,7 @@ class Pipeline:
             print("[StockTalk] compliance: clean")
 
         audio = self.tts.synthesize(approved)
-        srt_path = self.tts.write_srt(audio, self.output_dir / f"{tag}.srt")
+        srt_path = Path(audio.get("srt_path", self.output_dir / f"{tag}.srt"))
         print(f"[StockTalk] TTS complete  segments={len(audio.get('segments', []))}")
 
         project_dir = self.output_dir / tag
