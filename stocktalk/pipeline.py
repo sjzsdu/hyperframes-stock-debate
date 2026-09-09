@@ -81,7 +81,7 @@ class Pipeline:
         print(f"[StockTalk] stock data fetched  ({time.monotonic() - t0:.1f}s)")
 
         script = self.dialogue_gen.generate(stock_data)
-        print(f"[StockTalk] dialogue generated  rounds={len(script.get('rounds', []))}")
+        print(f"[StockTalk] dialogue generated  turns={len(script.get('turns', []))}")
 
         approved = self.compliance.review(script)
         violations = approved.get("violations", [])

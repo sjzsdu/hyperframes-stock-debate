@@ -18,14 +18,14 @@ def main(argv: list[str] | None = None) -> None:
             "示例:\n"
             "  stocktalk 600519 --name 贵州茅台\n"
             "  stocktalk 000001 --config my_config.yaml\n"
-            "  stocktalk 600519 --rounds 5 --output-dir ./videos\n"
+            "  stocktalk 600519 --duration-minutes 3 --output-dir ./videos\n"
         ),
     )
     parser.add_argument("stock_code", help="6位A股代码，如 600519、000001")
     parser.add_argument("--name", default=None, help="股票名称（可选，会自动获取）")
     parser.add_argument("--config", default=None, help="自定义配置文件路径")
     parser.add_argument("--output-dir", default=None, help="输出目录（默认 output/）")
-    parser.add_argument("--rounds", type=int, default=None, help="对话轮次（默认 3）")
+    parser.add_argument("--duration-minutes", type=int, default=None, help="对话目标时长（分钟，默认 2-5）")
 
     args = parser.parse_args(argv)
 
@@ -34,15 +34,18 @@ def main(argv: list[str] | None = None) -> None:
     if args.output_dir:
         config.setdefault("output", {})["dir"] = args.output_dir
 
-    if args.rounds is not None:
-        config.setdefault("dialogue", {})["rounds"] = args.rounds
+    if args.duration_minutes is not None:
+        if args.duration_minutes < 1:
+            parser.error("--duration-minutes 必须为正整数")
+        seconds = args.duration_minutes * 60
+        config.setdefault("dialogue", {}).update({"min_duration_seconds": seconds, "max_duration_seconds": seconds})
 
     pipeline = Pipeline(config)
     result = pipeline.run(args.stock_code, stock_name=args.name)
 
     print(f"\n✓ 视频生成完成")
     print(f"  股票: {result['stock_name']} ({result['stock_code']})")
-    print(f"  轮次: {len(result['script'].get('rounds', []))}")
+    print(f"  发言: {len(result['script'].get('turns', []))}")
     print(f"  输出: {result.get('project_dir', 'output/')}")
 
 

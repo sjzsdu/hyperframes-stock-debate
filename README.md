@@ -58,7 +58,7 @@ stocktalk <股票代码> [选项]
   --name NAME           股票名称（可选，会自动获取）
   --config PATH         自定义配置文件路径
   --output-dir DIR      输出目录（默认 output/）
-  --rounds N            对话轮次（默认 3）
+  --duration-minutes N  对话目标时长（默认 2-5 分钟）
   --help                显示帮助信息
 ```
 
@@ -71,8 +71,8 @@ stocktalk 600519
 # 指定名称和配置
 stocktalk 600519 --name 贵州茅台 --config my_config.yaml
 
-# 指定输出目录和轮次
-stocktalk 000001 --name 平安银行 --output-dir ./videos --rounds 5
+# 指定输出目录和目标时长
+stocktalk 000001 --name 平安银行 --output-dir ./videos --duration-minutes 3
 ```
 
 ## 配置
@@ -82,9 +82,10 @@ stocktalk 000001 --name 平安银行 --output-dir ./videos --rounds 5
 ```yaml
 dialogue:
   model: qwen3.6-plus      # AI 模型
-  rounds: 3                 # 对话轮次
-  max_line_chars: 56        # 每句最大字数
-  temperature: 0.65         # 创造性
+  min_duration_seconds: 120 # 最短目标时长
+  max_duration_seconds: 300 # 最长目标时长
+  max_line_chars: 130       # 每句最大字数（30-150）
+  temperature: 0.8          # 创造性
 
 characters:
   bull:

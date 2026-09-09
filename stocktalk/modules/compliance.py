@@ -97,20 +97,22 @@ class ComplianceAgent:
 
         approved_script = deepcopy(dict(script))
         issues: List[str] = []
-        rounds = approved_script.get("rounds", [])
-        if isinstance(rounds, list):
-            for round_data in rounds:
-                if not isinstance(round_data, dict):
-                    continue
+        turns = approved_script.get("turns", [])
+        if "turns" in approved_script and isinstance(turns, list):
+            for turn in turns:
+                if not isinstance(turn, dict) or not isinstance(turn.get("line"), str): continue
+                character, line = str(turn.get("speaker", "unknown")), turn["line"]
+                line_issues = self._review_line(line, character)
+                issues.extend(line_issues)
+                if line_issues: turn["line"] = self._fix_line(line)
+        else:  # Legacy scripts remain reviewable.
+            for round_data in approved_script.get("rounds", []):
+                if not isinstance(round_data, dict): continue
                 for character in ("bull", "bear"):
                     dialogue = round_data.get(character)
-                    if not isinstance(dialogue, dict) or not isinstance(dialogue.get("line"), str):
-                        continue
-                    line = dialogue["line"]
-                    line_issues = self._review_line(line, character)
-                    issues.extend(line_issues)
-                    if line_issues:
-                        dialogue["line"] = self._fix_line(line)
+                    if isinstance(dialogue, dict) and isinstance(dialogue.get("line"), str):
+                        line_issues = self._review_line(dialogue["line"], character); issues.extend(line_issues)
+                        if line_issues: dialogue["line"] = self._fix_line(dialogue["line"])
 
         existing = approved_script.get("disclaimers", [])
         if not isinstance(existing, list):
