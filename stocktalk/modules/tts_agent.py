@@ -35,8 +35,7 @@ class TTSAgent:
     def synthesize(self, script: Mapping[str, Any]) -> Dict[str, Any]:
         """Synthesize the script in display order and return its media timeline.
 
-        ``script['rounds']`` is expected to contain ``bull`` and/or ``bear``
-        mappings with a ``line`` field.  A synthesis failure is not hidden: an
+        ``script['turns']`` is an ordered list of speaker/line mappings.  A synthesis failure is not hidden: an
         estimated timestamp would put later subtitles out of sync.
         """
         self._require_bailian_cli()
@@ -46,23 +45,14 @@ class TTSAgent:
         segments: List[Dict[str, Any]] = []
         cursor = 0.0
         pause = max(0.0, float(self.tts_config.get("pause_between_segments", 0)))
-        for round_index, round_data in enumerate(script.get("rounds", []), start=1):
-            if not isinstance(round_data, Mapping):
-                continue
-            for character in ("bull", "bear"):
-                entry = round_data.get(character)
-                line = self._line_from(entry)
-                if not line:
-                    continue
-                segment = self._synthesize_line(
-                    line=line,
-                    character=character,
-                    output_path=audio_dir / f"{round_index:02d}_{character}.{self._audio_format}",
-                )
-                segment["start_time"] = cursor
-                segment["end_time"] = cursor + segment["duration"]
-                segments.append(segment)
-                cursor = segment["end_time"] + pause
+        for turn_index, turn in enumerate(self._turns(script), start=1):
+            character, line = str(turn["speaker"]), str(turn["line"])
+            segment = self._synthesize_line(line=line, character=character,
+                output_path=audio_dir / f"{turn_index:02d}_{character}.{self._audio_format}")
+            segment["start_time"] = cursor
+            segment["end_time"] = cursor + segment["duration"]
+            segments.append(segment)
+            cursor = segment["end_time"] + pause
 
         srt_path = self._generate_srt(segments)
         return {
@@ -70,6 +60,21 @@ class TTSAgent:
             "srt_path": str(srt_path),
             "total_duration": segments[-1]["end_time"] if segments else 0.0,
         }
+
+    @staticmethod
+    def _turns(script: Mapping[str, Any]) -> List[Dict[str, str]]:
+        """Read the natural-turn contract, with legacy round support for old files."""
+        turns = script.get("turns", [])
+        if isinstance(turns, list):
+            return [{"speaker": str(item.get("speaker")), "line": str(item.get("line"))}
+                    for item in turns if isinstance(item, Mapping) and item.get("speaker") in {"bull", "bear"} and item.get("line")]
+        result: List[Dict[str, str]] = []
+        for round_data in script.get("rounds", []):
+            if isinstance(round_data, Mapping):
+                for speaker in ("bull", "bear"):
+                    line = TTSAgent._line_from(round_data.get(speaker))
+                    if line: result.append({"speaker": speaker, "line": line})
+        return result
 
     @property
     def _audio_format(self) -> str:

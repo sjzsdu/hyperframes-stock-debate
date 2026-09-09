@@ -41,6 +41,13 @@ def test_custom_terms_and_disclaimers_are_used_without_duplicates():
     assert reviewed["compliance_issues"] == ["[bull] 包含禁用词: 火箭票"]
 
 
+def test_review_sanitises_natural_turn_contract():
+    reviewed = ComplianceAgent({}).review({"turns": [{"speaker": "bull", "line": "这只股票必涨，建议买入。"}]})
+
+    assert "必涨" not in reviewed["turns"][0]["line"]
+    assert "买入" not in reviewed["turns"][0]["line"]
+
+
 def test_malformed_dialogue_records_do_not_break_review():
     reviewed = ComplianceAgent({}).review({"rounds": [None, {"bull": {}}, {"bear": {"line": 1}}]})
 

@@ -3,10 +3,11 @@
 
 dialogue:
   model: qwen3.6-plus
-  rounds: 3
-  max_line_chars: 56
-  max_tokens: 1600
-  temperature: 0.65
+  min_duration_seconds: 120
+  max_duration_seconds: 300
+  max_line_chars: 130
+  max_tokens: 3200
+  temperature: 0.8
   timeout_seconds: 90
 
 # tongstock connects to the remote TDX server on every invocation, which
@@ -28,7 +29,7 @@ characters:
     voice_id: longtian_v3
 
 compliance:
-  forbidden:
+  forbidden_words:
     - 保证
     - 必涨
     - 必跌
@@ -36,9 +37,14 @@ compliance:
     - 一定赚
   disclaimer: 内容为虚拟人物观点碰撞，不构成投资建议。投资有风险，入市需谨慎。
 
-output:
-  dir: output
+tts:
+  model: cosyvoice-v3-flash
+  output_format: wav
+  pause_between_segments: 0.25
 
 video:
   output_dir: output
   quality: high
+
+output:
+  dir: output
