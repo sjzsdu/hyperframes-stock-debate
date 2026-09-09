@@ -1,0 +1,32 @@
+# StockTalk default configuration
+# See stocktalk/pipeline.py for runtime behaviour.
+
+dialogue:
+  model: qwen3.6-plus
+  rounds: 3
+  max_line_chars: 56
+  max_tokens: 1600
+  temperature: 0.65
+  timeout_seconds: 90
+
+characters:
+  bull:
+    name: 股市新手
+    persona: 年轻乐观，容易被利好消息带动，只讨论已给出的数据
+    voice_id: zh-CN-YunxiNeural
+  bear:
+    name: 股市老登
+    persona: 老练理性，擅长从风险角度分析，质疑数据边界
+    voice_id: zh-CN-YunyangNeural
+
+compliance:
+  forbidden:
+    - 保证
+    - 必涨
+    - 必跌
+    - 稳赚
+    - 一定赚
+  disclaimer: 内容为虚拟人物观点碰撞，不构成投资建议。投资有风险，入市需谨慎。
+
+output:
+  dir: output
