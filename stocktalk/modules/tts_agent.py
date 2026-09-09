@@ -9,8 +9,8 @@ from __future__ import annotations
 
 import math
 import shutil
+import struct
 import subprocess
-import wave
 from pathlib import Path
 from typing import Any, Dict, List, Mapping
 
@@ -128,13 +128,9 @@ class TTSAgent:
 
     def _audio_duration(self, path: Path) -> float:
         if path.suffix.lower() == ".wav":
-            try:
-                with wave.open(str(path), "rb") as audio:
-                    duration = audio.getnframes() / audio.getframerate()
-                if duration > 0:
-                    return duration
-            except (wave.Error, EOFError, ZeroDivisionError):
-                pass
+            duration = self._wav_duration(path)
+            if duration > 0:
+                return duration
 
         ffprobe = shutil.which("ffprobe")
         if ffprobe:
@@ -149,6 +145,60 @@ class TTSAgent:
             except ValueError:
                 pass
         raise TTSSynthesisError(f"Unable to determine duration of generated audio: {path}")
+
+    @classmethod
+    def _wav_duration(cls, path: Path) -> float:
+        """Compute WAV duration, tolerating corrupt chunk-size fields.
+
+        Bailian's CLI writes 0x7FFFFFFF for both the RIFF and ``data`` chunk
+        sizes, which makes Python's :mod:`wave` report a ~12.5 hour file for a
+        few seconds of audio.  Walk the chunk list ourselves and, when a
+        declared size exceeds what the file can physically contain, fall back
+        to the bytes actually present after the ``data`` header.
+        """
+        try:
+            with path.open("rb") as handle:
+                header = handle.read(12)
+                if len(header) != 12 or header[0:4] != b"RIFF" or header[8:12] != b"WAVE":
+                    return 0.0
+                sample_rate = 0
+                channels = 0
+                frame_width = 0
+                data_start = 0
+                data_size = 0
+                while True:
+                    chunk = handle.read(8)
+                    if len(chunk) != 8:
+                        break
+                    chunk_id, chunk_size = chunk[0:4], struct.unpack("<I", chunk[4:8])[0]
+                    if chunk_id == b"fmt ":
+                        fmt = handle.read(16)
+                        if len(fmt) != 16:
+                            break
+                        channels = struct.unpack("<H", fmt[2:4])[0]
+                        sample_rate = struct.unpack("<I", fmt[4:8])[0]
+                        bits = struct.unpack("<H", fmt[14:16])[0]
+                        frame_width = max(1, channels * (bits // 8))
+                        leftover = chunk_size - 16
+                        handle.seek(leftover, 1) if leftover > 0 else None
+                    elif chunk_id == b"data":
+                        data_start = handle.tell()
+                        data_size = chunk_size
+                        break
+                    else:
+                        handle.seek(chunk_size + (chunk_size % 2), 1)
+                if not sample_rate or not frame_width or not data_start:
+                    return 0.0
+                handle.seek(0, 2)
+                file_size = handle.tell()
+                available = file_size - data_start
+                if data_size > available or data_size == 0x7FFFFFFF:
+                    data_size = available
+                frames = data_size // frame_width
+                duration = frames / sample_rate
+                return duration if duration > 0 and math.isfinite(duration) else 0.0
+        except (OSError, ValueError, EOFError):
+            return 0.0
 
     def _generate_srt(self, segments: List[Mapping[str, Any]]) -> Path:
         self.output_dir.mkdir(parents=True, exist_ok=True)
