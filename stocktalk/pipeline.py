@@ -25,14 +25,31 @@ from stocktalk.modules.tts_agent import TTSAgent
 from stocktalk.modules.hyperframes_builder import HyperFramesBuilder
 
 
+DEFAULT_CONFIG_PATH = Path(__file__).with_name("config") / "default.yaml"
+
+
+def _merge_config(defaults: Mapping[str, Any], overrides: Mapping[str, Any]) -> dict[str, Any]:
+    """Recursively merge a user config onto the bundled defaults."""
+    merged = dict(defaults)
+    for key, value in overrides.items():
+        if isinstance(value, Mapping) and isinstance(merged.get(key), Mapping):
+            merged[key] = _merge_config(merged[key], value)
+        else:
+            merged[key] = value
+    return merged
+
+
 def load_config(path: str | Path | None = None) -> dict[str, Any]:
+    """Load bundled defaults, optionally overlaid by a user config file."""
+    with DEFAULT_CONFIG_PATH.open(encoding="utf-8") as f:
+        defaults = yaml.safe_load(f) or {}
     if path is None:
-        return {}
+        return defaults
     p = Path(path)
     if not p.exists():
-        return {}
+        return defaults
     with p.open(encoding="utf-8") as f:
-        return yaml.safe_load(f) or {}
+        return _merge_config(defaults, yaml.safe_load(f) or {})
 
 
 class Pipeline:

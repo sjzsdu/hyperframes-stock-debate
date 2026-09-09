@@ -26,7 +26,11 @@ class TTSAgent:
         self.config = config
         self.tts_config = config.get("tts", {})
         self.characters = config.get("characters", {})
-        self.output_dir = Path(config.get("video", {}).get("output_dir", "./output"))
+        self.output_dir = Path(
+            config.get("output", {}).get(
+                "dir", config.get("video", {}).get("output_dir", "./output")
+            )
+        )
 
     def synthesize(self, script: Mapping[str, Any]) -> Dict[str, Any]:
         """Synthesize the script in display order and return its media timeline.
@@ -77,6 +81,12 @@ class TTSAgent:
     def _synthesize_line(self, line: str, character: str, output_path: Path) -> Dict[str, Any]:
         character_config = self.characters.get(character, {})
         voice_id = character_config.get("voice_id")
+        if not voice_id or voice_id == "default":
+            raise TTSSynthesisError(
+                f"No Bailian TTS voice configured for {character}. "
+                "Set characters.<name>.voice_id to a voice returned by "
+                "`bl speech synthesize --list-voices --model cosyvoice-v3-flash`."
+            )
         command = [
             "bl", "speech", "synthesize",
             "--text", line,
@@ -84,8 +94,7 @@ class TTSAgent:
             "--format", self._audio_format,
             "--out", str(output_path),
         ]
-        if voice_id and voice_id != "default":
-            command.extend(["--voice", str(voice_id)])
+        command.extend(["--voice", str(voice_id)])
 
         sample_rate = self.tts_config.get("sample_rate")
         if sample_rate:

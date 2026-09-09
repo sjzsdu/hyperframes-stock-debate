@@ -13,11 +13,11 @@ characters:
   bull:
     name: 股市新手
     persona: 年轻乐观，容易被利好消息带动，只讨论已给出的数据
-    voice_id: zh-CN-YunxiNeural
+    voice_id: longfeifei_v3
   bear:
     name: 股市老登
     persona: 老练理性，擅长从风险角度分析，质疑数据边界
-    voice_id: zh-CN-YunyangNeural
+    voice_id: longtian_v3
 
 compliance:
   forbidden:
