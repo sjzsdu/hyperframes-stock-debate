@@ -43,7 +43,13 @@ class HyperFramesBuilder:
 
     def build_project(self, stock_data: Mapping[str, Any], script: Mapping[str, Any] | None, tts_timeline: Mapping[str, Any] | None) -> HyperFramesProject:
         directory = Path(self.video_config.get("project_dir", self._output_dir / "hyperframes")); directory.mkdir(parents=True, exist_ok=True)
-        segments = self._segments(script or {}, tts_timeline or {}); duration = self._duration(segments, tts_timeline or {})
+        segments = self._segments(script or {}, tts_timeline or {})
+        for seg in segments:
+            ap = seg.get("audio_path")
+            if ap:
+                try: seg["audio_path"] = str(Path(ap).relative_to(directory))
+                except ValueError: pass
+        duration = self._duration(segments, tts_timeline or {})
         self._copy_assets(directory)
         composition = directory / "index.html"; composition.write_text(self._html(stock_data, segments, duration), encoding="utf-8")
         (directory / "index.motion.json").write_text(json.dumps({"duration": duration, "assertions": [{"kind": "appearsBy", "selector": "#headline", "bySec": .8}, {"kind": "staysInFrame", "selector": "#finance-card"}, {"kind": "appearsBy", "selector": "#summary-card", "bySec": max(.1, duration - 1)}]}, ensure_ascii=False, indent=2), encoding="utf-8")

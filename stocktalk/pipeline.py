@@ -138,10 +138,12 @@ class Pipeline:
             progress.advance(task)
 
             progress.update(task, description="Synthesizing voice (may take ~1 min)")
+            project_dir.mkdir(parents=True, exist_ok=True)
             try:
+                self.tts.output_dir = project_dir
                 audio = self._retry("TTS synthesis", lambda: self.tts.synthesize(approved))
             except PipelineError as exc:
-                srt_path = self.output_dir / f"{tag}.srt"
+                srt_path = project_dir / f"{tag}.srt"
                 self.console.print(f"[yellow]{exc}; continuing with silent video and subtitles.[/yellow]")
                 audio = self._silent_timeline(approved, srt_path)
             progress.advance(task)
