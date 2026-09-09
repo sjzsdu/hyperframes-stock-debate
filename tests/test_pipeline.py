@@ -9,7 +9,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 from typing import Any, Mapping
-from unittest.mock import MagicMock, call, patch
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -74,6 +74,8 @@ def test_load_config_uses_bundled_defaults() -> None:
     config = load_config()
     assert config["characters"]["bull"]["voice_id"] == "longfeifei_v3"
     assert config["characters"]["bear"]["voice_id"] == "longtian_v3"
+    assert "forbidden_words" in config["compliance"]
+    assert config["tts"]["model"] == "cosyvoice-v3-flash"
 
 
 def test_pipeline_runs_e2e(tmp_path: Path) -> None:
@@ -86,10 +88,9 @@ def test_pipeline_runs_e2e(tmp_path: Path) -> None:
     pipeline.dialogue_gen.generate = MagicMock(return_value=FAKE_SCRIPT)
     pipeline.compliance.review = MagicMock(return_value=FAKE_SCRIPT)
     pipeline.tts.synthesize = MagicMock(return_value=FAKE_AUDIO)
-    pipeline.tts.write_srt = MagicMock(return_value=tmp_path / "out" / "test.srt")
     pipeline.builder.build = MagicMock(return_value={"index_html": "ok"})
 
-    result = pipeline.run("000001", stock_name="平安银行")
+    result = pipeline.run("000001", stock_name="平安银行", render=False)
 
     pipeline.stock_client.get_stock_data.assert_called_once_with("000001")
     pipeline.dialogue_gen.generate.assert_called_once()
@@ -107,12 +108,58 @@ def test_pipeline_stores_result_json(tmp_path: Path) -> None:
     pipeline.dialogue_gen.generate = MagicMock(return_value=FAKE_SCRIPT)
     pipeline.compliance.review = MagicMock(return_value=FAKE_SCRIPT)
     pipeline.tts.synthesize = MagicMock(return_value=FAKE_AUDIO)
-    pipeline.tts.write_srt = MagicMock(return_value=tmp_path / "out2" / "x.srt")
     pipeline.builder.build = MagicMock(return_value={})
 
-    pipeline.run("000001")
+    pipeline.run("000001", render=False)
 
     results = list((tmp_path / "out2").glob("*.json"))
     assert len(results) == 1
     data = json.loads(results[0].read_text(encoding="utf-8"))
     assert data["stock_code"] == "000001"
+
+
+def test_pipeline_tts_failure_falls_back_to_silent_subtitles(tmp_path: Path) -> None:
+    pipeline = Pipeline({"output": {"dir": str(tmp_path / "out")}}, sleep=lambda _: None)
+    pipeline.stock_client.get_stock_data = MagicMock(return_value=FAKE_STOCK_DATA)
+    pipeline.dialogue_gen.generate = MagicMock(return_value=FAKE_SCRIPT)
+    pipeline.compliance.review = MagicMock(return_value=FAKE_SCRIPT)
+    pipeline.tts.synthesize = MagicMock(side_effect=RuntimeError("service unavailable"))
+    pipeline.builder.build = MagicMock(return_value={})
+
+    result = pipeline.run("000001", render=False)
+
+    assert pipeline.tts.synthesize.call_count == 3
+    assert result["audio"]["fallback"] == "silent"
+    assert Path(result["srt"]).is_file()
+    pipeline.builder.build.assert_called_once()
+
+
+def test_pipeline_renders_unless_disabled(tmp_path: Path) -> None:
+    pipeline = Pipeline({"output": {"dir": str(tmp_path / "out")}})
+    pipeline.stock_client.get_stock_data = MagicMock(return_value=FAKE_STOCK_DATA)
+    pipeline.dialogue_gen.generate = MagicMock(return_value=FAKE_SCRIPT)
+    pipeline.compliance.review = MagicMock(return_value=FAKE_SCRIPT)
+    pipeline.tts.synthesize = MagicMock(return_value=FAKE_AUDIO)
+    pipeline.builder.build = MagicMock(return_value={})
+    video = tmp_path / "out" / "video.mp4"
+    pipeline.builder.render_mp4 = MagicMock(return_value=video)
+
+    result = pipeline.run("000001")
+
+    pipeline.builder.render_mp4.assert_called_once()
+    assert result["rendered"] is True
+
+
+def test_preview_skips_rendering(tmp_path: Path) -> None:
+    pipeline = Pipeline({"output": {"dir": str(tmp_path / "out")}})
+    pipeline.stock_client.get_stock_data = MagicMock(return_value=FAKE_STOCK_DATA)
+    pipeline.dialogue_gen.generate = MagicMock(return_value=FAKE_SCRIPT)
+    pipeline.compliance.review = MagicMock(return_value=FAKE_SCRIPT)
+    pipeline.tts.synthesize = MagicMock(return_value=FAKE_AUDIO)
+    pipeline.builder.build = MagicMock(return_value={})
+    pipeline.builder.render_mp4 = MagicMock()
+
+    result = pipeline.run("000001", preview=True)
+
+    pipeline.builder.render_mp4.assert_not_called()
+    assert result["preview"] is True

@@ -6,7 +6,7 @@ import argparse
 import sys
 from pathlib import Path
 
-from stocktalk.pipeline import Pipeline, load_config
+from stocktalk.pipeline import Pipeline, PipelineError, load_config
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -26,6 +26,8 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--config", default=None, help="自定义配置文件路径")
     parser.add_argument("--output-dir", default=None, help="输出目录（默认 output/）")
     parser.add_argument("--rounds", type=int, default=None, help="对话轮次（默认 3）")
+    parser.add_argument("--no-render", action="store_true", help="仅生成 HTML 项目，跳过 MP4 渲染")
+    parser.add_argument("--preview", action="store_true", help="仅生成 HTML 预览项目（等同于 --no-render）")
 
     args = parser.parse_args(argv)
 
@@ -38,12 +40,21 @@ def main(argv: list[str] | None = None) -> None:
         config.setdefault("dialogue", {})["rounds"] = args.rounds
 
     pipeline = Pipeline(config)
-    result = pipeline.run(args.stock_code, stock_name=args.name)
+    try:
+        result = pipeline.run(
+            args.stock_code, stock_name=args.name, render=not args.no_render, preview=args.preview,
+        )
+    except PipelineError as exc:
+        parser.exit(1, f"\n生成失败：{exc}\n")
 
     print(f"\n✓ 视频生成完成")
     print(f"  股票: {result['stock_name']} ({result['stock_code']})")
     print(f"  轮次: {len(result['script'].get('rounds', []))}")
     print(f"  输出: {result.get('project_dir', 'output/')}")
+    if result["rendered"]:
+        print(f"  视频: {result['video_path']}")
+    else:
+        print("  MP4 渲染已跳过")
 
 
 if __name__ == "__main__":

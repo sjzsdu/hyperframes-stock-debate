@@ -20,13 +20,21 @@ characters:
     voice_id: longtian_v3
 
 compliance:
-  forbidden:
+  forbidden_words:
     - 保证
     - 必涨
     - 必跌
     - 稳赚
     - 一定赚
   disclaimer: 内容为虚拟人物观点碰撞，不构成投资建议。投资有风险，入市需谨慎。
+
+tts:
+  model: cosyvoice-v3-flash
+  output_format: wav
+  pause_between_segments: 0.25
+
+video:
+  quality: high
 
 output:
   dir: output

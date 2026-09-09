@@ -92,7 +92,8 @@ class HyperFramesBuilder:
         destination.parent.mkdir(parents=True, exist_ok=True)
         if shutil.which("npx") is None:
             raise HyperFramesBuildError("Node.js/npx is required to run HyperFrames CLI")
-        command = ("npx", "hyperframes", "render", str(project_dir), "--output", str(destination), "--quality", "high")
+        quality = str(self.video_config.get("quality", "high"))
+        command = ("npx", "hyperframes", "render", str(project_dir), "--output", str(destination), "--quality", quality)
         try:
             completed = self._runner(command, project_dir)
         except (OSError, subprocess.SubprocessError) as exc:
