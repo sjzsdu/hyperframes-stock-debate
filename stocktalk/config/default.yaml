@@ -3,10 +3,11 @@
 
 dialogue:
   model: qwen3.6-plus
-  rounds: 3
-  max_line_chars: 56
-  max_tokens: 1600
-  temperature: 0.65
+  min_duration_seconds: 120
+  max_duration_seconds: 300
+  max_line_chars: 130
+  max_tokens: 3200
+  temperature: 0.8
   timeout_seconds: 90
 
 characters:

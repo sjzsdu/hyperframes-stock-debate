@@ -88,18 +88,17 @@ class Pipeline:
         """Create subtitle timing for a silent render when TTS is unavailable."""
         segments: list[dict[str, Any]] = []
         cursor = 0.0
-        for round_data in script.get("rounds", []):
-            if not isinstance(round_data, Mapping):
+        for turn in script.get("turns", []):
+            if not isinstance(turn, Mapping):
                 continue
-            for character in ("bull", "bear"):
-                entry = round_data.get(character)
-                line = str(entry.get("line", "") if isinstance(entry, Mapping) else entry or "").strip()
-                if not line:
-                    continue
-                duration = max(2.5, min(9.0, len(line) * 0.23))
-                segments.append({"character": character, "line": line, "start_time": cursor,
-                                 "end_time": cursor + duration, "duration": duration, "audio_path": None})
-                cursor += duration + 0.25
+            character = str(turn.get("speaker", ""))
+            line = str(turn.get("line", "")).strip()
+            if character not in ("bull", "bear") or not line:
+                continue
+            duration = max(2.5, min(9.0, len(line) * 0.23))
+            segments.append({"character": character, "line": line, "start_time": cursor,
+                             "end_time": cursor + duration, "duration": duration, "audio_path": None})
+            cursor += duration + 0.25
         lines = []
         for index, segment in enumerate(segments, 1):
             lines.append(f"{index}\n{TTSAgent._format_srt_time(segment['start_time'])} --> "

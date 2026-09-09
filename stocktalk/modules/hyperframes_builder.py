@@ -131,14 +131,13 @@ class HyperFramesBuilder:
             return sorted(segments, key=lambda item: item["start"])
 
         cursor = 0.0
-        for round_data in script.get("rounds", []) if isinstance(script.get("rounds", []), list) else []:
-            if not isinstance(round_data, Mapping):
-                continue
-            for character in ("bull", "bear"):
-                entry = round_data.get(character)
-                line = str(entry.get("line", "") if isinstance(entry, Mapping) else entry or "").strip()
-                if line:
-                    duration = max(2.5, min(9.0, len(line) * 0.23))
+        turns = script.get("turns", [])
+        if isinstance(turns, list):
+            for turn in turns:
+                if not isinstance(turn, Mapping): continue
+                character, line = str(turn.get("speaker", "")), str(turn.get("line", "")).strip()
+                if character in {"bull", "bear"} and line:
+                    duration = max(2.5, min(30.0, len(line) * 0.23))
                     segments.append({"line": line, "character": character, "start": cursor, "duration": duration, "audio_path": None})
                     cursor += duration + 0.25
         return segments
