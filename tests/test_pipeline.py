@@ -34,11 +34,9 @@ FAKE_SCRIPT: dict[str, Any] = {
     "stock_code": "000001",
     "stock_name": "平安银行",
     "title": "平安银行（000001）观点碰撞",
-    "rounds": [
-        {
-            "bull": {"line": "平安银行净利润增长稳健", "visual_prompt": "财报数据卡片", "character_name": "股市新手"},
-            "bear": {"line": "但不良贷款率仍需关注", "visual_prompt": "风险提示卡片", "character_name": "股市老登"},
-        }
+    "turns": [
+        {"speaker": "bull", "line": "平安银行净利润增长稳健", "beat": "数据表象", "visual_prompt": "财报数据卡片", "character_name": "股市新手"},
+        {"speaker": "bear", "line": "但不良贷款率仍需关注", "beat": "风险追问", "visual_prompt": "风险提示卡片", "character_name": "股市老登"},
     ],
     "disclaimer": "内容为虚拟人物观点碰撞，不构成投资建议。",
 }
@@ -48,6 +46,7 @@ FAKE_AUDIO: dict[str, Any] = {
         {"character": "bull", "line": "平安银行净利润增长稳健", "start": 0.0, "end": 3.0},
         {"character": "bear", "line": "但不良贷款率仍需关注", "start": 3.0, "end": 6.0},
     ],
+    "srt_path": "/tmp/fake_subtitles.srt",
     "total_duration": 6.0,
 }
 
@@ -116,6 +115,7 @@ def test_pipeline_stores_result_json(tmp_path: Path) -> None:
     assert len(results) == 1
     data = json.loads(results[0].read_text(encoding="utf-8"))
     assert data["stock_code"] == "000001"
+    assert data["srt"] == FAKE_AUDIO["srt_path"]
 
 
 def test_pipeline_tts_failure_falls_back_to_silent_subtitles(tmp_path: Path) -> None:

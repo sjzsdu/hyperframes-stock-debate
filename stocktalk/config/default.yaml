@@ -10,6 +10,14 @@ dialogue:
   temperature: 0.8
   timeout_seconds: 90
 
+# tongstock connects to the remote TDX server on every invocation, which
+# typically takes 20-30s.  The timeout must comfortably exceed that so a
+# single stock lookup does not spuriously fail.  Retries are kept low as a
+# failed slow command already costs the full timeout each time.
+stock_data:
+  retries: 0
+  timeout_seconds: 60
+
 characters:
   bull:
     name: 股市新手
@@ -35,6 +43,7 @@ tts:
   pause_between_segments: 0.25
 
 video:
+  output_dir: output
   quality: high
 
 output:
