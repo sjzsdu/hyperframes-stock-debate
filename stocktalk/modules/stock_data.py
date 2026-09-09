@@ -40,6 +40,7 @@ class StockDataConfig:
     retry_delay_seconds: float = 0.35
     timeout_seconds: float = 20.0
     consistency: str = "allow_stale"
+    f10_blocks: tuple[str, ...] = ("公司概况", "经营分析", "财务分析", "股东研究")
 
 
 def normalize_code(code: str | int) -> str:
@@ -53,7 +54,7 @@ def normalize_code(code: str | int) -> str:
 
 
 class StockDataClient:
-    """Fetch quote, financial, indicator and K-line data from tongstock."""
+    """Fetch quote, F10, financial, indicator and K-line data from tongstock."""
 
     def __init__(self, config: StockDataConfig | None = None, runner: Runner | None = None) -> None:
         self.config = config or StockDataConfig()
@@ -62,7 +63,7 @@ class StockDataClient:
     def get_stock_data(self, code: str | int, *, kline_count: int = 60) -> dict[str, Any]:
         """Fetch all available datasets and return one stable video-ready payload.
 
-        A missing optional finance/K-line command does not discard current quote
+        A missing optional F10/finance/K-line command does not discard current quote
         and technical data; its error is recorded in ``unavailable`` so the
         script generator can describe only data that is actually present.
         """
@@ -73,10 +74,15 @@ class StockDataClient:
             "quote": self.get_quote(symbol),
             "technical": self.get_indicators(symbol, count=kline_count),
             "financials": None,
+            "f10": None,
             "kline": [],
             "unavailable": {},
         }
-        for name, operation in (("financials", self.get_financials), ("kline", lambda c: self.get_kline(c, count=kline_count))):
+        for name, operation in (
+            ("f10", self.get_f10),
+            ("financials", self.get_financials),
+            ("kline", lambda c: self.get_kline(c, count=kline_count)),
+        ):
             try:
                 result[name] = operation(symbol)
             except TongstockUnavailableError as exc:
@@ -110,6 +116,31 @@ class StockDataClient:
         """Fetch finance JSON when supported by the installed CLI."""
         symbol = normalize_code(code)
         return self._expect_mapping(self._invoke("finance", "--code", symbol, "--json"))
+
+    def get_f10(self, code: str | int) -> dict[str, Any]:
+        """Fetch the F10 catalogue and configured content blocks.
+
+        F10 formats vary by tongstock release, so JSON blocks are decoded while
+        text blocks are retained verbatim.  Individual blocks fail independently
+        to retain all other company context for the dialogue generator.
+        """
+        symbol = normalize_code(code)
+        directory_raw = self._invoke("company", symbol)
+        directory_payload = self._parse_payload(directory_raw)
+        sections: dict[str, Any] = {}
+        unavailable: dict[str, str] = {}
+        for block in self.config.f10_blocks:
+            try:
+                raw = self._invoke("company-content", symbol, "--block", block, "--length", "10000")
+                parsed = self._parse_payload(raw)
+                sections[block] = parsed if parsed is not None else raw.strip()
+            except (TongstockUnavailableError, TongstockCommandError, StockDataError) as exc:
+                unavailable[block] = str(exc)
+        return {
+            "directory": directory_payload if directory_payload is not None else directory_raw.strip(),
+            "sections": sections,
+            "unavailable_sections": unavailable,
+        }
 
     def get_kline(self, code: str | int, *, count: int = 60) -> list[dict[str, Any]]:
         """Fetch OHLCV bars when supported by the installed CLI."""

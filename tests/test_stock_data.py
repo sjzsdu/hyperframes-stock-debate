@@ -1,6 +1,6 @@
 import unittest
 
-from stocktalk.modules.stock_data import StockDataClient, StockDataConfig, TongstockUnavailableError, normalize_code
+from stocktalk.modules.stock_data import StockDataClient, StockDataConfig, TongstockCommandError, TongstockUnavailableError, normalize_code
 
 
 class StockDataClientTests(unittest.TestCase):
@@ -21,7 +21,7 @@ class StockDataClientTests(unittest.TestCase):
 
     def test_unsupported_finance_is_reported_without_losing_other_data(self):
         def runner(argv, timeout):
-            if argv[1] in {"finance", "kline"}:
+            if argv[1] in {"finance", "kline", "company"}:
                 raise TongstockUnavailableError("tongstock does not support command")
             if argv[1] == "quote":
                 return "{\"code\": \"600519\", \"price\": 100}"
@@ -31,6 +31,23 @@ class StockDataClientTests(unittest.TestCase):
         self.assertEqual(data["quote"]["price"], 100.0)
         self.assertEqual(data["technical"]["summary"]["trend"], "bullish")
         self.assertIn("financials", data["unavailable"])
+        self.assertIn("f10", data["unavailable"])
+
+    def test_f10_keeps_directory_and_each_block_separately(self):
+        def runner(argv, timeout):
+            if argv[1] == "company":
+                return 'log\n{"files": ["gsgk.txt"]}'
+            if argv[1] == "company-content" and "公司概况" in argv:
+                return "贵州茅台公司概况"
+            if argv[1] == "company-content":
+                raise TongstockCommandError("section unavailable")
+            raise AssertionError(argv)
+
+        client = StockDataClient(StockDataConfig(retries=0), runner=runner)
+        f10 = client.get_f10("600519")
+        self.assertEqual(f10["directory"], {"files": ["gsgk.txt"]})
+        self.assertEqual(f10["sections"]["公司概况"], "贵州茅台公司概况")
+        self.assertIn("财务分析", f10["unavailable_sections"])
 
     def test_kline_normalizes_history(self):
         client = StockDataClient(runner=lambda argv, timeout: '{"data": [{"date":"2026-01-01","open":1,"close":2,"ignored":3}]}')
