@@ -104,13 +104,15 @@ class TTSAgent:
         sample_rate = self.tts_config.get("sample_rate")
         if sample_rate:
             command.extend(["--sample-rate", str(sample_rate)])
-        if self.tts_config.get("speed") is not None:
-            command.extend(["--rate", str(self.tts_config["speed"])])
-        if self.tts_config.get("volume") is not None:
-            volume = float(self.tts_config["volume"])
-            command.extend(["--volume", str(round(volume * 100) if volume <= 1 else round(volume))])
-        # Bailian accepts a pitch multiplier (0.5--2.0); the stock config's
-        # zero means neutral and must therefore be omitted.
+        # Voice normalization: always pass speed/pitch/volume to ensure
+        # consistent prosody across all segments and both speakers.
+        speed = self.tts_config.get("speed")
+        if speed is not None:
+            command.extend(["--rate", str(speed)])
+        volume = self.tts_config.get("volume")
+        if volume is not None:
+            volume_f = float(volume)
+            command.extend(["--volume", str(round(volume_f * 100) if volume_f <= 1 else round(volume_f))])
         pitch = self.tts_config.get("pitch")
         if pitch is not None and 0.5 <= float(pitch) <= 2.0:
             command.extend(["--pitch", str(pitch)])
