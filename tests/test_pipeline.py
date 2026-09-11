@@ -33,18 +33,17 @@ FAKE_STOCK_DATA: dict[str, Any] = {
 FAKE_SCRIPT: dict[str, Any] = {
     "stock_code": "000001",
     "stock_name": "平安银行",
-    "title": "平安银行（000001）观点碰撞",
+    "title": "平安银行（000001）：靠息差吃饭的生意",
     "turns": [
-        {"speaker": "bull", "line": "平安银行净利润增长稳健", "beat": "数据表象", "visual_prompt": "财报数据卡片", "character_name": "股市新手"},
-        {"speaker": "bear", "line": "但不良贷款率仍需关注", "beat": "风险追问", "visual_prompt": "风险提示卡片", "character_name": "股市老登"},
+        {"speaker": "bull", "line": "平安银行净利润增长稳健", "beat": "生意本质", "character_name": "股市新手"},
+        {"speaker": "bear", "line": "但不良贷款率仍需关注", "beat": "风险追问", "character_name": "股市老登"},
     ],
-    "disclaimer": "内容为虚拟人物观点碰撞，不构成投资建议。",
 }
 
 FAKE_AUDIO: dict[str, Any] = {
     "segments": [
-        {"character": "bull", "line": "平安银行净利润增长稳健", "start": 0.0, "end": 3.0},
-        {"character": "bear", "line": "但不良贷款率仍需关注", "start": 3.0, "end": 6.0},
+        {"character": "bull", "line": "平安银行净利润增长稳健", "start_time": 0.0, "end_time": 3.0, "duration": 3.0},
+        {"character": "bear", "line": "但不良贷款率仍需关注", "start_time": 3.0, "end_time": 6.0, "duration": 3.0},
     ],
     "srt_path": "/tmp/fake_subtitles.srt",
     "total_duration": 6.0,

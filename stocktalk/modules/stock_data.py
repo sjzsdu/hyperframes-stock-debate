@@ -65,7 +65,9 @@ class StockDataClient:
 
         A missing optional F10/finance/K-line command does not discard current quote
         and technical data; its error is recorded in ``unavailable`` so the
-        script generator can describe only data that is actually present.
+        script generator can describe only data that is actually present.  When
+        the K-line endpoint is unavailable, a price history is derived from the
+        per-day indicator history so charts stay data-driven instead of empty.
         """
         symbol = normalize_code(code)
         result: dict[str, Any] = {
@@ -85,9 +87,53 @@ class StockDataClient:
         ):
             try:
                 result[name] = operation(symbol)
-            except TongstockUnavailableError as exc:
+            except (TongstockUnavailableError, TongstockCommandError, StockDataError) as exc:
                 result["unavailable"][name] = str(exc)
+        if not result["kline"]:
+            result["kline"] = self._history_to_bars(result["technical"])
+        self._enrich_quote(result["quote"], result["technical"])
         return result
+
+    @staticmethod
+    def _enrich_quote(quote: dict[str, Any], technical: Mapping[str, Any]) -> None:
+        """Fill missing quote fields (change_pct) from the latest indicator day."""
+        if quote.get("change_pct") is not None:
+            return
+        history = technical.get("history") if isinstance(technical.get("history"), list) else []
+        for item in reversed(history):
+            if isinstance(item, Mapping) and isinstance(item.get("price"), Mapping):
+                change_pct = StockDataClient._number(item["price"].get("change_pct"))
+                if change_pct is not None:
+                    quote["change_pct"] = change_pct
+                    return
+
+    @staticmethod
+    def _history_to_bars(technical: Mapping[str, Any]) -> list[dict[str, Any]]:
+        """Derive daily bars (date/close/volume) from the indicator history.
+
+        The per-day indicator payload embeds each day's close price and volume;
+        mapping it onto the bar shape lets the trend and drawdown visuals work
+        even when the dedicated K-line endpoint is unavailable.
+        """
+        history = technical.get("history") if isinstance(technical.get("history"), list) else []
+        bars: list[dict[str, Any]] = []
+        for item in history:
+            if not isinstance(item, Mapping):
+                continue
+            price = item.get("price") if isinstance(item.get("price"), Mapping) else {}
+            close = StockDataClient._number(price.get("current"))
+            if close is None:
+                continue
+            bar: dict[str, Any] = {"date": str(item.get("timestamp") or ""), "close": close}
+            change = StockDataClient._number(price.get("change"))
+            if change is not None:
+                previous = close - change
+                bar.update({"open": previous, "high": max(close, previous), "low": min(close, previous)})
+            volume = StockDataClient._number(item.get("volume"))
+            if volume is not None:
+                bar["volume"] = volume
+            bars.append(bar)
+        return bars
 
     def get_quote(self, code: str | int) -> dict[str, Any]:
         symbol = normalize_code(code)

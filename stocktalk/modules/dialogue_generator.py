@@ -1,4 +1,4 @@
-"""Generate natural, data-grounded stock conversations with Bailian."""
+"""Generate natural, business-focused stock conversations with Bailian."""
 from __future__ import annotations
 
 import json
@@ -66,23 +66,32 @@ class DialogueGenerator:
         bull = self._character("bull", "增长派", "擅长类比、未来叙事和增长逻辑；承认数据边界")
         bear = self._character("bear", "审计派", "擅长数据引用、风险揭示和历史比较；追问叙事")
         return (
-            "你是财经短视频编导。只依据提供的数据写中文虚拟人物对话；不编造数字、新闻或事实，"
-            "不预测涨跌，不给出买卖或仓位建议，不承诺收益。\n"
+            "你是财经短视频编导，为对投资感兴趣的普通观众写一段两人聊公司的中文对话。只依据提供的数据发言；"
+            "不编造数字、新闻或事实，不预测涨跌，不给出买卖或仓位建议，不承诺收益。\n"
             f"看多角色：{bull['name']}，人设：{bull['persona']}。\n看空角色：{bear['name']}，人设：{bear['persona']}。\n"
-            "让两人像真人聊天：允许追问、打断（……或破折号）、短暂停顿、跑题后拉回、惊讶/认同/质疑，及被说服后修正观点。"
-            "按话题递进：数据表象→商业/技术/心理/经济规律→不确定性、概率或反脆弱；自然融合至少三种视角，数据存在时引用具体数字。"
+            "\n内容要求（重要）：\n"
+            "1. 以“讲懂这家公司”为主线：公司的主业是什么、靠什么赚钱、产品或服务面对什么样的客户和需求，"
+            "在所处行业里处于什么位置、竞争格局如何、行业的天花板与政策环境怎样。\n"
+            "2. 财务与行情数据只用来佐证业务判断：把营收、利润、毛利率、ROE、价格和成交等数字翻译成生意层面的含义"
+            "（例如意味着什么生意变化），不要罗列指标，不要停留在K线、MACD等技术信号本身。\n"
+            "3. 聊听众关心的实际问题：这家公司凭什么在行业里站稳、增长从哪里来、钱从哪里赚、和同行比强在哪、"
+            "风险藏在哪个环节。\n"
+            "\n风格要求：像两个懂行的人聊天，允许追问、打断（……或破折号）、短暂停顿、跑题后拉回、惊讶/认同/质疑，"
+            "及被说服后修正观点。按话题递进：这门生意是什么→行业里的位置→钱怎么赚、财务是否印证→风险与不确定性。"
+            "数据存在时引用具体数字；数据缺失就坦诚说缺，不硬编。\n"
             "必须只输出 JSON，不要 Markdown。"
         )
 
     def _user_prompt(self, payload: Mapping[str, Any]) -> str:
-        schema = {"title": "股票名（代码）：增长叙事遇上风险定价", "turns": [
-            {"speaker": "bull", "line": "30 到 150 字的自然发言；允许极短打断或停顿", "beat": "数据表象",
-             "visual_prompt": "具体镜头、图表/数据叠加、人物情绪和转场"}],
-            "disclaimer": "内容为虚拟人物观点碰撞，不构成投资建议。"}
+        schema = {"title": "股票名（代码）：一句话点出这门生意或行业看点", "turns": [
+            {"speaker": "bull", "line": "30 到 150 字的自然发言；允许极短打断或停顿",
+             "beat": "生意本质"}],
+            }
         return (
             f"生成约 {self.config.min_duration_seconds // 60}-{self.config.max_duration_seconds // 60} 分钟的自然对话流，"
             f"常规发言 30-{self.config.max_line_chars} 个中文字符；不要编号、不要 Round、不要强制一来一回。"
-            "每个 turn 必须含可直接用于视频生成的具体 visual_prompt。输出结构必须匹配：\n"
+            "至少一半的篇幅围绕公司业务和行业本身（生意模式、行业格局、竞争与需求），技术信号最多作为一句带过的佐证。"
+            "输出结构必须匹配：\n"
             f"{json.dumps(schema, ensure_ascii=False)}\n股票数据：\n{json.dumps(payload, ensure_ascii=False, separators=(',', ':'))}"
         )
 
@@ -103,12 +112,10 @@ class DialogueGenerator:
             if not line:
                 raise DialogueGenerationError(f"turn {index} line is empty")
             turns.append({"speaker": speaker, "line": line, "beat": self._clean_beat(entry.get("beat")),
-                          "visual_prompt": self._clean_visual(entry.get("visual_prompt"), speaker, line),
                           "character_name": self._character(speaker, speaker, "")["name"]})
         quote = stock_data.get("quote") if isinstance(stock_data.get("quote"), Mapping) else {}
         code, name = str(stock_data.get("code") or quote.get("code") or ""), str(quote.get("name") or stock_data.get("code") or "股票")
-        return {"stock_code": code, "stock_name": name, "title": self._clean_title(response.get("title"), name, code),
-                "turns": turns, "disclaimer": "内容为虚拟人物观点碰撞，不构成投资建议。"}
+        return {"stock_code": code, "stock_name": name, "title": self._clean_title(response.get("title"), name, code), "turns": turns}
 
     def _clean_line(self, value: Any) -> str:
         line = re.sub(r"\s+", "", str(value or ""))
@@ -119,15 +126,9 @@ class DialogueGenerator:
         return re.sub(r"\s+", " ", str(value or "自然推进")).strip()[:40] or "自然推进"
 
     @staticmethod
-    def _clean_visual(value: Any, speaker: str, line: str) -> str:
-        text = re.sub(r"\s+", " ", str(value or "")).strip()
-        role = "绿色增长派人物特写" if speaker == "bull" else "红色审计派人物特写"
-        return text[:160] or f"{role}；字幕高亮“{line[:24]}”；叠加相关数据卡片，镜头缓慢推进。"
-
-    @staticmethod
     def _clean_title(value: Any, name: str, code: str) -> str:
         title = re.sub(r"\s+", " ", str(value or "")).strip()
-        return title[:60] or f"{name}（{code}）增长叙事遇上风险定价"
+        return title[:60] or f"{name}（{code}）这门生意怎么看"
 
     def _character(self, role: str, default_name: str, default_persona: str) -> dict[str, str]:
         value = self.characters.get(role, {})

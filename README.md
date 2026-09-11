@@ -102,7 +102,6 @@ compliance:
     - 保证
     - 必涨
     - 必跌
-  disclaimer: 内容为虚拟人物观点碰撞，不构成投资建议。
 
 output:
   dir: output
