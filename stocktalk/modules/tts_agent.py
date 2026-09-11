@@ -8,6 +8,7 @@ audio, rather than estimated from the number of characters in a line.
 from __future__ import annotations
 
 import math
+import re
 import shutil
 import struct
 import subprocess
@@ -106,16 +107,26 @@ class TTSAgent:
             command.extend(["--sample-rate", str(sample_rate)])
         # Voice normalization: always pass speed/pitch/volume to ensure
         # consistent prosody across all segments and both speakers.
-        speed = self.tts_config.get("speed")
+        speed = character_config.get("speed", self.tts_config.get("speed"))
         if speed is not None:
             command.extend(["--rate", str(speed)])
         volume = self.tts_config.get("volume")
         if volume is not None:
             volume_f = float(volume)
             command.extend(["--volume", str(round(volume_f * 100) if volume_f <= 1 else round(volume_f))])
-        pitch = self.tts_config.get("pitch")
+        pitch = character_config.get("pitch", self.tts_config.get("pitch"))
         if pitch is not None and 0.5 <= float(pitch) <= 2.0:
             command.extend(["--pitch", str(pitch)])
+        # Some cloned/designed voices support natural-language instructions.
+        # CosyVoice v3 system voices currently reject this parameter (428), so
+        # voice_direction remains useful documentation unless explicitly opted in.
+        instruction = character_config.get("instruction") if character_config.get("supports_instruction") else None
+        if instruction:
+            command.extend(["--instruction", str(instruction)])
+        seed = self.tts_config.get("seed")
+        if seed is not None:
+            command.extend(["--seed", str(seed)])
+        command.extend(["--language", "zh"])
 
         try:
             completed = subprocess.run(command, capture_output=True, text=True, timeout=120, check=False)
@@ -125,6 +136,9 @@ class TTSAgent:
             detail = completed.stderr.strip() or completed.stdout.strip() or "no audio file was created"
             raise TTSSynthesisError(f"Bailian TTS failed for {character}: {detail}")
 
+        if self.tts_config.get("trim_silence", True):
+            self._trim_and_fade(output_path)
+
         return {
             "character": character,
             "character_name": character_config.get("name", character),
@@ -132,6 +146,50 @@ class TTSAgent:
             "audio_path": str(output_path),
             "duration": self._audio_duration(output_path),
         }
+
+    def _trim_and_fade(self, path: Path) -> None:
+        """Trim only edge silence and add tiny fades so adjacent turns do not click.
+
+        TTS providers leave a variable 0.1–0.6 second tail.  A fixed timeline gap
+        therefore still sounds irregular.  Detecting the real speech bounds keeps
+        internal rhetorical pauses intact while making every hand-off consistent.
+        """
+        ffmpeg = shutil.which("ffmpeg")
+        if not ffmpeg or path.suffix.lower() != ".wav":
+            return
+        duration = self._audio_duration(path)
+        probe = subprocess.run(
+            [ffmpeg, "-hide_banner", "-i", str(path), "-af", "silencedetect=noise=-48dB:d=0.04", "-f", "null", "-"],
+            capture_output=True, text=True, timeout=60, check=False,
+        )
+        events = probe.stderr
+        leading = 0.0
+        first_start = re.search(r"silence_start:\s*0(?:\.0+)?\b", events)
+        if first_start:
+            match = re.search(r"silence_end:\s*([0-9.]+)", events[first_start.start():])
+            if match:
+                leading = float(match.group(1))
+        trailing = duration
+        starts = [float(value) for value in re.findall(r"silence_start:\s*([0-9.]+)", events)]
+        if starts and "silence_end:" not in events[events.rfind("silence_start:"):]:
+            trailing = starts[-1]
+        keep_lead = max(0.0, float(self.tts_config.get("leading_silence", 0.025)))
+        keep_tail = max(0.0, float(self.tts_config.get("trailing_silence", 0.06)))
+        start = max(0.0, leading - keep_lead)
+        end = min(duration, trailing + keep_tail)
+        if end - start < 0.2 or (start < 0.01 and duration - end < 0.02):
+            return
+        fade = min(max(0.0, float(self.tts_config.get("fade_seconds", 0.025))), (end - start) / 4)
+        temp = path.with_name(f".{path.stem}.polished{path.suffix}")
+        filters = f"afade=t=in:st=0:d={fade:.3f},afade=t=out:st={max(0, end-start-fade):.3f}:d={fade:.3f}"
+        polished = subprocess.run(
+            [ffmpeg, "-hide_banner", "-loglevel", "error", "-y", "-ss", f"{start:.4f}", "-t", f"{end-start:.4f}", "-i", str(path), "-af", filters, str(temp)],
+            capture_output=True, text=True, timeout=60, check=False,
+        )
+        if polished.returncode == 0 and temp.is_file() and temp.stat().st_size:
+            temp.replace(path)
+        elif temp.exists():
+            temp.unlink()
 
     def _audio_duration(self, path: Path) -> float:
         if path.suffix.lower() == ".wav":

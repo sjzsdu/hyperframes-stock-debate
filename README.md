@@ -90,12 +90,16 @@ dialogue:
 characters:
   bull:
     name: 股市新手
-    persona: 年轻乐观，容易被利好消息带动
-    voice_id: zh-CN-YunxiNeural
+    persona: 年轻乐观的女生，喜欢从生意角度理解公司
+    voice_id: longxiaochun_v3  # 知性积极女
+    speed: 1.07
+    voice_direction: 年轻、好奇、自然聊天的女生语气
   bear:
     name: 股市老登
     persona: 老练理性，擅长从风险角度分析
-    voice_id: zh-CN-YunyangNeural
+    voice_id: longtian_v3      # 磁性理智男
+    speed: 0.94
+    voice_direction: 成熟、低沉、克制的男性语气
 
 compliance:
   forbidden:

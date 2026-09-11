@@ -21,12 +21,20 @@ stock_data:
 characters:
   bull:
     name: 股市新手
-    persona: 年轻乐观，喜欢从生意角度聊公司——这家公司靠什么赚钱、增长从哪来；只讨论已给出的数据
-    voice_id: longcheng_v3
+    persona: 年轻乐观的女生，喜欢从生意角度聊公司——这家公司靠什么赚钱、增长从哪来；只讨论已给出的数据
+    # 龙小淳：知性积极女。比甜美营销腔更适合财经新手，又保留年轻感。
+    voice_id: longxiaochun_v3
+    speed: 1.07
+    pitch: 1.03
+    voice_direction: 年轻、好奇、聪明又有一点兴奋的女生语气，自然聊天，不要播音腔；关键数字稍微重读，句尾利落。
   bear:
     name: 股市老登
     persona: 老练理性，擅长从行业格局和经营风险角度提问，追问生意的短板与数据边界
-    voice_id: longyingjing_v3
+    # 龙天：磁性理智男。低沉但不夸张，符合见过周期的老股民。
+    voice_id: longtian_v3
+    speed: 0.94
+    pitch: 0.92
+    voice_direction: 成熟、低沉、克制的男性语气，像见过几轮牛熊的老股民在聊天；带一点审慎质疑，停顿自然，不要新闻播报腔。
 
 compliance:
   forbidden_words:
@@ -39,10 +47,16 @@ compliance:
 tts:
   model: cosyvoice-v3-flash
   output_format: wav
-  pause_between_segments: 0.25
+  # 音频会保留约 60ms 尾音，再留 120ms 对话换气，避免机械空档。
+  pause_between_segments: 0.12
   speed: 1.0
   pitch: 1.0
   volume: 1.0
+  seed: 20260911
+  trim_silence: true
+  leading_silence: 0.025
+  trailing_silence: 0.06
+  fade_seconds: 0.025
 
 video:
   output_dir: output

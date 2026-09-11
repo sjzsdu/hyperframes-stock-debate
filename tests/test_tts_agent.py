@@ -28,7 +28,9 @@ def _write_wav(path: Path, sample_rate: int = 24000, channels: int = 1, bits: in
 def test_synthesis_passes_configured_voice_to_bailian(tmp_path: Path, monkeypatch) -> None:
     config = {
         "output": {"dir": str(tmp_path)},
-        "characters": {"bull": {"name": "多头", "voice_id": "longfeifei_v3"}},
+        "characters": {"bull": {"name": "多头", "voice_id": "longfeifei_v3", "speed": 1.08,
+                                  "pitch": 1.04, "instruction": "年轻自然", "supports_instruction": True}},
+        "tts": {"trim_silence": False, "seed": 7},
     }
     agent = TTSAgent(config)
     output = tmp_path / "line.wav"
@@ -45,6 +47,10 @@ def test_synthesis_passes_configured_voice_to_bailian(tmp_path: Path, monkeypatc
     result = agent._synthesize_line("测试语音", "bull", output)
 
     assert command[command.index("--voice") + 1] == "longfeifei_v3"
+    assert command[command.index("--rate") + 1] == "1.08"
+    assert command[command.index("--pitch") + 1] == "1.04"
+    assert command[command.index("--instruction") + 1] == "年轻自然"
+    assert command[command.index("--seed") + 1] == "7"
     assert result["duration"] == 1.25
 
 

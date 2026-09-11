@@ -62,8 +62,9 @@ class HyperFramesBuilder:
         composition = directory / "index.html"; composition.write_text(self._html(stock_data, segments, duration), encoding="utf-8")
         (directory / "index.motion.json").write_text(json.dumps({"duration": duration, "assertions": [
             {"kind": "appearsBy", "selector": "#headline", "bySec": .8},
-            {"kind": "staysInFrame", "selector": "#finance-card"},
-            {"kind": "staysInFrame", "selector": "#kline-chart"},
+            {"kind": "staysInFrame", "selector": "#market-stage"},
+            {"kind": "staysInFrame", "selector": "#bull-host"},
+            {"kind": "staysInFrame", "selector": "#bear-host"},
             {"kind": "appearsBy", "selector": "#speech-1", "bySec": 1.2},
         ]}, ensure_ascii=False, indent=2), encoding="utf-8")
         return HyperFramesProject(directory, composition, duration)
@@ -126,7 +127,8 @@ class HyperFramesBuilder:
                     topic, topic_title = self._visual_topic(line)
                     segments.append({"line": line, "character": str(item.get("character", "bull")), "start": max(0.0, start), "duration": duration, "audio_path": item.get("audio_path"), "topic": topic, "topic_title": topic_title})
         if segments:
-            return sorted(segments, key=lambda item: item["start"])
+            segments = sorted(segments, key=lambda item: item["start"])
+            return self._decorate_segments(segments)
 
         cursor = 0.0
         turns = script.get("turns", [])
@@ -140,6 +142,35 @@ class HyperFramesBuilder:
                     duration = max(2.5, min(30.0, len(line) * 0.23))
                     segments.append({"line": line, "character": character, "start": cursor, "duration": duration, "audio_path": None, "topic": topic, "topic_title": topic_title})
                     cursor += duration + 0.25
+        return self._decorate_segments(segments)
+
+    def _decorate_segments(self, segments: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Add presentation windows and editable mix metadata to dialogue turns."""
+        fx_chain = json.dumps({"version": 1, "nodes": [
+            {"type": "highpass", "id": "n1", "label": "Remove Rumble", "params": {"frequency": 78, "q": .707, "poles": "2"}},
+            {"type": "peaking", "id": "n2", "label": "Add Clarity", "params": {"frequency": 3000, "gain": 1.6, "q": 1}},
+            {"type": "compressor", "id": "n3", "label": "Even Out Loudness", "params": {"threshold": -22, "ratio": 3, "attack": 18, "release": 220, "knee": 2.8, "makeup": 1.5, "mix": 1}},
+            {"type": "limiter", "id": "n4", "label": "Peak Ceiling", "params": {"limit": -1, "attack": 5, "release": 70, "level_out": 0}},
+        ]}, ensure_ascii=False, separators=(",", ":"))
+        for index, segment in enumerate(segments):
+            start = float(segment["start"])
+            duration = float(segment["duration"])
+            # Visual cards overlap the conversational breath so hand-offs dissolve
+            # rather than cutting to an empty stage. Audio itself never overlaps.
+            visual_start = max(0.0, start - (.08 if index else 0.0))
+            visual_end = start + duration + (.1 if index < len(segments) - 1 else 0.0)
+            fade = min(.035, duration / 4)
+            automation = {"version": 1, "lanes": [{"target": "volume", "points": [
+                {"t": 0, "v": 0}, {"t": fade, "v": 1},
+                {"t": max(fade, duration - fade), "v": 1}, {"t": duration, "v": 0},
+            ]}]}
+            segment.update({
+                "character_name": str((self.characters.get(segment.get("character"), {}) or {}).get("name") or segment.get("character")),
+                "visual_start": round(visual_start, 3),
+                "visual_duration": round(max(.1, visual_end - visual_start), 3),
+                "fx_chain": fx_chain,
+                "audio_automation": json.dumps(automation, separators=(",", ":")),
+            })
         return segments
 
     @staticmethod
@@ -178,6 +209,8 @@ class HyperFramesBuilder:
             financials=self._financials(quote, financials, technical),
             chart=self._candles(history),
             segments=rendered_segments,
+            bull_name=str((self.characters.get("bull", {}) or {}).get("name") or "股市新手"),
+            bear_name=str((self.characters.get("bear", {}) or {}).get("name") or "股市老登"),
         )
 
     @staticmethod
