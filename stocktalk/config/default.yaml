@@ -3,12 +3,17 @@
 
 dialogue:
   model: qwen3.6-plus
-  min_duration_seconds: 120
-  max_duration_seconds: 300
+  # 抖音风格短视频节奏：3-8 分钟正片，内容更充分展开。
+  min_duration_seconds: 180
+  max_duration_seconds: 480
   max_line_chars: 130
-  max_tokens: 3200
+  # 8 分钟对话正文约 2000-3000 字，JSON 开销另计。
+  max_tokens: 6000
   temperature: 0.8
-  timeout_seconds: 90
+  # Measured end-to-end `bl text chat` latency for a full 2-5 min script is
+  # ~90-100s; a 3-8 min script runs longer, and retries each cost the full
+  # timeout, so keep a wide margin.
+  timeout_seconds: 360
 
 # tongstock connects to the remote TDX server on every invocation, which
 # typically takes 20-30s.  The timeout must comfortably exceed that so a
@@ -17,6 +22,10 @@ dialogue:
 stock_data:
   retries: 0
   timeout_seconds: 60
+  # 个股资讯（tongstock news query，东方财富/财联社真实数据）：作为对话创作素材
+  # 与「近期资讯」画面的数据源。news_limit 为拉取条数；news_days 为 0 表示不限时间。
+  news_limit: 12
+  news_days: 0
 
 characters:
   bull:
@@ -30,11 +39,12 @@ characters:
   bear:
     name: 股市老登
     persona: 老练理性，擅长从行业格局和经营风险角度提问，追问生意的短板与数据边界
-    # 龙天：磁性理智男。低沉但不夸张，符合见过周期的老股民。
-    voice_id: longtian_v3
-    speed: 0.94
-    pitch: 0.92
-    voice_direction: 成熟、低沉、克制的男性语气，像见过几轮牛熊的老股民在聊天；带一点审慎质疑，停顿自然，不要新闻播报腔。
+    # 龙橙（智慧青年男）：抖音口播最常用的男声之一，年轻清晰、有精神，
+    # 是财经/知识类爆款短视频的主流男声；替代之前低沉的“老股民腔”龙天。
+    voice_id: longcheng_v3
+    speed: 1.06
+    pitch: 1.0
+    voice_direction: 年轻、清晰、有精神的男声，像抖音财经口播达人在讲解，节奏明快，重点词自然重读，不要播音腔。
 
 compliance:
   forbidden_words:
@@ -61,6 +71,9 @@ tts:
 video:
   output_dir: output
   quality: high
+  # MP4 渲染实测常超过 15 分钟（3-8 分钟正片 + 高质量逐帧渲染）。
+  # npx 还可能先下载 hyperframes 包，首次更慢；超时大幅放宽并可在用户配置覆盖。
+  render_timeout_seconds: 3600
 
 output:
   dir: output

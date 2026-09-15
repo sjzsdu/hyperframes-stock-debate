@@ -6,3 +6,4 @@ __pycache__/
 
 # Pipeline output artifacts (video, audio, subtitles, HyperFrames projects)
 output/
+.freebuff

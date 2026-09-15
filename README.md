@@ -58,7 +58,7 @@ stocktalk <股票代码> [选项]
   --name NAME           股票名称（可选，会自动获取）
   --config PATH         自定义配置文件路径
   --output-dir DIR      输出目录（默认 output/）
-  --duration-minutes N  对话目标时长（默认 2-5 分钟）
+  --duration-minutes N  对话目标时长（默认 2-8 分钟，按素材量自然伸缩）
   --help                显示帮助信息
 ```
 
@@ -82,8 +82,8 @@ stocktalk 000001 --name 平安银行 --output-dir ./videos --duration-minutes 3
 ```yaml
 dialogue:
   model: qwen3.6-plus      # AI 模型
-  min_duration_seconds: 120 # 最短目标时长
-  max_duration_seconds: 300 # 最长目标时长
+  min_duration_seconds: 180 # 最短目标时长
+  max_duration_seconds: 480 # 最长目标时长
   max_line_chars: 130       # 每句最大字数（30-150）
   temperature: 0.8          # 创造性
 
@@ -149,9 +149,10 @@ output/
 ## 模块独立使用
 
 ```python
-# 单独获取股票数据
+# 单独获取股票数据（含个股新闻/研报资讯，来自 tongstock news query）
 from stocktalk.modules.stock_data import StockDataClient
 data = StockDataClient().get_stock_data('600519')
+print(data['news']['items'][:3])  # 真实资讯标题，作为对话创作素材与“近期资讯”画面
 
 # 单独生成对话
 from stocktalk.modules.dialogue_generator import DialogueGenerator

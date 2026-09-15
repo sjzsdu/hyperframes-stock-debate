@@ -3,56 +3,56 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=1920,height=1080">
-  <title>{{ name }} · 股会说</title>
+  <title>{{ name }}</title>
   <link rel="stylesheet" href="stock-debate.css">
   <script src="gsap.min.js"></script>
 </head>
 <body>
 <main id="root" data-composition-id="stock-debate" data-start="0" data-width="1920" data-height="1080" data-duration="{{ duration }}" data-fps="30">
-  <div id="background-grid" class="grid clip" data-start="0" data-duration="{{ duration }}" data-track-index="0" data-layout-ignore></div>
+{% set outro_start = duration - 0.45 %}
   <div id="ambient-orb-a" class="ambient-orb orb-a clip" data-start="0" data-duration="{{ duration }}" data-track-index="1" data-layout-ignore></div>
   <div id="ambient-orb-b" class="ambient-orb orb-b clip" data-start="0" data-duration="{{ duration }}" data-track-index="2" data-layout-ignore></div>
 
-  <header id="headline" class="clip" data-start="0" data-duration="{{ duration }}" data-track-index="3">
-    <div class="brand-kicker"><i></i> 股会说 · 两代股民聊公司</div>
-    <div class="title-row"><h1>{{ name }} <em>{{ code }}</em></h1><div class="live-pill"><b></b> DATA LIVE</div></div>
+  <header id="headline" class="clip" data-start="0" data-duration="{{ outro_start }}" data-track-index="3">
+    <div class="title-row"><h1>{{ name }} <em>{{ code }}</em></h1></div>
     <p>{{ price_line }}</p>
   </header>
 
-  <section id="market-stage" class="clip" data-start="0.35" data-duration="{{ duration - 0.35 if duration > 0.35 else 0.1 }}" data-track-index="4">
+  <section id="market-stage" class="clip" data-start="0.35" data-duration="{{ outro_start - 0.35 if outro_start > 0.35 else 0.1 }}" data-track-index="4">
     <section id="kline-chart" class="panel chart">
-      <div class="panel-heading"><h2>价格走势</h2><span>近 60 个交易日</span></div>
       <div class="chart-camera">{{ chart|safe }}</div>
-      <div class="scan-beam" data-layout-ignore></div>
     </section>
     <section id="finance-card" class="panel finance">
-      <div class="panel-heading"><h2>行情快照</h2><span>关键数据</span></div>
       <div class="metric-list">{% for metric in financials %}<div class="metric"><span>{{ metric.label }}</span><strong>{{ metric.value }}</strong></div>{% endfor %}</div>
     </section>
   </section>
 
-  <aside id="bull-host" class="character-host bull-host clip" data-start="0" data-duration="{{ duration }}" data-track-index="5">
-    <div class="avatar"><span class="avatar-hair"></span><span class="avatar-face" data-layout-allow-occlusion>新</span><i class="voice-ring"></i></div>
-    <div class="identity"><small>THE ROOKIE</small><strong>{{ bull_name }}</strong><span>年轻 · 好奇 · 看生意</span></div>
-  </aside>
-  <aside id="bear-host" class="character-host bear-host clip" data-start="0" data-duration="{{ duration }}" data-track-index="6">
-    <div class="identity"><small>THE VETERAN</small><strong>{{ bear_name }}</strong><span>老练 · 克制 · 问风险</span></div>
-    <div class="avatar"><span class="avatar-hair"></span><span class="avatar-face" data-layout-allow-occlusion>老</span><i class="voice-ring"></i></div>
-  </aside>
-
-  <div id="debate-rail" class="debate-rail clip" data-start="0" data-duration="{{ duration }}" data-track-index="7" data-layout-ignore><span></span></div>
-
   {% for segment in segments %}
-  <section id="speech-{{ loop.index }}" class="speech {{ segment.character }} panel clip" data-start="{{ segment.visual_start }}" data-duration="{{ segment.visual_duration }}" data-track-index="{{ 50 + loop.index }}" data-layout-allow-caption-zone>
-    <div class="speech-meta"><span class="speaker-dot"></span><strong>{{ segment.character_name }}</strong><small>正在讨论 · {{ segment.topic_title }}</small><div class="equalizer" data-layout-ignore><i></i><i></i><i></i><i></i><i></i></div></div>
-    <p class="type-text">{{ segment.line }}</p>
-    <div class="speech-progress" data-layout-ignore><i></i></div>
-  </section>
-  <section id="visual-{{ loop.index }}" class="visual-card {{ segment.character }} panel clip {{ segment.topic }}" data-start="{{ segment.visual_start }}" data-duration="{{ segment.visual_duration }}" data-track-index="{{ 80 + loop.index }}" data-topic="{{ segment.topic }}">
-    <div class="topic-label"><span>{{ "%02d"|format(loop.index) }}</span><div><small>TOPIC VISUAL</small><h2>{{ segment.topic_title }}</h2></div></div>
-    <div class="topic-chart">{{ segment.visual|safe }}</div>
+  <section id="slide-{{ loop.index }}" class="slide {{ segment.character }} {{ segment.topic }} clip {{ 'slide-cover' if segment.is_first else '' }}" data-start="{{ segment.visual_start }}" data-duration="{{ segment.visual_duration }}" data-track-index="{{ 50 + loop.index }}" data-topic="{{ segment.topic }}" {% if segment.is_first %}data-cover-slide{% endif %}>
+    <div class="slide-kicker">{{ segment.topic_title }}</div>
+    <div class="slide-keywords">{% for keyword in segment.keywords %}<span>{{ keyword }}</span>{% endfor %}</div>
+    <div class="slide-visual">{{ segment.visual|safe }}</div>
+    <section id="speech-{{ loop.index }}" class="speech panel" data-layout-allow-caption-zone>
+      <p class="type-text">{{ segment.line }}</p>
+      <div class="speech-progress" data-layout-ignore><i></i></div>
+    </section>
   </section>
   {% endfor %}
+
+  {# Natural opening: the intro card rides in over the headline + real chart, then fades into the first slide #}
+  <section id="intro-card" class="intro-card clip" data-start="0" data-duration="2.4" data-track-index="40" data-layout-ignore>
+    <div class="intro-kicker">聊公司</div>
+    <div class="intro-title">{{ name }} <em>{{ code }}</em></div>
+    <div class="intro-svg">{{ intro_svg|safe }}</div>
+  </section>
+
+  {# Natural closing: recap card with the real interval numbers, fading over the last slide #}
+  <section id="outro-card" class="outro-card clip" data-start="{{ outro_start }}" data-duration="0.45" data-track-index="60" data-layout-ignore>
+    <div class="outro-kicker">今天聊到这</div>
+    <div class="outro-title">{{ outro_title }}</div>
+    <div class="outro-svg">{{ outro_svg|safe }}</div>
+    <div class="outro-tip">{{ outro_tip }}</div>
+  </section>
 
   {% for segment in segments if segment.audio_path %}
   <audio id="audio-{{ loop.index }}" src="{{ segment.audio_path }}" data-start="{{ segment.start }}" data-duration="{{ segment.duration }}" data-track-index="{{ 120 + loop.index }}" data-audio-group="dialogue" data-volume="0.94" data-fx-chain="{{ segment.fx_chain|e }}" data-automation="{{ segment.audio_automation|e }}"></audio>

@@ -41,6 +41,8 @@ class StockDataConfig:
     timeout_seconds: float = 20.0
     consistency: str = "allow_stale"
     f10_blocks: tuple[str, ...] = ("公司概况", "经营分析", "财务分析", "股东研究")
+    news_limit: int = 12
+    news_days: int = 0
 
 
 def normalize_code(code: str | int) -> str:
@@ -54,7 +56,7 @@ def normalize_code(code: str | int) -> str:
 
 
 class StockDataClient:
-    """Fetch quote, F10, financial, indicator and K-line data from tongstock."""
+    """Fetch quote, F10, financial, indicator, news and K-line data from tongstock."""
 
     def __init__(self, config: StockDataConfig | None = None, runner: Runner | None = None) -> None:
         self.config = config or StockDataConfig()
@@ -77,6 +79,7 @@ class StockDataClient:
             "technical": self.get_indicators(symbol, count=kline_count),
             "financials": None,
             "f10": None,
+            "news": None,
             "kline": [],
             "unavailable": {},
         }
@@ -84,6 +87,7 @@ class StockDataClient:
             ("f10", self.get_f10),
             ("financials", self.get_financials),
             ("kline", lambda c: self.get_kline(c, count=kline_count)),
+            ("news", self.get_news),
         ):
             try:
                 result[name] = operation(symbol)
@@ -92,6 +96,8 @@ class StockDataClient:
         if not result["kline"]:
             result["kline"] = self._history_to_bars(result["technical"])
         self._enrich_quote(result["quote"], result["technical"])
+        if not result["quote"].get("name"):
+            result["quote"]["name"] = self._resolve_name(symbol)
         return result
 
     @staticmethod
@@ -109,11 +115,13 @@ class StockDataClient:
 
     @staticmethod
     def _history_to_bars(technical: Mapping[str, Any]) -> list[dict[str, Any]]:
-        """Derive daily bars (date/close/volume) from the indicator history.
+        """Derive close-price bars (date/close/volume) from the indicator history.
 
         The per-day indicator payload embeds each day's close price and volume;
         mapping it onto the bar shape lets the trend and drawdown visuals work
-        even when the dedicated K-line endpoint is unavailable.
+        even when the dedicated K-line endpoint is unavailable.  OHLC fields are
+        deliberately NOT synthesized: charts must never fake candle bodies from
+        anything but genuine K-line rows.
         """
         history = technical.get("history") if isinstance(technical.get("history"), list) else []
         bars: list[dict[str, Any]] = []
@@ -127,8 +135,7 @@ class StockDataClient:
             bar: dict[str, Any] = {"date": str(item.get("timestamp") or ""), "close": close}
             change = StockDataClient._number(price.get("change"))
             if change is not None:
-                previous = close - change
-                bar.update({"open": previous, "high": max(close, previous), "low": min(close, previous)})
+                bar["change"] = change
             volume = StockDataClient._number(item.get("volume"))
             if volume is not None:
                 bar["volume"] = volume
@@ -186,6 +193,40 @@ class StockDataClient:
             "directory": directory_payload if directory_payload is not None else directory_raw.strip(),
             "sections": sections,
             "unavailable_sections": unavailable,
+        }
+
+    def get_news(self, code: str | int) -> dict[str, Any]:
+        """Fetch recent news/research items for one stock when the CLI supports it.
+
+        Items are trimmed to the fields useful as creative material for the
+        dialogue generator; raw payloads vary slightly across tongstock
+        releases, so every field is defensively defaulted.
+        """
+        symbol = normalize_code(code)
+        argv = ["news", "query", symbol, "--limit", str(max(1, self.config.news_limit)), "--json"]
+        if self.config.news_days > 0:
+            argv += ["--days", str(self.config.news_days)]
+        payload = self._expect_mapping(self._invoke(*argv))
+        items = payload.get("items", []) if isinstance(payload, Mapping) else []
+        if not isinstance(items, list):
+            items = []
+        return {
+            "code": symbol,
+            "items": [normalized for item in items if isinstance(item, Mapping)
+                      and (normalized := self._normalize_news(item))["title"]],
+        }
+
+    @staticmethod
+    def _normalize_news(item: Mapping[str, Any]) -> dict[str, Any]:
+        tags = [str(tag) for tag in item.get("tags", []) if tag] if isinstance(item.get("tags"), list) else []
+        return {
+            "title": str(item.get("title") or "").strip(),
+            "summary": str(item.get("summary") or "").strip(),
+            "source": str(item.get("source") or "").strip(),
+            "type": str(item.get("newsType") or "").strip(),
+            "publish_time": str(item.get("publishTime") or "")[:10],
+            "url": str(item.get("url") or "").strip(),
+            "tags": tags,
         }
 
     def get_kline(self, code: str | int, *, count: int = 60) -> list[dict[str, Any]]:
@@ -252,7 +293,29 @@ class StockDataClient:
     @staticmethod
     def _parse_text_quote(raw: str, code: str) -> dict[str, Any]:
         values = {"price": r"最新价:\s*([\d.]+)", "open": r"开盘:\s*([\d.]+)", "high": r"最高:\s*([\d.]+)", "low": r"最低:\s*([\d.]+)", "volume": r"成交量:\s*([\d.]+)", "amount": r"成交额:\s*([\d.]+)"}
-        return {"code": code, "name": "", **{key: StockDataClient._number(match.group(1)) if (match := re.search(pattern, raw)) else None for key, pattern in values.items()}, "change_pct": None}
+        # The name (if any) sits on the same line as the code — never match
+        # across the newline into field labels like "最新价:".
+        name_match = re.search(rf"^{re.escape(code)}[ \t]+(\S+)[ \t]*$", raw, re.MULTILINE)
+        name = name_match.group(1) if name_match else ""
+        return {"code": code, "name": name, **{key: StockDataClient._number(match.group(1)) if (match := re.search(pattern, raw)) else None for key, pattern in values.items()}, "change_pct": None}
+
+    def _resolve_name(self, code: str) -> str:
+        """Best-effort company name from the securities list (real data only)."""
+        try:
+            raw = self._invoke("codes", "list", "-e", self._exchange_of(code))
+        except (TongstockUnavailableError, TongstockCommandError, StockDataError):
+            return ""
+        match = re.search(rf"^{re.escape(code)}\s+(\S+)", raw, re.MULTILINE)
+        return match.group(1) if match else ""
+
+    @staticmethod
+    def _exchange_of(code: str) -> str:
+        """Map a securities code to its exchange flag for ``codes list``."""
+        if code.startswith(("6", "9")) or code.endswith((".SH", ".SS")):
+            return "sh"
+        if code.startswith(("4", "8")) or code.endswith((".BJ",)):
+            return "bj"
+        return "sz"
 
     @staticmethod
     def _normalize_bar(row: Mapping[str, Any]) -> dict[str, Any]:

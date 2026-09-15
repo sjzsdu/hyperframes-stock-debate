@@ -60,6 +60,8 @@ class Pipeline:
         self.stock_client = StockDataClient(StockDataConfig(
             retries=self.config.get("stock_data", {}).get("retries", 0),
             timeout_seconds=self.config.get("stock_data", {}).get("timeout_seconds", 60.0),
+            news_limit=int(self.config.get("stock_data", {}).get("news_limit", 12)),
+            news_days=int(self.config.get("stock_data", {}).get("news_days", 0)),
         ))
         self.dialogue_gen = DialogueGenerator(self.config)
         self.compliance = ComplianceAgent(self.config)

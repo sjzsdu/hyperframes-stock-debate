@@ -24,7 +24,7 @@ class DialogueConfig:
     max_line_chars: int = 130
     max_tokens: int = 3200
     temperature: float = 0.8
-    timeout_seconds: float = 90.0
+    timeout_seconds: float = 240.0
 
 
 class DialogueGenerator:
@@ -60,7 +60,7 @@ class DialogueGenerator:
     def _command(self, system: str, message: str) -> list[str]:
         return ["bl", "text", "chat", "--model", self.config.model, "--system", system, "--message", message,
                 "--max-tokens", str(self.config.max_tokens), "--temperature", str(self.config.temperature),
-                "--output", "json", "--non-interactive"]
+                "--output", "json", "--quiet"]
 
     def _system_prompt(self) -> str:
         bull = self._character("bull", "增长派", "擅长类比、未来叙事和增长逻辑；承认数据边界")
@@ -76,6 +76,13 @@ class DialogueGenerator:
             "（例如意味着什么生意变化），不要罗列指标，不要停留在K线、MACD等技术信号本身。\n"
             "3. 聊听众关心的实际问题：这家公司凭什么在行业里站稳、增长从哪里来、钱从哪里赚、和同行比强在哪、"
             "风险藏在哪个环节。\n"
+            "4. 有多少数据聊多少内容：充分利用数据里的财务指标、每股指标、利润/资产负债/现金流构成和历史走势；"
+            "结合最近的行情节奏（涨跌、量能、位置）自然展开，可以引用带日期的具体数字，但只解读不预测。\n"
+            "5. 真实资讯是重要素材：数据里的 news/资讯 是该股票最近的公开新闻、研报和快讯标题，"
+            "挑与生意最相关的 2-4 条自然融进对话（说清日期和信息类型，如\u201c九月初有研报提到……\u201d）；"
+            "只能复述标题和摘要里已有的信息，不得脑补细节、不得据此预测股价；没有资讯或都不相关就完全不提。\n"
+            "6. 每轮对话都要给出画面指引：从 line 中提取 2-4 个关键词或短语（公司名、业务词、财务指标名、"
+            "日期或区间、行业词、新闻事件词），按对话顺序填入 visual 数组；只允许出现 line 里说到的词。\n"
             "\n风格要求：像两个懂行的人聊天，允许追问、打断（……或破折号）、短暂停顿、跑题后拉回、惊讶/认同/质疑，"
             "及被说服后修正观点。按话题递进：这门生意是什么→行业里的位置→钱怎么赚、财务是否印证→风险与不确定性。"
             "数据存在时引用具体数字；数据缺失就坦诚说缺，不硬编。\n"
@@ -85,12 +92,18 @@ class DialogueGenerator:
     def _user_prompt(self, payload: Mapping[str, Any]) -> str:
         schema = {"title": "股票名（代码）：一句话点出这门生意或行业看点", "turns": [
             {"speaker": "bull", "line": "30 到 150 字的自然发言；允许极短打断或停顿",
-             "beat": "生意本质"}],
+             "beat": "生意本质",
+             "visual": ["line 中提到的关键词1", "关键词2"]}],
             }
+        min_minutes, max_minutes = self.config.min_duration_seconds // 60, self.config.max_duration_seconds // 60
         return (
-            f"生成约 {self.config.min_duration_seconds // 60}-{self.config.max_duration_seconds // 60} 分钟的自然对话流，"
+            f"生成一段时长在 {min_minutes}-{max_minutes} 分钟之间、按内容自然伸缩的中文对话流："
+            "素材和数据多就往长处展开（可到上限），素材少就收得住（不低于下限），不要为凑时长注水，也不要意犹未尽地草草收尾。"
             f"常规发言 30-{self.config.max_line_chars} 个中文字符；不要编号、不要 Round、不要强制一来一回。"
             "至少一半的篇幅围绕公司业务和行业本身（生意模式、行业格局、竞争与需求），技术信号最多作为一句带过的佐证。"
+            "内容要充分展开：覆盖业务模式、行业格局、盈利来源、财务印证、风险与不确定性等多个层面，"
+            "避免车轱辘话和重复观点，每一轮都提供新的信息或新的角度。"
+            "收尾要自然：对这次聊到的生意做一个小结式收束，不要戛然而止。"
             "输出结构必须匹配：\n"
             f"{json.dumps(schema, ensure_ascii=False)}\n股票数据：\n{json.dumps(payload, ensure_ascii=False, separators=(',', ':'))}"
         )
@@ -112,6 +125,7 @@ class DialogueGenerator:
             if not line:
                 raise DialogueGenerationError(f"turn {index} line is empty")
             turns.append({"speaker": speaker, "line": line, "beat": self._clean_beat(entry.get("beat")),
+                          "visual": self._clean_visuals(entry.get("visual")),
                           "character_name": self._character(speaker, speaker, "")["name"]})
         quote = stock_data.get("quote") if isinstance(stock_data.get("quote"), Mapping) else {}
         code, name = str(stock_data.get("code") or quote.get("code") or ""), str(quote.get("name") or stock_data.get("code") or "股票")
@@ -126,6 +140,19 @@ class DialogueGenerator:
         return re.sub(r"\s+", " ", str(value or "自然推进")).strip()[:40] or "自然推进"
 
     @staticmethod
+    def _clean_visuals(value: Any) -> list[str]:
+        """Keep up to 4 non-empty keyword phrases extracted from the turn line."""
+        items = value if isinstance(value, list) else []
+        visuals: list[str] = []
+        for item in items:
+            text = re.sub(r"\s+", " ", str(item)).strip()[:24]
+            if text and text not in visuals:
+                visuals.append(text)
+            if len(visuals) == 4:
+                break
+        return visuals
+
+    @staticmethod
     def _clean_title(value: Any, name: str, code: str) -> str:
         title = re.sub(r"\s+", " ", str(value or "")).strip()
         return title[:60] or f"{name}（{code}）这门生意怎么看"
@@ -136,17 +163,74 @@ class DialogueGenerator:
         return {"name": str(value.get("name") or default_name), "persona": str(value.get("persona") or default_persona)}
 
     @staticmethod
-    def _compact_data(data: Mapping[str, Any]) -> dict[str, Any]:
+    def _recent_sessions(technical: Mapping[str, Any], days: int = 15) -> list[dict[str, str]]:
+        """Digest the tail of the real indicator history for the dialogue prompt.
+
+        Only close price, daily change and the provider's own signal words are
+        kept — enough for the script to reference the actual recent market
+        rhythm without ballooning the prompt with the full indicator payload.
+        """
+        history = technical.get("history") if isinstance(technical.get("history"), list) else []
+        sessions: list[dict[str, str]] = []
+        for item in [x for x in history if isinstance(x, Mapping)][-days:]:
+            price = item.get("price") if isinstance(item.get("price"), Mapping) else {}
+            session: dict[str, str] = {"date": str(item.get("timestamp") or "")}
+            if price.get("current") is not None:
+                session["close"] = str(price.get("current"))
+            if price.get("change_pct") not in (None, 0):
+                session["change_pct"] = str(price.get("change_pct"))
+            for group, field in (("ma", "trend"), ("macd", "signal"), ("rsi", "signal")):
+                block = item.get(group) if isinstance(item.get(group), Mapping) else {}
+                word = str(block.get(field) or "")
+                if word and word != "neutral":
+                    session[f"{group}_{field}"] = word
+            if len(session) > 1:
+                sessions.append(session)
+        return sessions
+
+    @classmethod
+    def _compact_data(cls, data: Mapping[str, Any]) -> dict[str, Any]:
         result: dict[str, Any] = {}
-        for key in ("code", "quote", "technical", "financials", "f10", "unavailable"):
+        for key in ("code", "quote", "technical", "financials", "f10", "news", "unavailable"):
             if key not in data: continue
             value = data[key]
-            if key == "technical" and isinstance(value, Mapping): value = {n: value[n] for n in ("summary", "count") if n in value}
+            if key == "technical" and isinstance(value, Mapping):
+                recent = cls._recent_sessions(value)
+                value = {n: value[n] for n in ("summary", "count") if n in value}
+                if recent: value["近段行情"] = recent
             elif key == "f10" and isinstance(value, Mapping):
                 sections = value.get("sections", {})
                 value = {"sections": {str(k): str(v)[:600] for k, v in sections.items()} if isinstance(sections, Mapping) else {}}
+            elif key == "news" and isinstance(value, Mapping):
+                digest = cls._news_digest(value)
+                if digest: value = {"items": digest}
+                else: continue
             result[key] = value
         return result
+
+    @staticmethod
+    def _news_digest(news: Mapping[str, Any], limit: int = 8) -> list[dict[str, str]]:
+        """Trim real news items to the headline facts usable as script material."""
+        items = news.get("items") if isinstance(news.get("items"), list) else []
+        digest: list[dict[str, str]] = []
+        for item in items:
+            if not isinstance(item, Mapping):
+                continue
+            title = str(item.get("title") or "").strip()
+            if not title:
+                continue
+            entry: dict[str, str] = {"title": title[:80]}
+            for field in ("type", "source", "publish_time"):
+                text = str(item.get(field) or "").strip()
+                if text:
+                    entry[field] = text
+            summary = str(item.get("summary") or "").strip()
+            if summary:
+                entry["summary"] = summary[:120]
+            digest.append(entry)
+            if len(digest) == limit:
+                break
+        return digest
 
     @staticmethod
     def _decode_response(raw: str) -> Any:

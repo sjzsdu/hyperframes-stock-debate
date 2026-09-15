@@ -56,11 +56,32 @@ class DialogueGeneratorTests(unittest.TestCase):
         with patch("stocktalk.modules.dialogue_generator.shutil.which", return_value="bl"):
             with self.assertRaises(DialogueGenerationError): generator.generate({"code": "1"})
 
-    def test_prompt_excludes_technical_history(self):
+    def test_prompt_includes_trimmed_recent_market_digest(self):
         generator = DialogueGenerator(runner=lambda argv, timeout: self._response())
-        message = generator._user_prompt(generator._compact_data({"technical": {"summary": {"rsi": 60}, "history": [{"close": 1}]}}))
+        message = generator._user_prompt(generator._compact_data({"technical": {"summary": {"rsi": 60}, "count": 2,
+                                                                               "history": [{"timestamp": "2026-09-10", "price": {"current": 12.3, "change_pct": 1.2},
+                                                                                           "macd": {"signal": "golden_cross"}}]}}))
         self.assertIn("rsi", message)
-        self.assertNotIn("history", message)
+        self.assertIn("2026-09-10", message)
+        self.assertIn("golden_cross", message)
+        self.assertNotIn("\"history\"", message)
+
+    def test_news_digest_goes_into_prompt_and_empties_are_dropped(self):
+        generator = DialogueGenerator(runner=lambda argv, timeout: self._response())
+        payload = generator._compact_data({"code": "6001-9X".replace("-", ""), "news": {"items": [
+            {"title": "壹评级：线下自营店调价", "type": "其他", "source": "东方财富", "publish_time": "2026-09-09",
+             "summary": "飞天由1753元上调至1766元", "url": "http://e.com/1"},
+            {"title": ""},
+        ]}})
+        message = generator._user_prompt(payload)
+        self.assertIn("线下自营店调价", message)
+        self.assertIn("2026-09-09", message)
+        self.assertIn("飞天由1753元上调至1766元", message)
+        self.assertNotIn("url", message)
+        self.assertIn("news", payload)
+
+        empty = generator._compact_data({"code": "600519", "news": {"items": []}})
+        self.assertNotIn("news", empty)
 
 
 if __name__ == "__main__":
