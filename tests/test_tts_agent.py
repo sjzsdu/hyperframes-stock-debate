@@ -44,7 +44,7 @@ def test_synthesis_passes_configured_voice_to_bailian(tmp_path: Path, monkeypatc
     monkeypatch.setattr(subprocess, "run", fake_run)
     monkeypatch.setattr(agent, "_audio_duration", lambda _path: 1.25)
 
-    result = agent._synthesize_line("测试语音", "bull", output)
+    result = agent._synthesize_line_cli("测试语音", "bull", output)
 
     assert command[command.index("--voice") + 1] == "longfeifei_v3"
     assert command[command.index("--rate") + 1] == "1.08"

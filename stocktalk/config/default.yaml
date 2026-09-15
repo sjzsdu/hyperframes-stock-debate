@@ -31,20 +31,17 @@ characters:
   bull:
     name: 股市新手
     persona: 年轻乐观的女生，喜欢从生意角度聊公司——这家公司靠什么赚钱、增长从哪来；只讨论已给出的数据
-    # 龙小淳：知性积极女。比甜美营销腔更适合财经新手，又保留年轻感。
+    # 系统音色：龙小淳（知性积极女）——和 bear 的龙天（磁性理智男）形成最大辨识度
     voice_id: longxiaochun_v3
     speed: 1.07
     pitch: 1.03
-    voice_direction: 年轻、好奇、聪明又有一点兴奋的女生语气，自然聊天，不要播音腔；关键数字稍微重读，句尾利落。
   bear:
     name: 股市老登
     persona: 老练理性，擅长从行业格局和经营风险角度提问，追问生意的短板与数据边界
-    # 龙橙（智慧青年男）：抖音口播最常用的男声之一，年轻清晰、有精神，
-    # 是财经/知识类爆款短视频的主流男声；替代之前低沉的“老股民腔”龙天。
-    voice_id: longcheng_v3
-    speed: 1.06
-    pitch: 1.0
-    voice_direction: 年轻、清晰、有精神的男声，像抖音财经口播达人在讲解，节奏明快，重点词自然重读，不要播音腔。
+    # 系统音色：龙天（磁性理智男）——低沉中年男声，和 bull 的年轻女声形成强对比
+    voice_id: longtian_v3
+    speed: 1.0
+    pitch: 0.97
 
 compliance:
   forbidden_words:
@@ -74,6 +71,26 @@ video:
   # MP4 渲染实测常超过 15 分钟（3-8 分钟正片 + 高质量逐帧渲染）。
   # npx 还可能先下载 hyperframes 包，首次更慢；超时大幅放宽并可在用户配置覆盖。
   render_timeout_seconds: 3600
+
+# 多平台自动发布（基于 social-auto-upload 的浏览器自动化）。
+# 首次使用需逐平台人工扫码登录一次（cookie 会保存）:
+#   cd third_party/social-auto-upload && uv run sau <platform> login --account default
+# accounts 里每个平台对应一个账号名；headless=true 时上传在后台浏览器执行。
+publish:
+  platforms: [douyin, bilibili, kuaishou, xiaohongshu, tencent]
+  accounts:
+    douyin: default
+    bilibili: default
+    kuaishou: default
+    xiaohongshu: default
+    tencent: default
+  headless: true
+  # 每个平台上传的超时；浏览器上传 2-8 分钟视频通常 1-3 分钟完成。
+  timeout_seconds: 900
+  # 追加到默认话题标签后的自定义标签（每个平台最多取前几个）。
+  extra_tags: []
+  # 发布时间，留空立即发布；格式 %Y-%m-%d %H:%M，如 "2026-09-16 19:30"（晚高峰）。
+  schedule: ""
 
 output:
   dir: output

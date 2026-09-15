@@ -9,8 +9,9 @@
   --bear: #65baff;
   --bull-soft: rgba(255, 120, 188, .12);
   --bear-soft: rgba(101, 186, 255, .12);
-  --up: #5ee0a7;
-  --down: #ff7188;
+  /* A股配色：红涨绿跌 */
+  --up: #ff7188;
+  --down: #5ee0a7;
   --gold: #ffd166;
 }
 @font-face { font-family:"PingFang SC"; src:local("PingFang SC"); }
@@ -29,7 +30,9 @@ body { margin: 0; overflow: hidden; background: var(--bg); color: var(--text); f
 .title-row { display: flex; align-items: center; justify-content: space-between; }
 h1 { margin: 0; font-size: 56px; line-height: 1.05; letter-spacing: -1px; }
 h1 em { color: var(--accent); font-style: normal; font-size: 30px; font-weight: 600; margin-left: 14px; letter-spacing: 2px; }
-#headline p { color: var(--up); font-size: 24px; margin: 12px 0 0; font-variant-numeric: tabular-nums; }
+#headline p { color: var(--text); font-size: 24px; margin: 12px 0 0; font-variant-numeric: tabular-nums; }
+#headline p.up { color: var(--up); }
+#headline p.down { color: var(--down); }
 
 .panel { background: linear-gradient(145deg, rgba(17, 38, 64, .94), var(--panel)); border: 1px solid var(--line); border-radius: 24px; box-shadow: 0 22px 70px rgba(0,0,0,.42), inset 0 1px 0 rgba(255,255,255,.04); backdrop-filter: blur(12px); }
 #market-stage { top: 196px; left: 350px; width: 1220px; height: 540px; }
@@ -41,7 +44,9 @@ h1 em { color: var(--accent); font-style: normal; font-size: 30px; font-weight: 
 .metric { display: flex; justify-content: space-between; align-items: center; min-height: 72px; border-top: 1px solid var(--line); font-size: 18px; }
 .metric:first-child { border-top: 0; }
 .metric span { color: var(--muted); }
-.metric strong { color: var(--up); font-size: 21px; font-variant-numeric: tabular-nums; }
+.metric strong { color: var(--text); font-size: 21px; font-variant-numeric: tabular-nums; }
+.metric strong.up { color: var(--up); }
+.metric strong.down { color: var(--down); }
 
 .axis { stroke: #365976; fill: none; }
 .svg-axis { fill: var(--muted); font-size: 14px; }
@@ -50,22 +55,26 @@ h1 em { color: var(--accent); font-style: normal; font-size: 30px; font-weight: 
 .volume { opacity: .26; }
 .ma { stroke: var(--gold); stroke-width: 3; fill: none; }
 .close-line { stroke: var(--accent); stroke-width: 3.5; fill: none; filter: drop-shadow(0 0 8px rgba(105,183,255,.55)); }
+.close-line.up { stroke: var(--up); filter: drop-shadow(0 0 8px rgba(255,113,136,.55)); }
+.close-line.down { stroke: var(--down); filter: drop-shadow(0 0 8px rgba(94,224,167,.55)); }
 .discussion-range { fill: rgba(105,183,255,.08); stroke: var(--accent); stroke-dasharray: 5 4; }
 .draw-line { stroke-dasharray: 1200; stroke-dashoffset: 1200; }
 .svg-muted { fill: var(--muted); font-size: 13px; }
 .svg-value { fill: var(--text); font-size: 15px; font-weight: bold; }
 .snap-label { fill: var(--muted); font-size: 12px; letter-spacing: 1px; }
 .snap-value { fill: var(--text); font-size: 17px; font-weight: 700; font-variant-numeric: tabular-nums; }
+.snap-value.up { fill: var(--up); }
+.snap-value.down { fill: var(--down); }
 .news-title { fill: var(--text); font-size: 14px; }
 .news-source { fill: var(--muted); font-size: 11px; }
-.svg-risk { fill: #ff91a2; font-size: 13px; font-weight: bold; }
+.svg-risk { fill: #7fe8bd; font-size: 13px; font-weight: bold; }
 .gauge-track { fill: none; stroke: #294a6b; stroke-width: 13; stroke-linecap: round; }
 .gauge-fill { fill: none; stroke: var(--accent); stroke-width: 13; stroke-linecap: round; }
 .gauge-industry { stroke: var(--gold); stroke-width: 4; stroke-linecap: round; }
 .chart-baseline { stroke: #41617f; stroke-width: 1; }
 .bar { fill: var(--up); transform-origin: center bottom; }
 .bar-down { fill: var(--down); }
-.risk-area { fill: rgba(255,113,136,.16); }
+.risk-area { fill: rgba(94,224,167,.16); }
 .risk-line { fill: none; stroke: var(--down); stroke-width: 3; }
 .sentiment-track { fill: #294a6b; }
 .sentiment-positive { fill: var(--up); }

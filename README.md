@@ -59,6 +59,8 @@ stocktalk <股票代码> [选项]
   --config PATH         自定义配置文件路径
   --output-dir DIR      输出目录（默认 output/）
   --duration-minutes N  对话目标时长（默认 2-8 分钟，按素材量自然伸缩）
+  --publish             渲染后自动发布到已配置的平台（抖音/B站/快手/小红书/视频号）
+  --publish-only MP4    跳过生成，直接发布已有 MP4
   --help                显示帮助信息
 ```
 
@@ -73,7 +75,41 @@ stocktalk 600519 --name 贵州茅台 --config my_config.yaml
 
 # 指定输出目录和目标时长
 stocktalk 000001 --name 平安银行 --output-dir ./videos --duration-minutes 3
+
+# 生成并自动发布到所有已配置平台
+stocktalk 600519 --publish
+
+# 只发布一个已有视频
+stocktalk 600519 --publish-only output/600519_20260915_120000.mp4
 ```
+
+## 多平台自动发布
+
+基于开源工具 [social-auto-upload](https://github.com/dreammis/social-auto-upload)（已内置于
+`third_party/social-auto-upload`，通过浏览器自动化登录并上传）。支持：抖音、B站、快手、小红书、视频号。
+
+**首次使用：逐平台扫码登录一次（cookie 会保存，之后无需再登录）：**
+
+```bash
+cd third_party/social-auto-upload
+uv sync                                       # 初始化 sau 环境（首次）
+uv run sau douyin login --account default     # 每个平台登录一次
+cd ../..
+```
+
+**配置**（`stocktalk/config/default.yaml`）：
+
+```yaml
+publish:
+  platforms: [douyin, bilibili, kuaishou, xiaohongshu, tencent]
+  accounts: {douyin: default, bilibili: default, ...}  # 每平台的账号名
+  headless: true
+  schedule: ""               # 留空立即发布；如 "2026-09-16 19:30" 定时发布
+  extra_tags: []             # 追加自定义话题标签
+```
+
+发布内容（标题/简介/话题标签）从审核后的对话脚本自动生成，标题按平台字数限制截断，
+简介自动附上“不构成投资建议”免责声明，B站自动选择财经分区。
 
 ## 配置
 
@@ -161,6 +197,11 @@ script = DialogueGenerator().generate(data)
 # 单独运行合规审核
 from stocktalk.modules.compliance import ComplianceAgent
 approved = ComplianceAgent({}).review(script)
+
+# 单独发布视频
+from stocktalk.modules.publisher import SauPublisher
+report = SauPublisher({}).publish('output/xxx.mp4', approved, '贵州茅台', '600519')
+print(report['succeeded'], report['failed'])
 ```
 
 ## 常见问题

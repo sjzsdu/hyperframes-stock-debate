@@ -15,7 +15,7 @@
 
   <header id="headline" class="clip" data-start="0" data-duration="{{ outro_start }}" data-track-index="3">
     <div class="title-row"><h1>{{ name }} <em>{{ code }}</em></h1></div>
-    <p>{{ price_line }}</p>
+    <p class="{{ price_tone }}">{{ price_line }}</p>
   </header>
 
   <section id="market-stage" class="clip" data-start="0.35" data-duration="{{ outro_start - 0.35 if outro_start > 0.35 else 0.1 }}" data-track-index="4">
@@ -23,7 +23,7 @@
       <div class="chart-camera">{{ chart|safe }}</div>
     </section>
     <section id="finance-card" class="panel finance">
-      <div class="metric-list">{% for metric in financials %}<div class="metric"><span>{{ metric.label }}</span><strong>{{ metric.value }}</strong></div>{% endfor %}</div>
+      <div class="metric-list">{% for metric in financials %}<div class="metric"><span>{{ metric.label }}</span><strong class="{{ metric.tone or '' }}">{{ metric.value }}</strong></div>{% endfor %}</div>
     </section>
   </section>
 

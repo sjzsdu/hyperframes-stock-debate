@@ -235,7 +235,7 @@ class StockDataClient:
             raise ValueError("count must be positive")
         symbol = normalize_code(code)
         payload = self._parse_payload(self._invoke("kline", "--code", symbol, "--count", str(count), "--json"))
-        rows = payload.get("data", payload.get("history", [])) if isinstance(payload, Mapping) else payload
+        rows = payload.get("items", payload.get("data", payload.get("history", []))) if isinstance(payload, Mapping) else payload
         if not isinstance(rows, list):
             raise StockDataError("tongstock kline output has no list of bars")
         return [self._normalize_bar(row) for row in rows if isinstance(row, Mapping)]
@@ -300,13 +300,18 @@ class StockDataClient:
         return {"code": code, "name": name, **{key: StockDataClient._number(match.group(1)) if (match := re.search(pattern, raw)) else None for key, pattern in values.items()}, "change_pct": None}
 
     def _resolve_name(self, code: str) -> str:
-        """Best-effort company name from the securities list (real data only)."""
+        """Best-effort company name from the securities list (real data only).
+
+        The codes list prints CJK names with spaces between every character,
+        e.g. ``002224 三 力 士 [深市主板] 深交所``; capture the name column and
+        collapse those spaces, stopping before the ``[板块]`` tag.
+        """
         try:
             raw = self._invoke("codes", "list", "-e", self._exchange_of(code))
         except (TongstockUnavailableError, TongstockCommandError, StockDataError):
             return ""
-        match = re.search(rf"^{re.escape(code)}\s+(\S+)", raw, re.MULTILINE)
-        return match.group(1) if match else ""
+        match = re.search(rf"^{re.escape(code)}\s+(.+?)(?:\s*\[[^\]]*\].*)?$", raw, re.MULTILINE)
+        return re.sub(r"\s+", "", match.group(1)) if match else ""
 
     @staticmethod
     def _exchange_of(code: str) -> str:
@@ -319,7 +324,11 @@ class StockDataClient:
 
     @staticmethod
     def _normalize_bar(row: Mapping[str, Any]) -> dict[str, Any]:
-        return {key: row.get(key) for key in ("date", "timestamp", "open", "high", "low", "close", "volume", "amount") if key in row}
+        # tongstock kline uses "time" for the date; older indicator history
+        # uses "timestamp" or "date".  Normalise to "date" for downstream.
+        bar = {key: row.get(key) for key in ("open", "high", "low", "close", "volume", "amount") if key in row}
+        bar["date"] = row.get("date") or row.get("time") or row.get("timestamp")
+        return bar
 
     @staticmethod
     def _number(value: Any, default: Any = None) -> float | Any:

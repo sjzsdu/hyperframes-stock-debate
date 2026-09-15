@@ -19,6 +19,7 @@ from rich.progress import BarColumn, Progress, SpinnerColumn, TextColumn, TimeEl
 from stocktalk.modules.compliance import ComplianceAgent
 from stocktalk.modules.dialogue_generator import DialogueGenerator
 from stocktalk.modules.hyperframes_builder import HyperFramesBuilder
+from stocktalk.modules.publisher import SauPublisher
 from stocktalk.modules.stock_data import StockDataClient, StockDataConfig
 from stocktalk.modules.tts_agent import TTSAgent
 
@@ -67,6 +68,7 @@ class Pipeline:
         self.compliance = ComplianceAgent(self.config)
         self.tts = TTSAgent(self.config)
         self.builder = HyperFramesBuilder(self.config)
+        self.publisher = SauPublisher(self.config)
         self.output_dir = Path(self.config.get("output", {}).get("dir", "output"))
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -109,10 +111,16 @@ class Pipeline:
         return {"segments": segments, "srt_path": str(srt_path), "total_duration": segments[-1]["end_time"] if segments else 0.0, "fallback": "silent"}
 
     def run(self, stock_code: str, stock_name: str | None = None, *, render: bool = True,
-            preview: bool = False) -> dict[str, Any]:
-        """Generate the project and, unless disabled, render its MP4 output."""
+            preview: bool = False, publish: bool = False) -> dict[str, Any]:
+        """Generate the project and, unless disabled, render its MP4 output.
+
+        With ``publish`` the rendered MP4 is uploaded to every configured
+        platform after rendering; rendering is implied when publishing.
+        """
         if preview:
             render = False
+        if publish:
+            render = True
         tag = f"{stock_code}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
         project_dir = self.output_dir / tag
         t0 = time.monotonic()
@@ -169,11 +177,21 @@ class Pipeline:
                 progress.update(task, description="HTML project ready (render skipped)")
             progress.advance(task)
 
+            publish_report: dict[str, Any] | None = None
+            if publish and video_path:
+                progress.update(task, description=f"Publishing to {', '.join(self.config.get('publish', {}).get('platforms', []))}")
+                publish_report = self.publisher.publish(
+                    video_path, approved, stock_data.get("quote", {}).get("name", stock_name or ""), stock_code,
+                    schedule=str(self.config.get("publish", {}).get("schedule") or "") or None,
+                )
+            progress.advance(task)
+
         result = {"stock_code": stock_code, "stock_name": stock_data.get("quote", {}).get("name", stock_name or ""),
                   "tag": tag, "script": script, "approved_script": approved, "audio": audio,
                   "srt": audio.get("srt_path"), "project_dir": str(project_dir),
                   "video_path": str(video_path) if video_path else None, "rendered": bool(video_path),
-                  "preview": preview, "elapsed_seconds": round(time.monotonic() - t0, 1)}
+                  "preview": preview, "publish": publish_report,
+                  "elapsed_seconds": round(time.monotonic() - t0, 1)}
         result_path = self.output_dir / f"{tag}.json"
         result_path.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
         self.console.print(f"[green]Done:[/green] {result_path}")

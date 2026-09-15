@@ -28,6 +28,8 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--duration-minutes", type=int, default=None, help="对话目标时长（分钟，默认 2-5）")
     parser.add_argument("--no-render", action="store_true", help="仅生成 HTML 项目，跳过 MP4 渲染")
     parser.add_argument("--preview", action="store_true", help="仅生成 HTML 预览项目（等同于 --no-render）")
+    parser.add_argument("--publish", action="store_true", help="渲染完成后自动发布到已配置的平台（抖音/B站/快手/小红书/视频号）")
+    parser.add_argument("--publish-only", default=None, metavar="MP4", help="跳过生成，直接把指定 MP4 发布到已配置的平台")
 
     args = parser.parse_args(argv)
 
@@ -43,9 +45,25 @@ def main(argv: list[str] | None = None) -> None:
         config.setdefault("dialogue", {}).update({"min_duration_seconds": seconds, "max_duration_seconds": seconds})
 
     pipeline = Pipeline(config)
+
+    if args.publish_only:
+        video = Path(args.publish_only)
+        if not video.is_file():
+            parser.exit(1, f"\n发布失败：找不到视频文件 {video}\n")
+        try:
+            report = pipeline.publisher.publish(video, {"title": video.stem, "turns": []},
+                                                stock_name=args.name or video.stem,
+                                                stock_code=args.stock_code,
+                                                schedule=str(config.get("publish", {}).get("schedule") or "") or None)
+        except Exception as exc:
+            parser.exit(1, f"\n发布失败：{exc}\n")
+        _print_publish_report(parser, report)
+        return
+
     try:
         result = pipeline.run(
             args.stock_code, stock_name=args.name, render=not args.no_render, preview=args.preview,
+            publish=args.publish,
         )
     except PipelineError as exc:
         parser.exit(1, f"\n生成失败：{exc}\n")
@@ -58,6 +76,19 @@ def main(argv: list[str] | None = None) -> None:
         print(f"  视频: {result['video_path']}")
     else:
         print("  MP4 渲染已跳过")
+    if result.get("publish"):
+        _print_publish_report(parser, result["publish"])
+
+
+def _print_publish_report(parser: argparse.ArgumentParser, report: dict) -> None:
+    print(f"\n✓ 发布完成: {', '.join(report['succeeded']) or '无'}")
+    for item in report["platforms"]:
+        mark = "✓" if item["ok"] else "✗"
+        print(f"  {mark} {item['label']}({item['platform']})")
+        if not item["ok"]:
+            print(f"    原因: {item['detail'][:200]}")
+    if report["failed"]:
+        print("  提示: 失败的平台可单独重试: stocktalk <code> --publish-only <mp4>")
 
 
 if __name__ == "__main__":

@@ -7,13 +7,22 @@ audio, rather than estimated from the number of characters in a line.
 
 from __future__ import annotations
 
+import asyncio
+import base64
+import json
 import math
+import os
 import re
 import shutil
 import struct
 import subprocess
 from pathlib import Path
 from typing import Any, Dict, List, Mapping
+
+try:
+    import websockets
+except ImportError:
+    websockets = None
 
 
 class TTSSynthesisError(RuntimeError):
@@ -39,17 +48,26 @@ class TTSAgent:
         ``script['turns']`` is an ordered list of speaker/line mappings.  A synthesis failure is not hidden: an
         estimated timestamp would put later subtitles out of sync.
         """
-        self._require_bailian_cli()
+        if not self._is_websocket_model:
+            self._require_bailian_cli()
+        if self._is_websocket_model and websockets is None:
+            raise TTSSynthesisError("websockets package is required for qwen3-tts-vd-realtime models (pip install websockets)")
         audio_dir = self.output_dir / "audio"
         audio_dir.mkdir(parents=True, exist_ok=True)
+
+        turns = [(str(turn["speaker"]), str(turn["line"])) for turn in self._turns(script)]
+        jobs = [(character, line, audio_dir / f"{index:02d}_{character}.{self._audio_format}")
+                for index, (character, line) in enumerate(turns, start=1)]
+        if self._is_websocket_model:
+            rendered = self._synthesize_all_ws(jobs)
+        else:
+            rendered = [self._synthesize_line_cli(line, character, output_path)
+                        for character, line, output_path in jobs]
 
         segments: List[Dict[str, Any]] = []
         cursor = 0.0
         pause = max(0.0, float(self.tts_config.get("pause_between_segments", 0)))
-        for turn_index, turn in enumerate(self._turns(script), start=1):
-            character, line = str(turn["speaker"]), str(turn["line"])
-            segment = self._synthesize_line(line=line, character=character,
-                output_path=audio_dir / f"{turn_index:02d}_{character}.{self._audio_format}")
+        for segment in rendered:
             segment["start_time"] = cursor
             segment["end_time"] = cursor + segment["duration"]
             segments.append(segment)
@@ -84,7 +102,152 @@ class TTSAgent:
             raise ValueError(f"Unsupported Bailian audio format: {value}")
         return value
 
-    def _synthesize_line(self, line: str, character: str, output_path: Path) -> Dict[str, Any]:
+    @property
+    def _is_websocket_model(self) -> bool:
+        """Design-voice models (qwen3-tts-vd-realtime) require WebSocket synthesis."""
+        model = str(self.tts_config.get("model", "cosyvoice-v3-flash"))
+        return "vd-realtime" in model or "tts-vd" in model
+
+    def _synthesize_all_ws(
+        self, jobs: List[tuple[str, str, Path]]
+    ) -> List[Dict[str, Any]]:
+        """Synthesize every line over one persistent WebSocket per character.
+
+        Design voices drift in timbre when each line opens a fresh session: the
+        server re-seeds prosody per connection.  Keeping a single connection per
+        speaker and issuing ``input_text_buffer.commit`` per line yields separate
+        audio files while sharing one voice/session context, so the same speaker
+        sounds consistent across the whole video.
+        """
+        if websockets is None:
+            raise TTSSynthesisError("websockets package is required (pip install websockets)")
+        api_key = os.environ.get("DASHSCOPE_API_KEY", "")
+        if not api_key:
+            raise TTSSynthesisError("DASHSCOPE_API_KEY environment variable is not set")
+        for character, _, _ in jobs:
+            voice_id = (self.characters.get(character, {}) or {}).get("voice_id")
+            if not voice_id or voice_id == "default":
+                raise TTSSynthesisError(f"No voice_id configured for {character}")
+
+        try:
+            files = asyncio.run(self._run_ws_batch(jobs, api_key))
+        except TTSSynthesisError:
+            raise
+        except Exception as exc:
+            raise TTSSynthesisError(f"WebSocket TTS batch failed: {exc}") from exc
+
+        segments: List[Dict[str, Any]] = []
+        for (character, line, output_path), raw in zip(jobs, files):
+            if not raw:
+                raise TTSSynthesisError(f"WebSocket TTS produced no audio for {character}")
+            with open(output_path, "wb") as f:
+                f.write(self._ensure_wav(raw))
+            if self.tts_config.get("trim_silence", True):
+                self._trim_and_fade(output_path)
+            character_config = self.characters.get(character, {})
+            segments.append({
+                "character": character,
+                "character_name": character_config.get("name", character),
+                "line": line,
+                "audio_path": str(output_path),
+                "duration": self._audio_duration(output_path),
+            })
+        return segments
+
+    @staticmethod
+    def _ensure_wav(raw: bytes, sample_rate: int = 24000) -> bytes:
+        """Wrap bare PCM in a RIFF/WAVE header; pass WAV/MP3 streams through.
+
+        The realtime server only emits a RIFF header on the FIRST response of a
+        session; later ``commit`` responses arrive as headerless PCM, so every
+        segment must be normalised to a standalone playable WAV.
+        """
+        if raw[:4] == b"RIFF":
+            return raw
+        return (struct.pack("<4sI4s4sIHHIIHH4sI",
+                            b"RIFF", 36 + len(raw), b"WAVE", b"fmt ", 16,
+                            1, 1, sample_rate, sample_rate * 2, 2, 16,
+                            b"data", len(raw)) + raw)
+
+    async def _run_ws_batch(
+        self, jobs: List[tuple[str, str, Path]], api_key: str
+    ) -> List[bytes]:
+        model = str(self.tts_config.get("model", "qwen3-tts-vd-realtime-2025-12-16"))
+        ws_url = f"wss://dashscope.aliyuncs.com/api-ws/v1/realtime?model={model}"
+        timeout = float(self.tts_config.get("websocket_timeout_seconds", 30))
+        volume = self.tts_config.get("volume", 1.0)
+        try:
+            volume = max(0, min(100, round(float(volume) * 100 if float(volume) <= 1 else float(volume))))
+        except (TypeError, ValueError):
+            volume = 100
+
+        async def connect_character(character: str):
+            cfg = self.characters.get(character, {})
+            speed = float(cfg.get("speed", self.tts_config.get("speed", 1.0)))
+            pitch = float(cfg.get("pitch", self.tts_config.get("pitch", 1.0)))
+            instructions = str(cfg.get("voice_direction", "")).strip() or None
+            ws = await websockets.connect(ws_url, additional_headers={"Authorization": f"Bearer {api_key}"})
+            try:
+                await ws.recv()  # session.created
+                # Uniform PCM on the wire: only the session's first response
+                # carries a RIFF header, so we normalise every segment ourselves.
+                wire_format = "pcm" if self._audio_format in {"wav", "pcm"} else self._audio_format
+                session_config: dict[str, Any] = {
+                    "voice": cfg.get("voice_id"),
+                    "response_format": wire_format,
+                    "sample_rate": 24000,
+                    "mode": "commit",
+                    "speech_rate": speed,
+                    "pitch_rate": pitch,
+                    "volume": volume,
+                    "language_type": "zh",
+                }
+                if instructions:
+                    session_config["instructions"] = instructions
+                await ws.send(json.dumps({"type": "session.update", "session": session_config}))
+                reply = json.loads(await asyncio.wait_for(ws.recv(), timeout=timeout))
+                if reply.get("type") == "error":
+                    raise TTSSynthesisError(f"WebSocket session error ({character}): {reply.get('error', {}).get('message', reply)}")
+            except Exception:
+                await ws.close()
+                raise
+            return ws
+
+        async def synth_line(ws, line: str) -> bytes:
+            await ws.send(json.dumps({"type": "input_text_buffer.append", "text": line}))
+            await ws.send(json.dumps({"type": "input_text_buffer.commit"}))
+            chunks: list[bytes] = []
+            while True:
+                data = json.loads(await asyncio.wait_for(ws.recv(), timeout=timeout))
+                t = data.get("type", "")
+                if t == "response.audio.delta":
+                    chunks.append(base64.b64decode(data["delta"]))
+                elif t == "response.done":
+                    break
+                elif t == "error":
+                    raise TTSSynthesisError(f"WebSocket synthesis error: {data.get('error', {}).get('message', data)}")
+            return b"".join(chunks)
+
+        connections: dict[str, Any] = {}
+        results: List[bytes] = []
+        try:
+            for character, line, _ in jobs:
+                if character not in connections:
+                    connections[character] = await connect_character(character)
+                results.append(await synth_line(connections[character], line))
+        finally:
+            for ws in connections.values():
+                try:
+                    await ws.send(json.dumps({"type": "session.finish"}))
+                except Exception:
+                    pass
+                try:
+                    await asyncio.wait_for(ws.close(), timeout=5)
+                except Exception:
+                    pass
+        return results
+
+    def _synthesize_line_cli(self, line: str, character: str, output_path: Path) -> Dict[str, Any]:
         character_config = self.characters.get(character, {})
         voice_id = character_config.get("voice_id")
         if not voice_id or voice_id == "default":

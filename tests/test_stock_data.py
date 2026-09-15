@@ -38,6 +38,19 @@ class StockDataClientTests(unittest.TestCase):
         data = StockDataClient(runner=runner).get_stock_data("600519")
         self.assertEqual(data["quote"]["name"], "贵州茅台")
 
+    def test_spaced_cjk_name_in_codes_list_is_collapsed(self):
+        # Real `tongstock codes list` output spaces every CJK character:
+        # "002224 三 力 士 [深市主板] 深交所".
+        def runner(argv, timeout):
+            if argv[1] == "quote":
+                return "002224 \n  最新价: 3.660\n"
+            if argv[1] == "codes":
+                return "002224 三 力 士 [深市主板] 深交所\n600519 贵 州 茅 台 [沪市A股] 上交所\n"
+            return "{\"summary\": {}, \"history\": []}"
+
+        data = StockDataClient(runner=runner).get_stock_data("002224")
+        self.assertEqual(data["quote"]["name"], "三力士")
+
     def test_exchange_flag_matches_code_prefix(self):
         self.assertEqual(StockDataClient._exchange_of("600519"), "sh")
         self.assertEqual(StockDataClient._exchange_of("000001"), "sz")

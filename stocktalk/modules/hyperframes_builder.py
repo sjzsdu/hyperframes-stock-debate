@@ -260,6 +260,7 @@ class HyperFramesBuilder:
             name=self._text(stock_name),
             code=self._text(stock.get("code") or quote.get("code") or ""),
             price_line=self._quote_line(quote),
+            price_tone=self._price_tone(quote),
             outro_title=self._text(f"以上就是{stock_name}的生意观察"),
             outro_tip="行情会变，生意逻辑才是主线——下次再一起跟踪验证",
             outro_svg=visuals["outro"],
@@ -304,6 +305,14 @@ class HyperFramesBuilder:
             parts.append(f"涨跌幅 {change:+.2f}%")
         return "　".join(parts)
 
+    @staticmethod
+    def _price_tone(quote: Mapping[str, Any]) -> str:
+        """A股配色方向：up=红涨，down=绿跌，flat/未知=中性色。"""
+        change = HyperFramesBuilder._float(quote.get("change_pct"), float("nan"))
+        if not math.isfinite(change) or change == 0:
+            return "flat"
+        return "up" if change > 0 else "down"
+
     def _financials(self, quote: Mapping[str, Any], financials: Mapping[str, Any], technical: Mapping[str, Any]) -> list[dict[str, str]]:
         # Six rows maximum keeps the card clear of the topic card below it.
         labels: list[tuple[str, tuple[str, ...]]] = [
@@ -314,10 +323,13 @@ class HyperFramesBuilder:
         rows: list[dict[str, str]] = []
         price = self._float(quote.get("price"), float("nan"))
         change = self._float(quote.get("change_pct"), float("nan"))
+        tone = self._price_tone(quote)
+        if tone == "flat":
+            tone = ""
         if math.isfinite(price):
-            rows.append({"label": "最新价", "value": f"{price:,.2f}"})
+            rows.append({"label": "最新价", "value": f"{price:,.2f}", "tone": tone})
         if math.isfinite(change):
-            rows.append({"label": "涨跌幅", "value": f"{change:+.2f}%"})
+            rows.append({"label": "涨跌幅", "value": f"{change:+.2f}%", "tone": tone})
         for label, keys in labels:
             raw = next((quote[key] if key in quote else financials[key] for key in keys if quote.get(key) is not None or financials.get(key) is not None), None)
             value = self._format_metric(label, raw)
@@ -396,7 +408,9 @@ class HyperFramesBuilder:
             if dates[index]:
                 label = dates[index][5:] if len(dates[index]) >= 10 else dates[index]
                 out.append(f'<text class="svg-axis" x="{30 + (index + .5) * step:.1f}" y="366" text-anchor="middle">{html.escape(label)}</text>')
-        line_class = "ma draw-line" if has_ohlc else "close-line draw-line"
+        # A股配色：无 OHLC 时的收盘折线按区间涨跌着色（红涨绿跌）。
+        direction = "up" if close_values[-1] >= close_values[0] else "down"
+        line_class = "ma draw-line" if has_ohlc else f"close-line draw-line {direction}"
         return '<svg viewBox="0 0 760 410" role="img" aria-label="价格走势（真实行情数据）">' + ''.join(out) + f'<polyline class="{line_class}" points="{" ".join(closes)}"/></svg>'
 
     def _visuals(self, quote: Mapping[str, Any], financials: Mapping[str, Any], bars: list[Any], f10: Mapping[str, Any], technical: Mapping[str, Any], news: Mapping[str, Any] | None = None) -> dict[str, str]:
@@ -455,21 +469,23 @@ class HyperFramesBuilder:
 
     def _snapshot_svg(self, quote: Mapping[str, Any], technical: Mapping[str, Any], label: str = "行情快照") -> str:
         """Real quote snapshot card — the universal data-backed fallback."""
-        rows: list[tuple[str, str]] = []
+        rows: list[tuple[str, str, str]] = []
         price = self._float(quote.get("price"), float("nan"))
         change = self._float(quote.get("change_pct"), float("nan"))
+        tone = self._price_tone(quote)
+        tone = tone if tone in {"up", "down"} else ""
         if math.isfinite(price):
-            rows.append(("最新价", f"{price:,.2f}"))
+            rows.append(("最新价", f"{price:,.2f}", tone))
         if math.isfinite(change):
-            rows.append(("涨跌幅", f"{change:+.2f}%"))
+            rows.append(("涨跌幅", f"{change:+.2f}%", tone))
         for name, keys in (("开盘", ("open",)), ("成交额", ("amount", "turnover"))):
             value = self._lookup(quote, keys=keys)
             if value is not None:
-                rows.append((name, self._format_metric("今日开盘" if name == "开盘" else "成交额", value)))
+                rows.append((name, self._format_metric("今日开盘" if name == "开盘" else "成交额", value), ""))
         summary = technical.get("summary") if isinstance(technical.get("summary"), Mapping) else {}
         signal = self._text(summary.get("signal") or summary.get("trend") or None)
         if signal != "—":
-            rows.append(("信号", signal))
+            rows.append(("信号", signal, ""))
         if not rows:
             # Nothing real is available anywhere; render a clean neutral label
             # card instead of an apologetic “暂无数据” placeholder.
@@ -477,10 +493,10 @@ class HyperFramesBuilder:
                     f'<text class="svg-value" x="165" y="64" text-anchor="middle">{html.escape(label)}</text></svg>')
         cells = ''.join(
             f'<text class="snap-label" x="{22 + i * 104}" y="44">{html.escape(key)}</text>'
-            f'<text class="snap-value" x="{22 + i * 104}" y="76">{html.escape(value[:10])}</text>'
-            for i, (key, value) in enumerate(rows[:3]))
+            f'<text class="snap-value {row_tone}" x="{22 + i * 104}" y="76">{html.escape(value[:10])}</text>'
+            for i, (key, value, row_tone) in enumerate(rows[:3]))
         if len(rows) > 3:
-            key, value = rows[3]
+            key, value, _ = rows[3]
             cells += f'<text class="svg-muted" x="22" y="102">{html.escape(key)} {html.escape(value)}</text>'
         return f'<svg viewBox="0 0 330 116" role="img" aria-label="{html.escape(label)}">{cells}</svg>'
 
@@ -488,25 +504,29 @@ class HyperFramesBuilder:
         """Closing card: real last close and interval change, nothing invented."""
         closes = [self._float(x.get("close"), float("nan")) for x in bars if isinstance(x, Mapping)] if isinstance(bars, list) else []
         closes = [x for x in closes if math.isfinite(x)]
-        rows: list[tuple[str, str]] = []
+        rows: list[tuple[str, str, str]] = []
         if closes:
-            rows.append(("区间收盘", f"{closes[-1]:,.2f}"))
+            rows.append(("区间收盘", f"{closes[-1]:,.2f}", ""))
             if closes[0]:
-                rows.append(("区间涨跌", f"{(closes[-1] / closes[0] - 1) * 100:+.2f}%"))
+                interval_change = (closes[-1] / closes[0] - 1) * 100
+                interval_tone = "up" if interval_change > 0 else "down" if interval_change < 0 else ""
+                rows.append(("区间涨跌", f"{interval_change:+.2f}%", interval_tone))
         else:
             price = self._float(quote.get("price"), float("nan"))
             if math.isfinite(price):
-                rows.append(("最新价", f"{price:,.2f}"))
+                day_tone = self._price_tone(quote)
+                rows.append(("最新价", f"{price:,.2f}", day_tone if day_tone in {"up", "down"} else ""))
         change = self._float(quote.get("change_pct"), float("nan"))
         if math.isfinite(change):
-            rows.append(("当日涨跌", f"{change:+.2f}%"))
+            day_tone = "up" if change > 0 else "down" if change < 0 else ""
+            rows.append(("当日涨跌", f"{change:+.2f}%", day_tone))
         if not rows:
             return (f'<svg viewBox="0 0 330 116" role="img" aria-label="行情回顾">'
                     f'<text class="svg-value" x="165" y="64" text-anchor="middle">行情回顾</text></svg>')
         cells = ''.join(
             f'<text class="snap-label" x="{22 + i * 104}" y="44">{html.escape(key)}</text>'
-            f'<text class="snap-value" x="{22 + i * 104}" y="76">{html.escape(value[:10])}</text>'
-            for i, (key, value) in enumerate(rows[:3]))
+            f'<text class="snap-value {row_tone}" x="{22 + i * 104}" y="76">{html.escape(value[:10])}</text>'
+            for i, (key, value, row_tone) in enumerate(rows[:3]))
         return f'<svg viewBox="0 0 330 116" role="img" aria-label="行情回顾">{cells}</svg>'
 
     def _headline_svg(self, quote: Mapping[str, Any]) -> str:
