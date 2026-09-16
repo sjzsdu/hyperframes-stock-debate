@@ -1,4 +1,4 @@
-"""Tests for the StockTalk CLI: batch targets, platform override, exit codes."""
+"""谈股论金 CLI 测试：批量目标、平台覆盖、退出码。"""
 
 from __future__ import annotations
 

@@ -160,7 +160,7 @@ class HyperFramesBuilder:
         """Run HyperFrames CLI and return a non-empty MP4 path."""
         directory = project.directory if isinstance(project, HyperFramesProject) else Path(project)
         directory = directory.resolve()
-        destination = Path(output_path or self.video_config.get("output_path", self._output_dir / "stocktalk.mp4")).resolve()
+        destination = Path(output_path or self.video_config.get("output_path", self._output_dir / "tangulunjin.mp4")).resolve()
         destination.parent.mkdir(parents=True, exist_ok=True)
         if shutil.which("npx") is None:
             raise HyperFramesBuildError("Node.js/npx is required to run HyperFrames CLI")

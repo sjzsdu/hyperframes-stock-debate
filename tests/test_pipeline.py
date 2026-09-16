@@ -1,7 +1,7 @@
-"""Minimal tests for the StockTalk pipeline wiring.
+"""谈股论金流水线连接的最小测试。
 
-These tests validate that the pipeline instantiates and calls each stage in the
-correct order, using lightweight stubs that avoid real CLI calls.
+这些测试验证流水线实例化并按正确顺序调用每个阶段，
+使用轻量级存根避免真正的 CLI 调用。
 """
 
 from __future__ import annotations

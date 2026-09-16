@@ -6,7 +6,7 @@ extra steps beyond installing each dependency's own environment.
 
 ## social-auto-upload
 
-Multi-platform uploader backing `stocktalk`'s `--publish` (抖音/B站/快手/小红书/视频号).
+支撑 `tangulunjin` `--publish` 的多平台上传器（抖音/B站/快手/小红书/视频号）。
 
 - Upstream: https://github.com/dreammis/social-auto-upload
 - Vendored from commit: `0012d2c` (shallow clone, so upstream history was dropped)
