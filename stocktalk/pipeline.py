@@ -253,6 +253,10 @@ class Pipeline:
                 def report_event(platform: str, label: str, state: str) -> None:
                     progress.update(task, description=f"发布 {label}（{platform}）: {state}")
 
+                # Step aside while a 抖音 SMS challenge asks the operator for a
+                # code: the banner and their typing must not fight a refreshing
+                # progress bar for the same lines.
+                self.publisher.set_ui_hooks(pause=progress.stop, resume=progress.start)
                 publish_report = self.publisher.publish(
                     video_path, approved, stock_data.get("quote", {}).get("name", stock_name or ""), stock_code,
                     schedule=str(self.config.get("publish", {}).get("schedule") or "") or None,

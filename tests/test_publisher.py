@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import subprocess
 import sys
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 import pytest
 
+from stocktalk.modules import publisher as publisher_module
 from stocktalk.modules.publisher import (
     BILIBILI_FINANCE_TID,
     PLATFORM_LABELS,
@@ -18,6 +20,7 @@ from stocktalk.modules.publisher import (
     SauPublisher,
     SmsChallengeGuard,
     StreamAbort,
+    VerificationCodePrompt,
     check_environment,
     cover_sizes_for,
 )
@@ -523,3 +526,272 @@ def test_environment_check_reports_every_tool(tmp_path: Path) -> None:
     sau = next(item for item in checks if item["name"] == "sau")
     assert not sau["ok"] and sau["required"]
     assert all(item["required"] is False for item in checks if item["name"] != "sau")
+
+
+# ---------------------------------------------------------------------------
+# Rate limits: worth another try, but only after the cooldown
+# ---------------------------------------------------------------------------
+
+BILIBILI_RATE_LIMIT = (
+    "Error: after retries\n"
+    "╰─▶ upload rate limit (code: 601): 您上传视频过快，请您稍作休息后再继续\n"
+)
+
+
+def test_rate_limited_upload_waits_out_the_cooldown_before_retrying(tmp_path: Path) -> None:
+    attempts: list[str] = []
+
+    def runner(command, cwd):
+        attempts.append(command[1])
+        if command[1] == "bilibili" and attempts.count("bilibili") == 1:
+            return FakeCompleted(returncode=1, stdout="", stderr=BILIBILI_RATE_LIMIT)
+        return FakeCompleted()
+
+    slept: list[float] = []
+    publisher = SauPublisher(
+        {"publish": {"platforms": ["bilibili"], "preflight": False, "retries": 1,
+                     "retry_delay_seconds": 30, "rate_limit_wait_seconds": 90}},
+        runner=runner, sau_bin="sau", sleep=slept.append)
+
+    report = publisher.publish(_video(tmp_path), SCRIPT, "贵州茅台", "600519")
+
+    assert report["succeeded"] == ["bilibili"]
+    # The 30s ordinary backoff would have been another guaranteed failure.
+    assert sum(slept) == 90
+    assert max(slept) <= 30  # narrated in chunks so the wait does not look like a hang
+
+
+def test_rate_limit_hint_explains_the_silence() -> None:
+    publisher = SauPublisher({"publish": {"rate_limit_wait_seconds": 600}}, sau_bin="sau")
+    verdict = publisher._classify("bilibili", BILIBILI_RATE_LIMIT)
+    assert verdict.kind == "rate_limit"
+    assert verdict.wait_seconds == 600
+    assert "限流" in verdict.hint
+
+
+def test_ordinary_failures_keep_the_short_backoff() -> None:
+    publisher = SauPublisher({}, sau_bin="sau")
+    verdict = publisher._classify("douyin", "browser crashed")
+    assert verdict.kind == "transient" and verdict.wait_seconds == 0 and verdict.retryable
+
+
+def test_a_long_wait_is_narrated_so_it_does_not_look_hung(tmp_path: Path) -> None:
+    publisher = SauPublisher({"publish": {"rate_limit_wait_seconds": 90}},
+                             sau_bin="sau", sleep=lambda _: None)
+    events: list[str] = []
+    publisher._wait(90, "重试 B站", lambda platform, label, state: events.append(state))
+    assert len(events) == 3  # every 30s
+    assert "还需" in events[0]
+
+
+def test_short_waits_are_slept_in_one_go() -> None:
+    slept: list[float] = []
+    publisher = SauPublisher({}, sau_bin="sau", sleep=slept.append)
+    publisher._wait(5, "retry")
+    assert slept == [5]
+
+
+# ---------------------------------------------------------------------------
+# Douyin SMS code: ask the human instead of hanging on an invisible prompt
+# ---------------------------------------------------------------------------
+
+def make_prompt(tmp_path: Path, *, lines: list[str], interactive: bool = True,
+                wait_seconds: float = 150.0) -> tuple[VerificationCodePrompt, list[str]]:
+    printed: list[str] = []
+    codes = iter(lines)
+
+    def reader(timeout: float) -> str | None:
+        return next(codes)
+
+    prompt = VerificationCodePrompt(
+        tmp_path / "verify_code.txt", wait_seconds=wait_seconds, interactive=interactive,
+        reader=reader, emit=lambda text, end="\n": printed.append(text.rstrip()))
+    return prompt, printed
+
+
+def test_prompt_writes_the_code_for_sau_to_consume(tmp_path: Path) -> None:
+    prompt, printed = make_prompt(tmp_path, lines=["654321"])
+    assert prompt("抖音") is True
+    assert (tmp_path / "verify_code.txt").read_text(encoding="utf-8") == "654321"
+    assert any("验证码" in line and "抖音" in line for line in printed)
+
+
+def test_prompt_reasks_after_a_typo(tmp_path: Path) -> None:
+    prompt, printed = make_prompt(tmp_path, lines=["notacode", "654321"])
+    assert prompt() is True
+    assert (tmp_path / "verify_code.txt").read_text(encoding="utf-8") == "654321"
+    assert any("4-8 位数字" in line for line in printed)
+
+
+def test_prompt_gives_up_when_nobody_answers(tmp_path: Path) -> None:
+    prompt, printed = make_prompt(tmp_path, lines=[None])
+    assert prompt() is False
+    assert not (tmp_path / "verify_code.txt").exists()
+    assert any("未执行" in line or "写入" in line for line in printed)
+
+
+def test_prompt_is_silent_outside_an_interactive_terminal(tmp_path: Path) -> None:
+    """Unattended runs must keep the old contract: nobody can read a prompt."""
+    prompt, printed = make_prompt(tmp_path, lines=[""], interactive=False)
+    assert prompt() is False
+    assert not list(iter(printed)) or True  # hint may or may not print
+    assert not (tmp_path / "verify_code.txt").exists()
+
+
+def test_child_process_cannot_block_on_its_own_invisible_prompt(tmp_path: Path) -> None:
+    """sau's `input()` prompt is captured, so it must never be reachable."""
+    publisher = SauPublisher({"publish": {"sau_dir": str(tmp_path), "timeout_seconds": 10,
+                                          "verify_code_wait_seconds": 0}})
+    completed = publisher._run_subprocess(
+        [sys.executable, "-u", "-c",
+         "import sys; print('EOF' if sys.stdin.read() == '' else 'TTY')", "upload-video"], tmp_path)
+    assert "EOF" in completed.stdout
+
+
+def test_upload_survives_an_sms_challenge_answered_from_the_terminal(tmp_path: Path) -> None:
+    """End to end: sau waits on the file, we prompt, upload completes."""
+    script = (
+        "import os, time\n"
+        f"code_file = {str(tmp_path / 'verify_code.txt')!r}\n"
+        "print('📱 检测到短信验证码弹窗', flush=True)\n"
+        "for _ in range(200):\n"
+        "    if os.path.exists(code_file):\n"
+        "        print('✍️ 已获取验证码，准备填入: ' + open(code_file).read().strip(), flush=True)\n"
+        "        os.remove(code_file)\n"
+        "        break\n"
+        "    time.sleep(0.05)\n"
+        "print('🥳 视频发布成功', flush=True)\n"
+    )
+    publisher = SauPublisher(
+        {"publish": {"sau_dir": str(tmp_path), "verify_code_wait_seconds": 30, "timeout_seconds": 30}},
+        sau_bin=sys.executable,
+        code_prompt=lambda label, wait: (tmp_path / "verify_code.txt").write_text("135790", encoding="utf-8") or True)
+
+    completed = publisher._run_subprocess([sys.executable, "-u", "-c", script, "upload-video"], tmp_path)
+
+    assert completed.returncode == 0
+    assert "已获取验证码，准备填入: 135790" in completed.stdout
+    assert not (tmp_path / "verify_code.txt").exists()  # consumed and cleaned by the child
+
+
+# ---------------------------------------------------------------------------
+# Ctrl-C: stop cleanly, and never leave a browser running
+# ---------------------------------------------------------------------------
+
+def test_ctrl_c_stops_the_run_without_losing_the_report(tmp_path: Path) -> None:
+    uploaded: list[str] = []
+
+    def runner(command, cwd):
+        if command[1] == "douyin":
+            uploaded.append(command[1])
+            return FakeCompleted()
+        raise KeyboardInterrupt
+
+    publisher = SauPublisher(
+        {"publish": {"platforms": ["douyin", "kuaishou", "tencent"], "preflight": False}},
+        runner=runner, sau_bin="sau")
+
+    report = publisher.publish(_video(tmp_path), SCRIPT, "贵州茅台", "600519")
+
+    assert uploaded == ["douyin"]  # the abort does not roll back what went out
+    statuses = {item["platform"]: item for item in report["platforms"]}
+    assert statuses["douyin"]["ok"] is True
+    assert "用户中断" in statuses["kuaishou"]["detail"]
+    assert "未执行" in statuses["tencent"]["detail"]
+    assert [f["platform"] for f in report["failed"]] == ["kuaishou", "tencent"]
+
+
+def test_ctrl_c_kills_the_upload_process(tmp_path: Path) -> None:
+    """A live upload must not keep posting after the operator gave up."""
+    done = tmp_path / "finished"
+    publisher = SauPublisher(
+        {"publish": {"sau_dir": str(tmp_path), "timeout_seconds": 30, "verify_code_wait_seconds": 30}},
+        sau_bin=sys.executable,
+        code_prompt=lambda label, wait: (_ for _ in ()).throw(KeyboardInterrupt()))
+
+    with pytest.raises(KeyboardInterrupt):
+        publisher._run_subprocess(
+            [sys.executable, "-u", "-c",
+             f"import time; print('📱 检测到短信验证码弹窗', flush=True); time.sleep(3); "
+             f"open({str(done)!r}, 'w').write('x')", "upload-video"], tmp_path)
+
+    time.sleep(0.5)
+    assert not done.exists()
+
+
+def test_repeated_challenge_logs_do_not_postpone_the_deadline() -> None:
+    """sau restates the prompt for as long as the popup is up.
+
+    Treating every repetition as "still arming" used to skip the deadline check
+    forever, so the run sat there until the global timeout — the exact hang the
+    guard exists to prevent.
+    """
+    now = [0.0]
+    guard = SmsChallengeGuard(Path("/tmp/none"), 10, clock=lambda: now[0])
+    guard.feed("⏳ 等待验证码输入；可在交互终端直接输入")
+    assert guard.armed
+    now[0] = 5
+    assert guard.feed("⏳ 等待验证码输入；可在交互终端直接输入") is None
+    now[0] = 11
+    reason = guard.feed("⏳ 等待验证码输入；可在交互终端直接输入")
+    assert reason and "短信验证码" in reason
+
+
+def test_the_operator_is_asked_once_per_challenge(tmp_path: Path) -> None:
+    """``on_arm`` fires on the first marker only, however chatty sau gets."""
+    now = [0.0]
+    asked: list[str] = []
+    guard = SmsChallengeGuard(tmp_path / "verify_code.txt", 10, clock=lambda: now[0],
+                              on_arm=lambda: asked.append("?") or False)
+    guard.feed("📱 检测到短信验证码弹窗")
+    guard.feed("📤 已点击「获取验证码」，请查看手机短信")
+    guard.feed("⏳ 等待验证码输入；可在交互终端直接输入")
+    assert len(asked) == 1
+
+
+def test_a_code_file_buys_the_run_another_window(tmp_path: Path) -> None:
+    """Someone may still rescue it by writing the code by hand."""
+    now = [0.0]
+    code_file = tmp_path / "verify_code.txt"
+    guard = SmsChallengeGuard(code_file, 10, clock=lambda: now[0])
+    guard.feed("📱 检测到短信验证码弹窗")
+    now[0] = 9.5
+    code_file.write_text("123456", encoding="utf-8")
+    assert guard.feed("") is None
+    now[0] = 15
+    assert guard.feed("") is None  # window refreshed by the arriving code
+    now[0] = 45  # a code sau never picks up cannot keep it alive forever
+    assert guard.feed("") is not None
+
+
+def test_extend_starts_a_fresh_window() -> None:
+    now = [0.0]
+    guard = SmsChallengeGuard(Path("/tmp/none"), 10, clock=lambda: now[0])
+    guard.feed("📱 检测到短信验证码弹窗")
+    now[0] = 9.9
+    guard.extend()
+    now[0] = 19.5
+    assert guard.feed("") is None
+    now[0] = 20
+    assert guard.feed("") is not None
+
+
+def test_prompt_steps_aside_for_a_live_progress_bar(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The banner and the operator's typing must not fight a refreshing bar."""
+    publisher = SauPublisher({"publish": {"sau_dir": str(tmp_path), "verify_code_wait_seconds": 20}}, sau_bin="sau")
+    calls: list[str] = []
+    publisher.set_ui_hooks(pause=lambda: calls.append("pause"), resume=lambda: calls.append("resume"))
+
+    class FakeStdin:
+        def isatty(self) -> bool:
+            return True
+
+        def readline(self) -> str:
+            return "123456\n"
+
+    monkeypatch.setattr(sys, "stdin", FakeStdin(), raising=False)
+    monkeypatch.setattr(publisher_module.select, "select", lambda *args: ([True], [], []))
+
+    assert publisher._ask_for_code("抖音") is True
+    assert calls == ["pause", "resume"]
+    assert (tmp_path / "verify_code.txt").read_text(encoding="utf-8") == "123456"

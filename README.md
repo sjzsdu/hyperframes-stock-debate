@@ -108,6 +108,32 @@ tangulunjin 601689 --republish
 **只补发上次失败的平台**；上次全部成功时会提示无需补发。要强制重发某平台加
 `--platforms douyin`。单个平台失败依旧不影响其他平台，失败退出码为 1。
 
+### 发布中遇到风控怎么办
+
+**抖音短信验证码**：发布瞬间可能弹风控，这时终端会**直接弹出提示**，把手机
+收到的验证码粘进去回车，上传就继续往下走：
+
+```
+  ⚠️  抖音这次发布要过一道短信验证码风控
+      手机应该刚收到验证码，粘到这里回车就继续（35s 内不输入算失败）
+      验证码: 654321
+  已写入 verify_code.txt，正在提交…
+```
+
+跑 `--publish` 时进度条会自动让位，输入过程不会被刷新打断。超时没输入则会给
+出明确原因并跳过该平台（其他平台照发），之后 `--republish` 再补一次即可。
+无人值守（cron）下不弹提示，保留老的救急方式：`echo -n "123456" >
+third_party/social-auto-upload/verify_code.txt`；命令行可加 `--no-interactive`
+强制走这条路。
+
+**B站限流**：连着上传会被 biliup 挡回来（`upload rate limit (code: 601)
+您上传视频过快`）。它不会被当成普通失败立刻重试（那样只会再失败一次），而是
+按 `publish.rate_limit_wait_seconds`（默认 10 分钟）冷却后再试，等待期间进度条
+会显示剩余时间。跑批时想更保守就把这个值调大。
+
+**Ctrl-C**：随时中断，已成功的平台不会被回滚；剩下的标为「未执行」并照常
+生成结果 JSON，上传用的浏览器进程也会被一起杀掉，不会留在后台偷偷发。
+
 ### 封面图
 
 发布前会自动用 headless Chrome 截图生成封面，并按平台支持的能力下发
@@ -135,6 +161,7 @@ tangulunjin <股票代码...> [选项]
   --check               发布预检：工具链 + 各平台登录态，全过才退出码 0
   --platforms LIST      本次只发布指定平台，逗号分隔
   --watchlist FILE      从文件读取股票代码（每行一个，# 之后为注释）
+  --no-interactive      不询问任何问题（验证码等提示走文件方式）
   --help                显示帮助信息
 ```
 
@@ -185,8 +212,10 @@ publish:
   headless: true
   preflight: true            # 上传前用 sau <p> check 验 cookie，失效平台直接跳过
   retries: 1                 # 上传失败的平台在同一轮内自动重试
-  retry_delay_seconds: 30
-  verify_code_wait_seconds: 150  # 抖音短信验证码等待上限，超出即中止该平台
+  retry_delay_seconds: 30    # 普通失败（浏览器崩了、网络抖了）的退避
+  verify_code_wait_seconds: 150  # 抖音短信验证码等待窗口，超出即中止该平台
+  interactive_verify_code: true  # 交互终端下直接弹提示让你输入验证码
+  rate_limit_wait_seconds: 600   # B站限流（601 上传过快）的冷却时长
   platform_canvas:           # 给个别平台单独渲一版画幅
     bilibili: horizontal
   schedule: ""               # 留空立即发布；如 "2026-09-16 19:30" 定时发布
@@ -198,9 +227,10 @@ publish:
 
 **无人值守运行时的三个已知坑：**
 
-1. **抖音短信验证码**：发布瞬间可能触发风控弹窗，sau 会无声地无限等待验证码。
-   现在检测到该状态后会在 `verify_code_wait_seconds` 内等 `third_party/social-auto-upload/verify_code.txt`，
-   超时即中止该平台并给出提示（不再白等到 15 分钟上传超时）。想抢救就在窗口期内写文件：
+1. **抖音短信验证码**：发布瞬间可能触发风控弹窗。交互终端下会直接提示你把验证码
+   粘进来（见「发布中遇到风控怎么办」）；无人值守时则在 `verify_code_wait_seconds`
+   的窗口内等 `third_party/social-auto-upload/verify_code.txt`，超时即中止该平台
+   并给出提示（不再白等到 15 分钟上传超时）。想抢救就在窗口期内写文件：
    `echo -n "123456" > third_party/social-auto-upload/verify_code.txt`（sau 读到后自动提交并删除）。
 2. **cookie 失效**：预检会拦下失效平台并在报告里提示 `sau <platform> login`，不会浪费一次渲染。
 3. **B站首次上传**：会从 GitHub 下载 `biliup` 二进制，网络不通时 B站失败但**不影响其他平台**。

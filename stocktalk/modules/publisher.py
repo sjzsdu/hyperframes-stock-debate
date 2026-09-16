@@ -21,8 +21,11 @@ its CLI has no ``--headless`` flag and its ``--desc``/``--tid`` are required.
 from __future__ import annotations
 
 import queue
+import re
+import select
 import shutil
 import subprocess
+import sys
 import threading
 import time
 from collections.abc import Callable, Mapping, Sequence
@@ -49,6 +52,16 @@ BILIBILI_FINANCE_TID = 207
 # log.  Watching sau's own stream lets us fail in minutes with a real remedy.
 SMS_CHALLENGE_MARKERS: tuple[str, ...] = ("检测到短信验证码弹窗", "已点击「获取验证码」", "等待验证码输入")
 SMS_RESOLVED_MARKERS: tuple[str, ...] = ("已获取验证码", "验证码已填入", "验证码处理完成", "发布成功")
+
+# Bilibili uploads through biliup, which refuses bursts with
+# ``upload rate limit (code: 601): 您上传视频过快``.  The cooldown is minutes
+# long, so honouring the ordinary 30s retry backoff only burns the retry budget
+# and surprises nobody: it needs a wait of its own, then another try.
+RATE_LIMIT_MARKERS: tuple[str, ...] = ("upload rate limit", "code: 601", "上传视频过快", "频率限制")
+
+# A verification code is 4-8 digits on every platform we know; anything else is
+# a typo worth re-asking rather than sending upstream.
+CODE_PATTERN = re.compile(r"\d{4,8}")
 
 # Per-platform upload constraints and CLI capability.  ``runtime_flags`` marks
 # whether ``sau <platform> upload-video`` accepts --headless/--headed (bilibili
@@ -161,6 +174,19 @@ class PlatformResult:
     # False for failures that a retry cannot fix (a stale cookie, an SMS
     # challenge): retrying those only burns another wait window.
     retryable: bool = True
+    # Minimum silence required before this platform is worth another try
+    # (a rate limit needs minutes, a crashed browser needs seconds).
+    retry_after: float = 0.0
+
+
+@dataclass(frozen=True)
+class FailureVerdict:
+    """What one failed upload deserves: another try, after how long, and why."""
+
+    retryable: bool
+    wait_seconds: float = 0.0
+    hint: str = ""
+    kind: str = "transient"
 
 
 class SmsChallengeGuard:
@@ -170,40 +196,181 @@ class SmsChallengeGuard:
     with an empty string), so the deadline is enforced even when the child
     process goes completely silent.
 
+    ``on_arm`` is invoked exactly once per challenge, right when the popup is
+    recognised — the hook is where an interactive run asks the operator for the
+    code.  Returning True means a code was delivered, and the window restarts.
+
     ``verify_code_wait_seconds <= 0`` disables the guard entirely.
     """
 
     def __init__(self, code_file: Path, wait_seconds: float,
-                 clock: Callable[[], float] = time.monotonic) -> None:
+                 clock: Callable[[], float] = time.monotonic,
+                 on_arm: Callable[[], bool] | None = None,
+                 max_windows: int = 4) -> None:
         self.code_file = Path(code_file)
         self.wait_seconds = float(wait_seconds)
         self._clock = clock
+        self._on_arm = on_arm
+        # A code file that sau never consumes would otherwise refresh forever,
+        # which is the hang this class exists to prevent, so the total is capped:
+        # four windows is plenty of time to read a text message and type it in.
+        self.max_windows = max(1, int(max_windows))
+        self.started_at: float | None = None
         self.deadline: float | None = None
 
     @property
     def armed(self) -> bool:
         return self.deadline is not None
 
+    @property
+    def exhausted(self) -> bool:
+        """Has this challenge consumed its whole budget, refreshes included?"""
+        return self.started_at is not None and self._clock() - self.started_at >= self._budget
+
+    @property
+    def _budget(self) -> float:
+        return self.wait_seconds * self.max_windows
+
+    def extend(self) -> None:
+        """Grant another window, unless the challenge has used up its budget."""
+        if self.deadline is not None and not self.exhausted:
+            self.deadline = self._clock() + self.wait_seconds
+
     def feed(self, line: str) -> str | None:
         """Observe one output line; return an abort reason once the wait lapses."""
         if any(marker in line for marker in SMS_RESOLVED_MARKERS):
             self.deadline = None
             return None
-        if any(marker in line for marker in SMS_CHALLENGE_MARKERS):
-            if self.deadline is None:
-                self.deadline = self._clock() + self.wait_seconds
+        if self.deadline is None and any(marker in line for marker in SMS_CHALLENGE_MARKERS):
+            # Only the *first* marker arms the guard.  sau repeats variants of
+            # the same log line for as long as the popup is up, and letting each
+            # repetition return early would postpone the deadline check
+            # indefinitely — which is the hang this class exists to prevent.
+            # Repetitions of the marker are also common; the arming above only
+            # reacts to the first, so these fall through to the checks below.
+            self.deadline = self._clock() + self.wait_seconds
+            self.started_at = self._clock()
+            if self._on_arm is not None and self._on_arm():
+                self.extend()
             return None
         if self.deadline is None:
             return None
         # A human (or a watcher) can still rescue the run by dropping the code
         # into the file sau polls; that buys another window.
-        if self.code_file.is_file():
-            self.deadline = self._clock() + self.wait_seconds
+        if self.code_file.is_file() and not self.exhausted:
+            self.extend()
             return None
-        if self._clock() >= self.deadline:
-            return (f"抖音要求短信验证码，等待 {self.wait_seconds:g}s 仍未收到；"
+        if self.exhausted or self._clock() >= self.deadline:
+            waited = self._clock() - (self.started_at or self._clock())
+            return (f"抖音要求短信验证码，等待 {waited:.0f}s 仍未收到；"
                     f"把手机收到的验证码写入 {self.code_file} 后重试")
         return None
+
+
+def _default_prompt_emit(text: str, end: str = "\n") -> None:
+    print(text, end=end, flush=True)
+
+
+class VerificationCodePrompt:
+    """Ask the operator for the 抖音 SMS code and hand it to sau.
+
+    sau does prompt for the code itself, but its stdout is captured here, so the
+    operator never sees ``请输入抖音短信验证码`` and the run looks hung until the
+    timeout.  The child therefore gets a null stdin (which makes sau take its
+    file-driven path) and we do the asking: print a banner nobody can miss, read
+    the code straight from the terminal, write it to the file sau polls.
+
+    Returns True when a code was delivered.  False means there was nobody to ask
+    (cron/CI, piped stdin) or they declined — the caller then falls back to
+    waiting for someone to write the file by hand, exactly as before.
+    """
+
+    def __init__(self, code_file: Path, *, wait_seconds: float = 150.0,
+                 enabled: bool = True, interactive: bool | None = None,
+                 stdin: Any | None = None,
+                 reader: Callable[[float], str | None] | None = None,
+                 emit: Callable[..., None] = _default_prompt_emit,
+                 pause_ui: Callable[[], None] | None = None,
+                 resume_ui: Callable[[], None] | None = None,
+                 clock: Callable[[], float] = time.monotonic) -> None:
+        self.code_file = Path(code_file)
+        self.wait_seconds = float(wait_seconds)
+        self.enabled = enabled
+        self._stdin = stdin if stdin is not None else sys.stdin
+        self._interactive = bool(getattr(self._stdin, "isatty", lambda: False)()) if interactive is None else interactive
+        self._reader = reader
+        self._emit = emit
+        self._pause_ui = pause_ui
+        self._resume_ui = resume_ui
+        self._clock = clock
+
+    @property
+    def available(self) -> bool:
+        return self.enabled and self._interactive and self.wait_seconds > 0
+
+    def __call__(self, label: str = "抖音") -> bool:
+        if not self.available:
+            if self.enabled and self.wait_seconds > 0:
+                self._emit(f"  {label}要求短信验证码，但当前不是交互终端："
+                           f"请把手机收到的验证码写入 {self.code_file}（{self.wait_seconds:g}s 内）")
+            return False
+        # Leave the last few seconds to the file-watch fallback below, so the
+        # operator always gets one clear closing message either way.
+        budget = max(5.0, self.wait_seconds - 5.0)
+        deadline = self._clock() + budget
+        while True:
+            remaining = deadline - self._clock()
+            if remaining <= 0:
+                self._emit(f"  未在 {budget:g}s 内输入，仍会继续等待手工写入 {self.code_file}")
+                return False
+            code = self._ask(label, remaining)
+            if code is None:
+                self._emit(f"  等待输入超时；也可以把验证码手工写入 {self.code_file}")
+                return False
+            code = code.strip()
+            if not code:
+                self._emit("  已跳过，继续等待验证码文件")
+                return False
+            if not CODE_PATTERN.fullmatch(code):
+                self._emit("  验证码一般是 4-8 位数字，请重新输入")
+                continue
+            self.code_file.parent.mkdir(parents=True, exist_ok=True)
+            self.code_file.write_text(code, encoding="utf-8")
+            self._emit(f"  已写入 {self.code_file.name}，正在提交…")
+            return True
+
+    def _ask(self, label: str, remaining: float) -> str | None:
+        """Print the banner and read one line within ``remaining`` seconds."""
+        if self._pause_ui is not None:
+            self._pause_ui()  # a refreshing progress bar would fight the prompt
+        try:
+            self._emit("")
+            self._emit(f"  ⚠️  {label}这次发布要过一道短信验证码风控")
+            self._emit(f"      手机应该刚收到验证码，粘到这里回车就继续（{remaining:g}s 内不输入算失败）")
+            self._emit("      验证码: ", end="")
+            try:
+                return self._read(remaining)
+            finally:
+                self._emit("")
+        finally:
+            if self._resume_ui is not None:
+                self._resume_ui()
+
+    def _read(self, timeout: float) -> str | None:
+        """One line from stdin, or None when nothing arrived in time."""
+        if self._reader is not None:
+            return self._reader(timeout)
+        try:
+            ready, _, _ = select.select([self._stdin], [], [], timeout)
+        except (OSError, ValueError):
+            return None
+        if not ready:
+            return None
+        try:
+            # An empty string is EOF: nobody is on the other end to answer.
+            return self._stdin.readline() or None
+        except (OSError, ValueError):
+            return None
 
 
 class PublishMetadataGenerator:
@@ -280,7 +447,8 @@ class SauPublisher:
     """Publish MP4 videos to Chinese platforms through the ``sau`` CLI."""
 
     def __init__(self, config: Mapping[str, Any] | None = None, runner: Any | None = None,
-                 sau_bin: str | None = None, sleep: Callable[[float], None] = time.sleep) -> None:
+                 sau_bin: str | None = None, sleep: Callable[[float], None] = time.sleep,
+                 code_prompt: Callable[[str, float], bool] | None = None) -> None:
         self.config = dict(config or {})
         publish = self.config.get("publish", {}) or {}
         self.sau_dir = Path(publish.get("sau_dir", "third_party/social-auto-upload"))
@@ -296,10 +464,25 @@ class SauPublisher:
         self.retries = max(0, int(publish.get("retries", 0)))
         self.retry_delay = float(publish.get("retry_delay_seconds", 30))
         self.verify_code_wait = float(publish.get("verify_code_wait_seconds", 150))
+        # A rate limit is asking us to slow down, and it says so for minutes.
+        self.rate_limit_wait = float(publish.get("rate_limit_wait_seconds", 600))
+        # Ask for the SMS code in the terminal when there is one; cron/CI falls
+        # back to dropping it into verify_code.txt by hand.
+        self.interactive_verify_code = bool(publish.get("interactive_verify_code", True))
         self._sleep = sleep
         self.metadata_gen = PublishMetadataGenerator(self.config)
         self._runner = runner or self._run_subprocess
         self._sau_bin = sau_bin
+        # Injected by tests and by anything with a nicer UI than `input()`.
+        self._code_prompt = code_prompt
+        self._pause_ui: Callable[[], None] | None = None
+        self._resume_ui: Callable[[], None] | None = None
+
+    def set_ui_hooks(self, pause: Callable[[], None] | None = None,
+                     resume: Callable[[], None] | None = None) -> None:
+        """Let a live progress display step aside while we prompt for a code."""
+        self._pause_ui = pause
+        self._resume_ui = resume
 
     # ------------------------------------------------------------------
     # Public API
@@ -355,32 +538,56 @@ class SauPublisher:
                         detail=f"发布前预检未通过（很可能需要重新登录 sau {platform} login）: {check['detail']}")
                     pending.remove(platform)
 
-        for platform in pending:
+        interrupted = False
+        for index, platform in enumerate(pending):
             spec = PLATFORM_SPECS.get(platform)
             label = (spec or DEFAULT_SPEC)["label"] or platform
             if not spec:
                 outcomes[platform] = PlatformResult(platform=platform, ok=False, detail="unsupported platform")
                 continue
             on_event and on_event(platform, label, "上传中")
-            outcome = self._publish_safely(platform, videos.get(platform, video), metadata, schedule, cover_files)
+            try:
+                outcome = self._publish_safely(platform, videos.get(platform, video), metadata, schedule, cover_files)
+            except KeyboardInterrupt:
+                # Ctrl-C once aborts the run, but the platforms already uploaded
+                # still deserve a report — otherwise the recording of what went
+                # out is lost with the traceback.
+                interrupted = True
+                outcome = PlatformResult(platform=platform, ok=False, retryable=False, detail="被用户中断（Ctrl-C）")
             on_event and on_event(platform, label, "完成" if outcome.ok else "失败")
             outcomes[platform] = outcome
-
-        for attempt in range(1, self.retries + 1):
-            retry_targets = [p for p in pending if p in PLATFORM_SPECS
-                             and p in outcomes and not outcomes[p].ok and outcomes[p].retryable]
-            if not retry_targets:
+            if interrupted:
+                for skipped in pending[index + 1:]:
+                    outcomes[skipped] = PlatformResult(platform=skipped, ok=False, retryable=False,
+                                                       detail="未执行（同一轮前面已被用户中断）")
                 break
-            labels = "、".join(PLATFORM_LABELS.get(p, p) for p in retry_targets)
-            on_event and on_event("*", "重试", f"第 {attempt} 次重试 {labels}（{self.retry_delay:g}s 后）")
-            self._sleep(self.retry_delay)
-            for platform in retry_targets:
-                label = PLATFORM_LABELS.get(platform, platform)
-                on_event and on_event(platform, label, "重试中")
-                outcome = self._publish_safely(platform, videos.get(platform, video), metadata, schedule, cover_files)
-                outcome.attempts = outcomes[platform].attempts + 1
-                outcomes[platform] = outcome
-                on_event and on_event(platform, label, "完成" if outcome.ok else "失败")
+
+        if not interrupted:
+            for attempt in range(1, self.retries + 1):
+                retry_targets = [p for p in pending if p in PLATFORM_SPECS
+                                 and p in outcomes and not outcomes[p].ok and outcomes[p].retryable]
+                if not retry_targets:
+                    break
+                labels = "、".join(PLATFORM_LABELS.get(p, p) for p in retry_targets)
+                # Honour the longest cooldown in the batch: a rate-limited B站
+                # shares the wait with anything else retrying alongside it.
+                wait = max([self.retry_delay, *[outcomes[p].retry_after for p in retry_targets]])
+                on_event and on_event("*", "重试", f"第 {attempt} 次重试 {labels}（{self._format_wait(wait)}后）")
+                try:
+                    self._wait(wait, f"重试 {labels}", on_event)
+                except KeyboardInterrupt:
+                    interrupted = True
+                    for platform in retry_targets:
+                        outcomes[platform] = PlatformResult(platform=platform, ok=False, retryable=False,
+                                                            detail="重试等待中用户中断")
+                    break
+                for platform in retry_targets:
+                    label = PLATFORM_LABELS.get(platform, platform)
+                    on_event and on_event(platform, label, "重试中")
+                    outcome = self._publish_safely(platform, videos.get(platform, video), metadata, schedule, cover_files)
+                    outcome.attempts = outcomes[platform].attempts + 1
+                    outcomes[platform] = outcome
+                    on_event and on_event(platform, label, "完成" if outcome.ok else "失败")
 
         results = [outcomes[p] for p in platform_list if p in outcomes]
         return {
@@ -422,6 +629,66 @@ class SauPublisher:
             finally:
                 self.timeout = saved
         return results
+
+    # ------------------------------------------------------------------
+    # Failure triage, waiting, prompting
+    # ------------------------------------------------------------------
+    def _wait(self, seconds: float, reason: str, on_event: Callable[[str, str, str], None] | None = None) -> None:
+        """Sleep, narrating anything long enough to look like a hang.
+
+        A ten-minute rate-limit cooldown with no output is indistinguishable
+        from a dead run, so the remaining time is pushed through ``on_event``
+        (which is what the progress bar displays).
+        """
+        if seconds <= 0:
+            return
+        if seconds <= 60:
+            self._sleep(seconds)
+            return
+        remaining = seconds
+        while remaining > 0:
+            chunk = min(30.0, remaining)
+            note = f"{reason}：还需 {self._format_wait(remaining)}"
+            if on_event is not None:
+                on_event("*", "等待", note)
+            else:  # no progress display to talk to (--republish and friends)
+                print(f"  {note}", flush=True)
+            self._sleep(chunk)
+            remaining -= chunk
+
+    @staticmethod
+    def _format_wait(seconds: float) -> str:
+        seconds = max(0.0, float(seconds))
+        if seconds < 60:
+            return f"{seconds:g}s"
+        minutes, rest = divmod(int(seconds), 60)
+        return f"{minutes} 分 {rest:02d}s" if rest else f"{minutes} 分钟"
+
+    def _classify(self, platform: str, detail: str) -> FailureVerdict:
+        """Decide whether another try can help, and how long to wait first."""
+        text = (detail or "").lower()
+        if any(marker.lower() in text for marker in RATE_LIMIT_MARKERS):
+            label = PLATFORM_LABELS.get(platform, platform)
+            return FailureVerdict(
+                retryable=True, wait_seconds=self.rate_limit_wait, kind="rate_limit",
+                hint=f"{label}限流：上传过于频繁，冷却 {self._format_wait(self.rate_limit_wait)}后自动重试")
+        # Everything else is assumed transient (a browser crashed, the network
+        # blipped) — retrying quickly is still the best guess.
+        return FailureVerdict(retryable=True, wait_seconds=0.0)
+
+    def _ask_for_code(self, label: str) -> bool:
+        """Get a verification code from whoever is watching this terminal."""
+        if not self.interactive_verify_code or self.verify_code_wait <= 0:
+            return False
+        if self._code_prompt is not None:
+            return bool(self._code_prompt(label, self.verify_code_wait))
+        base = self.sau_dir if self.sau_dir.is_dir() else self.workdir
+        try:
+            return VerificationCodePrompt(
+                base / "verify_code.txt", wait_seconds=self.verify_code_wait,
+                pause_ui=self._pause_ui, resume_ui=self._resume_ui)(label or "抖音")
+        except Exception:  # A prompt that cannot be shown must not break an upload.
+            return False
 
     # ------------------------------------------------------------------
     # Internals
@@ -475,7 +742,12 @@ class SauPublisher:
             return PlatformResult(platform=platform, ok=False, command=command, detail=str(exc))
         ok = completed.returncode == 0
         detail = (completed.stderr or completed.stdout or ("ok" if ok else "unknown failure")).strip()
-        return PlatformResult(platform=platform, ok=ok, command=command, detail=detail[-800:])
+        if ok:
+            return PlatformResult(platform=platform, ok=True, command=command, detail=detail[-800:])
+        verdict = self._classify(platform, detail)
+        shown = detail[-800:] + (f"\n{verdict.hint}" if verdict.hint else "")
+        return PlatformResult(platform=platform, ok=False, command=command, detail=shown,
+                              retryable=verdict.retryable, retry_after=verdict.wait_seconds)
 
     def _require_sau(self) -> str:
         """Resolve the sau entrypoint inside the vendored project's venv."""
@@ -508,6 +780,12 @@ class SauPublisher:
         guard = self._make_guard(command)
         process = subprocess.Popen(
             list(command), cwd=cwd, text=True, encoding="utf-8", errors="replace",
+            # A null stdin keeps sau from calling its own `input()` for the 抖音
+            # SMS code: that prompt lands on the captured stream, where nobody
+            # sees it, and the child blocks forever waiting for a reply.  With
+            # no tty it takes the verify_code.txt path instead, which we can
+            # feed from our own prompt.
+            stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, bufsize=1,
         )
         assert process.stdout is not None
@@ -525,24 +803,31 @@ class SauPublisher:
 
         deadline = time.monotonic() + self.timeout
         abort_reason: str | None = None
-        while True:
-            try:
-                line = stream.get(timeout=1.0)
-            except queue.Empty:
-                line = ""  # idle tick: still evaluate the guard and the timeout
-            else:
-                if line is None:
-                    break
-                lines.append(line)
-            if guard is not None and abort_reason is None:
-                abort_reason = guard.feed(line)
-                if abort_reason:
-                    break
-            if time.monotonic() > deadline:
-                process.kill()
-                process.wait()
-                raise subprocess.TimeoutExpired(cmd=list(command), timeout=self.timeout,
-                                                output="".join(lines))
+        try:
+            while True:
+                try:
+                    line = stream.get(timeout=1.0)
+                except queue.Empty:
+                    line = ""  # idle tick: still evaluate the guard and the timeout
+                else:
+                    if line is None:
+                        break
+                    lines.append(line)
+                if guard is not None and abort_reason is None:
+                    abort_reason = guard.feed(line)
+                    if abort_reason:
+                        break
+                if time.monotonic() > deadline:
+                    process.kill()
+                    process.wait()
+                    raise subprocess.TimeoutExpired(cmd=list(command), timeout=self.timeout,
+                                                    output="".join(lines))
+        except BaseException:
+            # Ctrl-C (or anything else) must not leave a headless browser
+            # running in the background with a half-finished upload.
+            process.kill()
+            process.wait()
+            raise
 
         if abort_reason:
             process.kill()
@@ -557,7 +842,10 @@ class SauPublisher:
         if self.verify_code_wait <= 0 or "upload-video" not in command:
             return None
         base = self.sau_dir if self.sau_dir.is_dir() else self.workdir
-        return SmsChallengeGuard(base / "verify_code.txt", self.verify_code_wait)
+        platform = command[1] if len(command) > 1 else ""
+        label = PLATFORM_LABELS.get(platform, platform) or "抖音"
+        return SmsChallengeGuard(base / "verify_code.txt", self.verify_code_wait,
+                                 on_arm=lambda: self._ask_for_code(label))
 
 
 def publish_video(video_path: str | Path, script: Mapping[str, Any], stock_name: str, stock_code: str,

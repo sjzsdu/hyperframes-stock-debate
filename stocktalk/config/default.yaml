@@ -115,10 +115,18 @@ publish:
   # 5 个平台里偶发失败很常见，靠这个才能无人值守一次跑完。
   retries: 1
   retry_delay_seconds: 30
+  # B站（biliup）会对连续上传限流：upload rate limit (code: 601)「上传视频过快」。
+  # 它的冷却是分钟级的，30 秒的普通重试间隔只会再失败一次，所以单独给一个等待窗口，
+  # 等待期间通过进度条显示倒计时；设 0 表示限流后不重试。
+  rate_limit_wait_seconds: 600
   # 抖音发布瞬间可能弹短信验证码风控：sau 检测到后会无声地无限等待验证码。
   # 超过这段时间仍未收到（verify_code.txt 出现即视为收到）就中止该平台并给出提示，
   # 避免白等到 timeout_seconds。设为 0 关闭该保护。
   verify_code_wait_seconds: 150
+  # 交互终端下（命令行里跑）遇到上面的验证码风控时，直接在终端提示并等你输入
+  # 4-8 位验证码，回车后立刻继续发布；非交互（cron/CI）自动退回「等待写入
+  # verify_code.txt」的方式。命令行加 --no-interactive 可临时关闭。
+  interactive_verify_code: true
   # 追加到默认话题标签后的自定义标签（每个平台最多取前几个）。
   extra_tags: []
   # 发布时间，留空立即发布；格式 %Y-%m-%d %H:%M，如 "2026-09-16 19:30"（晚高峰）。

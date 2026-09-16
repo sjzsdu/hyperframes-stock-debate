@@ -53,8 +53,12 @@ def main(argv: list[str] | None = None) -> None:
                         help=f"只发布这些平台，逗号分隔，可选项: {', '.join(PLATFORM_SPECS)}")
     parser.add_argument("--watchlist", default=None, metavar="FILE",
                         help="从文件读取股票代码，每行一个（可写成「601689 拓普集团」），# 之后为注释")
+    parser.add_argument("--no-interactive", action="store_true",
+                        help="不询问任何问题（抖音要短信验证码时只等待手工写入 verify_code.txt）")
 
     args = parser.parse_args(argv)
+    if args.no_interactive:
+        config.setdefault("publish", {})["interactive_verify_code"] = False
 
     config = load_config(args.config)
 
@@ -80,22 +84,29 @@ def main(argv: list[str] | None = None) -> None:
 
     pipeline = Pipeline(config)
 
-    if args.republish:
-        _republish(pipeline, args, config, parser)
-        return
+    # Ctrl-C anywhere should read as a clean stop, not a traceback: people press
+    # it because the run looks stuck, and the useful next step is always the
+    # same — republish whatever did not go out.
+    try:
+        if args.republish:
+            _republish(pipeline, args, config, parser)
+            return
 
-    if args.publish_only:
-        _publish_only(pipeline, args, config, parser)
-        return
+        if args.publish_only:
+            _publish_only(pipeline, args, config, parser)
+            return
 
-    targets = _collect_targets(args, parser)
-    failures = _run_all(pipeline, targets, args)
+        targets = _collect_targets(args, parser)
+        failures = _run_all(pipeline, targets, args)
 
-    if len(targets) > 1:
-        _print_batch_summary(targets, failures)
-    if failures:
-        # Non-zero exit so a cron job / automation can tell a bad run from a good one.
-        sys.exit(1)
+        if len(targets) > 1:
+            _print_batch_summary(targets, failures)
+        if failures:
+            # Non-zero exit so a cron job / automation can tell a bad run from a good one.
+            sys.exit(1)
+    except KeyboardInterrupt:
+        print("\n已中断。已成功的平台不会重发；失败的用 `tangulunjin <code> --republish` 补发。")
+        sys.exit(130)
 
 
 def _check(config: dict) -> int:
