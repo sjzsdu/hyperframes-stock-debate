@@ -1,6 +1,8 @@
 """谈股论金 CLI — 一条命令从股票代码到发布视频。
 
     tangulunjin 601689 --publish          # 生成 MP4 并发布到全部已配置平台
+    tangulunjin --check                   # 发布预检：工具链 + 各平台登录态
+    tangulunjin 601689 --republish        # 补发：只重发上次失败的平台
     tangulunjin 601689 600519 --publish   # 批量：逐个生成并发布
     tangulunjin --watchlist my.txt        # 批量：从文件读代码
 """
@@ -12,7 +14,7 @@ import json
 import sys
 from pathlib import Path
 
-from stocktalk.modules.publisher import PLATFORM_SPECS
+from stocktalk.modules.publisher import PLATFORM_SPECS, SauPublisher, check_environment
 from stocktalk.pipeline import Pipeline, PipelineError, load_config
 
 
@@ -24,6 +26,9 @@ def main(argv: list[str] | None = None) -> None:
         epilog=(
             "示例:\n"
             "  tangulunjin 601689 --publish                 # 生成 + 发布到全部平台\n"
+            "  tangulunjin --check                          # 发布前预检各平台登录态\n"
+            "  tangulunjin 601689 --republish               # 只补发上次失败的平台\n"
+            "  tangulunjin 601689 --republish --platforms douyin   # 只补抖音\n"
             "  tangulunjin 601689 600519 --publish          # 批量跑两只票\n"
             "  tangulunjin --watchlist watchlist.txt        # 从文件读代码批量跑\n"
             "  tangulunjin 601689 --platforms douyin        # 只发指定平台\n"
@@ -40,6 +45,10 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--preview", action="store_true", help="仅生成 HTML 预览项目（等同于 --no-render）")
     parser.add_argument("--publish", action="store_true", help="渲染完成后自动发布到已配置的平台（抖音/B站/快手/小红书/视频号）")
     parser.add_argument("--publish-only", default=None, metavar="MP4", help="跳过生成，直接把指定 MP4 发布到已配置的平台")
+    parser.add_argument("--republish", action="store_true",
+                        help="补发：自动找该代码最近一次的成片（无需抄路径），默认只补发上次失败的平台")
+    parser.add_argument("--check", action="store_true", dest="check_only",
+                        help="发布预检：检查 sau CLI / Node / Chrome 与各平台登录态，全部通过才退出码 0")
     parser.add_argument("--platforms", default=None, metavar="LIST",
                         help=f"只发布这些平台，逗号分隔，可选项: {', '.join(PLATFORM_SPECS)}")
     parser.add_argument("--watchlist", default=None, metavar="FILE",
@@ -65,7 +74,15 @@ def main(argv: list[str] | None = None) -> None:
             parser.error(f"未知平台: {', '.join(unknown)}（可选: {', '.join(PLATFORM_SPECS)}）")
         config.setdefault("publish", {})["platforms"] = names
 
+    # --check probes the toolchain only, so it must not be gated on a stock code.
+    if args.check_only:
+        sys.exit(_check(config))
+
     pipeline = Pipeline(config)
+
+    if args.republish:
+        _republish(pipeline, args, config, parser)
+        return
 
     if args.publish_only:
         _publish_only(pipeline, args, config, parser)
@@ -81,15 +98,120 @@ def main(argv: list[str] | None = None) -> None:
         sys.exit(1)
 
 
+def _check(config: dict) -> int:
+    """Preflight the toolchain and every platform's login; 0 only if all pass."""
+    print("发布预检")
+    publisher = SauPublisher(config)
+    environment = check_environment(config, publisher)
+    print("  环境")
+    for item in environment:
+        mark = "✓" if item["ok"] else ("✗" if item["required"] else "!")
+        print(f"    {mark} {item['label']}\n        {item['detail']}")
+    blocked = [item for item in environment if item["required"] and not item["ok"]]
+
+    platforms = [p for p in config.get("publish", {}).get("platforms", ()) if p in PLATFORM_SPECS]
+    if not platforms:
+        print("\n  未配置任何平台（publish.platforms）")
+        return 1
+
+    print(f"  平台登录态（{len(platforms)} 个）")
+    checks = publisher.check_platforms(platforms)
+    failed: list[str] = []
+    for platform in platforms:
+        label = PLATFORM_SPECS[platform]["label"]
+        outcome = checks.get(platform, {"ok": False, "detail": "未检查"})
+        if outcome["ok"]:
+            print(f"    ✓ {label}({platform})")
+        else:
+            failed.append(platform)
+            print(f"    ✗ {label}({platform})\n        {_one_line(outcome['detail'])}")
+
+    print(f"\n  结论: 平台 {len(platforms) - len(failed)}/{len(platforms)} 可发布"
+          + (f"，环境缺 {len(blocked)} 项必需工具" if blocked else ""))
+    if failed:
+        account = config.get("publish", {}).get("accounts", {}) or {}
+        print("  需要重新登录的平台（在 third_party/social-auto-upload 下执行）:")
+        for platform in failed:
+            print(f"    uv run sau {platform} login --account {account.get(platform, 'default')}")
+    if blocked:
+        for item in blocked:
+            print(f"  必需工具缺失: {item['label']} — {item['detail']}")
+    return 1 if (failed or blocked) else 0
+
+
+def _republish(pipeline: Pipeline, args: argparse.Namespace, config: dict, parser: argparse.ArgumentParser) -> None:
+    """Re-send an already rendered video, defaulting to last run's failures.
+
+    The whole point is that a failed 抖音 upload should cost one more upload,
+    not another render: the MP4, the metadata and the covers are all recovered
+    from the previous run's sidecar JSON.
+    """
+    if len(args.stock_codes) != 1:
+        parser.error("--republish 需要且只需要一个股票代码（tangulunjin 601689 --republish）")
+    code = args.stock_codes[0].strip()
+    output_dir = Path(config.get("output", {}).get("dir", "output"))
+    run = _latest_run(output_dir, code)
+    if run is None:
+        parser.exit(1, f"\n补发失败：在 {output_dir} 中找不到 {code} 的成片。\n"
+                       f"先跑一次 `tangulunjin {code} --publish`，或用 --publish-only 指定 MP4。\n")
+    video, data = run
+    if args.platforms:
+        platforms = list(config.get("publish", {}).get("platforms", []))
+    else:
+        platforms = [item["platform"] for item in (data.get("publish") or {}).get("failed", [])
+                     if item.get("platform") in PLATFORM_SPECS]
+        if not platforms:
+            print(f"上次发布没有失败的平台，无需补发：{video}")
+            print("  如需强制重发某个平台，加上 --platforms <平台>（如 --platforms douyin）")
+            return
+    script, stock_name, platform_videos, covers = _recover_publish_context(video, args)
+    print(f"补发 {stock_name}（{code}）→ {', '.join(PLATFORM_SPECS[p]['label'] for p in platforms)}")
+    print(f"  成片: {video}")
+    try:
+        report = pipeline.publisher.publish(
+            video, script, stock_name=stock_name, stock_code=code, platforms=platforms,
+            platform_videos=platform_videos or None, covers=covers or None,
+            schedule=str(config.get("publish", {}).get("schedule") or "") or None)
+    except Exception as exc:
+        parser.exit(1, f"\n补发失败：{exc}\n")
+    _print_publish_report(parser, report)
+    if report["failed"]:
+        sys.exit(1)
+
+
+def _latest_run(output_dir: Path, code: str) -> tuple[Path, dict] | None:
+    """Find the most recent rendered run for ``code``.
+
+    Tags are ``{code}_{YYYYmmdd_HHMMSS}``, so a reverse name sort is a reverse
+    chronological sort — no need to stat every file.
+    """
+    for sidecar in sorted(output_dir.glob(f"{code}_*.json"), reverse=True):
+        try:
+            data = json.loads(sidecar.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if not isinstance(data, dict):
+            continue
+        video = sidecar.with_suffix(".mp4")
+        if not video.is_file():
+            recorded = data.get("video_path")
+            if not (recorded and Path(recorded).is_file()):
+                continue
+            video = Path(recorded)
+        return video, data
+    return None
+
+
 def _publish_only(pipeline: Pipeline, args: argparse.Namespace, config: dict, parser: argparse.ArgumentParser) -> None:
     video = Path(args.publish_only)
     if not video.is_file():
         parser.exit(1, f"\n发布失败：找不到视频文件 {video}\n")
-    script, stock_name, platform_videos = _recover_publish_context(video, args)
+    script, stock_name, platform_videos, covers = _recover_publish_context(video, args)
     try:
         report = pipeline.publisher.publish(video, script, stock_name=stock_name,
                                             stock_code=args.stock_codes[0] if args.stock_codes else "",
                                             platform_videos=platform_videos or None,
+                                            covers=covers or None,
                                             schedule=str(config.get("publish", {}).get("schedule") or "") or None)
     except Exception as exc:
         parser.exit(1, f"\n发布失败：{exc}\n")
@@ -150,6 +272,7 @@ def _run_all(pipeline: Pipeline, targets: list[tuple[str, str | None]], args: ar
             failed = [f["platform"] for f in result["publish"]["failed"]]
             if failed:
                 failures.append((code, "发布失败：" + "、".join(PLATFORM_SPECS.get(p, {}).get("label", p) for p in failed)))
+                print(f"  补发: tangulunjin {code} --republish")
     return failures
 
 
@@ -162,6 +285,8 @@ def _print_run_result(result: dict) -> None:
         print(f"  视频: {result['video_path']}")
     else:
         print("  MP4 渲染已跳过")
+    if result.get("covers"):
+        print(f"  封面: {', '.join(result['covers'].values())}")
 
 
 def _print_batch_summary(targets: list[tuple[str, str | None]], failures: list[tuple[str, str]]) -> None:
@@ -172,18 +297,20 @@ def _print_batch_summary(targets: list[tuple[str, str | None]], failures: list[t
         mark = "✗" if reason else "✓"
         print(f"  {mark} {code} {name or ''}{'  ' + reason if reason else ''}")
     if failures:
-        print("  提示: 生成成功的片子可单独重发: tangulunjin <code> --publish-only <mp4>")
+        print("  提示: 成功的片子可单独补发: tangulunjin <code> --republish")
 
 
-def _recover_publish_context(video: Path, args: argparse.Namespace) -> tuple[dict, str, dict[str, str]]:
+def _recover_publish_context(video: Path, args: argparse.Namespace) -> tuple[dict, str, dict[str, str], dict[str, str]]:
     """Restore the metadata the last full run wrote next to the MP4.
 
-    ``--publish-only`` runs after a failure, so it must republish with the
-    original title/description rather than degrade to the filename.
+    ``--publish-only`` / ``--republish`` run after a failure, so they must
+    republish with the original title/description and the covers already
+    rendered, rather than degrade to the filename and no artwork.
     """
     script: dict = {"title": video.stem, "turns": []}
     stock_name = args.name or video.stem
     platform_videos: dict[str, str] = {}
+    covers: dict[str, str] = {}
     sidecar = video.with_suffix(".json")
     if sidecar.is_file():
         try:
@@ -197,7 +324,16 @@ def _recover_publish_context(video: Path, args: argparse.Namespace) -> tuple[dic
         for platform, path in (data.get("platform_videos") or {}).items():
             if Path(path).is_file():
                 platform_videos[platform] = path
-    return script, stock_name, platform_videos
+        for preset, path in (data.get("covers") or {}).items():
+            if Path(path).is_file():
+                covers[preset] = path
+    return script, stock_name, platform_videos, covers
+
+
+def _one_line(text: str, limit: int = 160) -> str:
+    """Collapse a multi-line tool failure into something worth printing."""
+    collapsed = " / ".join(line.strip() for line in str(text or "").splitlines() if line.strip())
+    return collapsed if len(collapsed) <= limit else collapsed[: limit - 1] + "…"
 
 
 def _print_publish_report(parser: argparse.ArgumentParser | None, report: dict) -> None:
@@ -209,7 +345,7 @@ def _print_publish_report(parser: argparse.ArgumentParser | None, report: dict) 
         if not item["ok"]:
             print(f"    原因: {item['detail'][:200]}")
     if report["failed"]:
-        print("  提示: 失败的平台可单独重试: tangulunjin <code> --publish-only <mp4>")
+        print("  提示: 失败的平台可直接补发: tangulunjin <code> --republish")
 
 
 if __name__ == "__main__":

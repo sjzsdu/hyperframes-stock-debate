@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 from pathlib import Path
 from typing import Any
 from unittest.mock import patch
@@ -153,3 +154,187 @@ def test_main_rejects_an_unknown_platform() -> None:
     with _patch_pipeline(FakePipeline()):
         with pytest.raises(SystemExit):
             cli.main(["601689", "--platforms", "douyin,weibo"])
+
+
+# ---------------------------------------------------------------------------
+# --check  发布预检
+# ---------------------------------------------------------------------------
+
+class FakeCheckPublisher:
+    def __init__(self, results: dict[str, dict[str, Any]]) -> None:
+        self.results = results
+
+    def check_platforms(self, platforms: list[str]) -> dict[str, dict[str, Any]]:
+        return {p: self.results[p] for p in platforms}
+
+
+def _env(ok: bool = True) -> list[dict[str, Any]]:
+    return [{"name": "sau", "label": "sau CLI（发布）", "ok": ok, "detail": "/bin/sau", "required": True},
+            {"name": "npx", "label": "Node/npx（MP4 渲染）", "ok": True, "detail": "/bin/npx", "required": False},
+            {"name": "chrome", "label": "Chrome（封面图）", "ok": True, "detail": "/chrome", "required": False}]
+
+
+def test_check_exits_zero_when_everything_passes(capsys: pytest.CaptureFixture[str]) -> None:
+    fake = FakeCheckPublisher({p: {"ok": True, "detail": "ok"} for p in ("douyin", "kuaishou")})
+    with patch.multiple(cli, Pipeline=fake, load_config=lambda path=None: {"publish": {"platforms": ["douyin", "kuaishou"]}}), \
+         patch.object(cli, "SauPublisher", lambda config: fake), \
+         patch.object(cli, "check_environment", lambda config, publisher=None: _env()):
+        with pytest.raises(SystemExit) as excinfo:
+            cli.main(["--check"])
+
+    assert excinfo.value.code == 0
+    assert "平台 2/2 可发布" in capsys.readouterr().out
+
+
+def test_check_exits_nonzero_and_prints_the_login_remedy(capsys: pytest.CaptureFixture[str]) -> None:
+    fake = FakeCheckPublisher({"douyin": {"ok": True, "detail": "ok"},
+                               "kuaishou": {"ok": False, "detail": "cookie expired\nplease login"}})
+    with patch.multiple(cli, Pipeline=fake, load_config=lambda path=None: {"publish": {"platforms": ["douyin", "kuaishou"]}}), \
+         patch.object(cli, "SauPublisher", lambda config: fake), \
+         patch.object(cli, "check_environment", lambda config, publisher=None: _env()):
+        with pytest.raises(SystemExit) as excinfo:
+            cli.main(["--check"])
+
+    assert excinfo.value.code == 1
+    out = capsys.readouterr().out
+    assert "平台 1/2 可发布" in out
+    assert "sau kuaishou login --account default" in out
+
+
+def test_check_fails_when_a_required_tool_is_missing(capsys: pytest.CaptureFixture[str]) -> None:
+    fake = FakeCheckPublisher({"douyin": {"ok": True, "detail": "ok"}, "kuaishou": {"ok": True, "detail": "ok"}})
+    env = _env(ok=False)
+    with patch.multiple(cli, Pipeline=fake, load_config=lambda path=None: {"publish": {"platforms": ["douyin", "kuaishou"]}}), \
+         patch.object(cli, "SauPublisher", lambda config: fake), \
+         patch.object(cli, "check_environment", lambda config, publisher=None: env):
+        with pytest.raises(SystemExit) as excinfo:
+            cli.main(["--check"])
+
+    assert excinfo.value.code == 1
+    assert "必需工具缺失" in capsys.readouterr().out
+
+
+# ---------------------------------------------------------------------------
+# --republish  补发
+# ---------------------------------------------------------------------------
+
+class FakeRepublishPipeline:
+    def __init__(self) -> None:
+        self.publisher = type("P", (), {"publish": lambda self, *a, **k: (_ for _ in ()).throw(AssertionError("not set"))})()
+        self.calls: list[dict[str, Any]] = []
+
+    def wire(self, report: dict[str, Any]) -> None:
+        def publish(video, script, **kwargs):
+            self.calls.append({"video": video, "script": script, **kwargs})
+            return report
+        self.publisher = type("P", (), {"publish": staticmethod(publish)})()
+
+
+def _write_run(output_dir: Path, tag: str, *, failed: list[str], covers: bool = True) -> tuple[Path, dict[str, str]]:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    video = output_dir / f"{tag}.mp4"
+    video.write_bytes(b"0")
+    cover_files: dict[str, str] = {}
+    if covers:
+        for size in ("portrait", "landscape"):
+            cover = output_dir / f"{tag}.cover-{size}.png"
+            cover.write_bytes(b"png")
+            cover_files[size] = str(cover)
+    (output_dir / f"{tag}.json").write_text(json.dumps({
+        "stock_code": tag.split("_")[0], "stock_name": "拓普集团", "video_path": str(video),
+        "approved_script": {"title": "拓普集团（601689）：看点", "turns": [{"speaker": "bull", "line": "看点"}]},
+        "platform_videos": {}, "covers": cover_files,
+        "publish": {"failed": [{"platform": p, "detail": "boom"} for p in failed]},
+    }, ensure_ascii=False), encoding="utf-8")
+    return video, cover_files
+
+
+def _republish_config(output_dir: Path) -> dict[str, Any]:
+    return {"output": {"dir": str(output_dir)},
+            "publish": {"platforms": ["douyin", "kuaishou"], "schedule": ""}}
+
+
+def test_republish_reuploads_only_last_failures(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    output_dir = tmp_path / "output"
+    video, covers = _write_run(output_dir, "601689_20260916_120000", failed=["douyin"])
+    fake = FakeRepublishPipeline()
+    fake.wire({"succeeded": ["douyin"], "failed": [], "platforms": []})
+    with patch.multiple(cli, Pipeline=lambda config: fake, load_config=lambda path=None: _republish_config(output_dir)):
+        cli.main(["601689", "--republish"])
+
+    call = fake.calls[0]
+    assert Path(call["video"]) == video
+    assert call["platforms"] == ["douyin"]
+    assert call["covers"] == covers
+    assert call["stock_code"] == "601689"
+    assert "无需" not in capsys.readouterr().out
+
+
+def test_republish_platforms_flag_overrides_last_failures(tmp_path: Path) -> None:
+    output_dir = tmp_path / "output"
+    _write_run(output_dir, "601689_20260916_120000", failed=[])
+    fake = FakeRepublishPipeline()
+    fake.wire({"succeeded": ["kuaishou"], "failed": [], "platforms": []})
+    with patch.multiple(cli, Pipeline=lambda config: fake, load_config=lambda path=None: _republish_config(output_dir)):
+        cli.main(["601689", "--republish", "--platforms", "kuaishou"])
+
+    assert fake.calls[0]["platforms"] == ["kuaishou"]
+
+
+def test_republish_skips_when_nothing_failed(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    output_dir = tmp_path / "output"
+    _write_run(output_dir, "601689_20260916_120000", failed=[])
+    fake = FakeRepublishPipeline()
+    fake.wire({"succeeded": [], "failed": [], "platforms": []})
+    with patch.multiple(cli, Pipeline=lambda config: fake, load_config=lambda path=None: _republish_config(output_dir)):
+        cli.main(["601689", "--republish"])
+
+    assert fake.calls == []
+    assert "无需补发" in capsys.readouterr().out
+
+
+def test_republish_picks_the_newest_run(tmp_path: Path) -> None:
+    output_dir = tmp_path / "output"
+    _write_run(output_dir, "601689_20260915_090000", failed=["kuaishou"])
+    newest, _ = _write_run(output_dir, "601689_20260916_120000", failed=["douyin"])
+    fake = FakeRepublishPipeline()
+    fake.wire({"succeeded": ["douyin"], "failed": [], "platforms": []})
+    with patch.multiple(cli, Pipeline=lambda config: fake, load_config=lambda path=None: _republish_config(output_dir)):
+        cli.main(["601689", "--republish"])
+
+    assert Path(fake.calls[0]["video"]) == newest
+    assert fake.calls[0]["platforms"] == ["douyin"]
+
+
+def test_republish_exits_nonzero_when_the_video_is_gone(tmp_path: Path) -> None:
+    output_dir = tmp_path / "output"
+    output_dir.mkdir()
+    with patch.multiple(cli, Pipeline=lambda config: FakeRepublishPipeline(),
+                        load_config=lambda path=None: _republish_config(output_dir)):
+        with pytest.raises(SystemExit) as excinfo:
+            cli.main(["601689", "--republish"])
+
+    assert excinfo.value.code == 1
+
+
+def test_republish_requires_exactly_one_code(tmp_path: Path) -> None:
+    output_dir = tmp_path / "output"
+    _write_run(output_dir, "601689_20260916_120000", failed=["douyin"])
+    with patch.multiple(cli, Pipeline=lambda config: FakeRepublishPipeline(),
+                        load_config=lambda path=None: _republish_config(output_dir)):
+        with pytest.raises(SystemExit):
+            cli.main(["601689", "600519", "--republish"])
+
+
+def test_republish_still_exits_nonzero_when_it_fails_again(tmp_path: Path) -> None:
+    output_dir = tmp_path / "output"
+    _write_run(output_dir, "601689_20260916_120000", failed=["douyin"])
+    fake = FakeRepublishPipeline()
+    fake.wire({"succeeded": [], "failed": [{"platform": "douyin", "detail": "again"}],
+               "platforms": [{"platform": "douyin", "label": "抖音", "ok": False, "detail": "again",
+                              "command": [], "attempts": 1}]})
+    with patch.multiple(cli, Pipeline=lambda config: fake, load_config=lambda path=None: _republish_config(output_dir)):
+        with pytest.raises(SystemExit) as excinfo:
+            cli.main(["601689", "--republish"])
+
+    assert excinfo.value.code == 1

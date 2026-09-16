@@ -17,9 +17,10 @@ from rich.console import Console
 from rich.progress import BarColumn, Progress, SpinnerColumn, TextColumn, TimeElapsedColumn, TimeRemainingColumn
 
 from stocktalk.modules.compliance import ComplianceAgent
+from stocktalk.modules.cover import CoverGenerator
 from stocktalk.modules.dialogue_generator import DialogueGenerator
 from stocktalk.modules.hyperframes_builder import HyperFramesBuilder
-from stocktalk.modules.publisher import PLATFORM_LABELS, SauPublisher
+from stocktalk.modules.publisher import PLATFORM_LABELS, SauPublisher, cover_sizes_for
 from stocktalk.modules.stock_data import StockDataClient, StockDataConfig
 from stocktalk.modules.tts_agent import TTSAgent
 
@@ -69,8 +70,34 @@ class Pipeline:
         self.tts = TTSAgent(self.config)
         self.builder = HyperFramesBuilder(self.config)
         self.publisher = SauPublisher(self.config)
+        self.covers = CoverGenerator(self.config)
         self.output_dir = Path(self.config.get("output", {}).get("dir", "output"))
         self.output_dir.mkdir(parents=True, exist_ok=True)
+
+    def _render_covers(self, stock_data: Mapping[str, Any], script: Mapping[str, Any],
+                       stock_code: str, tag: str, progress: Progress, task) -> dict[str, str]:
+        """Render the cover presets the configured platforms consume.
+
+        Cover art is the one part of the run that is genuinely optional, so a
+        missing Chrome or a failed screenshot degrades to publishing without a
+        cover instead of throwing away a finished MP4.
+        """
+        if not self.config.get("cover", {}).get("enabled", True):
+            return {}
+        platforms = [p for p in self.config.get("publish", {}).get("platforms", ()) if p in PLATFORM_LABELS]
+        sizes = cover_sizes_for(platforms)
+        if not sizes:
+            return {}
+        progress.update(task, description=f"Rendering covers ({', '.join(sizes)})")
+        try:
+            rendered = self.covers.generate(stock_data, script, stock_code, sizes, self.output_dir, tag)
+        except Exception as exc:
+            self.console.print(f"[yellow]封面图生成失败，将不带封面发布: {exc}[/yellow]")
+            return {}
+        missing = [size for size in sizes if size not in rendered]
+        if missing:
+            self.console.print(f"[yellow]封面图缺失（{', '.join(missing)}），相关平台将不带封面发布[/yellow]")
+        return {size: str(path) for size, path in rendered.items()}
 
     def _retry(self, stage: str, operation: Callable[[], T]) -> T:
         """Retry a remote LLM/TTS operation with capped exponential backoff."""
@@ -217,7 +244,9 @@ class Pipeline:
             progress.advance(task)
 
             publish_report: dict[str, Any] | None = None
+            cover_files: dict[str, str] = {}
             if publish and video_path:
+                cover_files = self._render_covers(stock_data, approved, stock_code, tag, progress, task)
                 platform_list = [p for p in self.config.get("publish", {}).get("platforms", [])]
                 progress.update(task, description=f"Publishing to {', '.join(platform_list)}")
 
@@ -227,7 +256,8 @@ class Pipeline:
                 publish_report = self.publisher.publish(
                     video_path, approved, stock_data.get("quote", {}).get("name", stock_name or ""), stock_code,
                     schedule=str(self.config.get("publish", {}).get("schedule") or "") or None,
-                    platform_videos=platform_videos or None, on_event=report_event,
+                    platform_videos=platform_videos or None, covers=cover_files or None,
+                    on_event=report_event,
                 )
             progress.advance(task)
 
@@ -235,7 +265,7 @@ class Pipeline:
                   "tag": tag, "script": script, "approved_script": approved, "audio": audio,
                   "srt": audio.get("srt_path"), "project_dir": str(project_dir),
                   "video_path": str(video_path) if video_path else None, "rendered": bool(video_path),
-                  "platform_videos": platform_videos,
+                  "platform_videos": platform_videos, "covers": cover_files,
                   "preview": preview, "publish": publish_report,
                   "elapsed_seconds": round(time.monotonic() - t0, 1)}
         result_path = self.output_dir / f"{tag}.json"

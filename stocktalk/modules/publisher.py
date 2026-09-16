@@ -53,13 +53,22 @@ SMS_RESOLVED_MARKERS: tuple[str, ...] = ("已获取验证码", "验证码已填�
 # Per-platform upload constraints and CLI capability.  ``runtime_flags`` marks
 # whether ``sau <platform> upload-video`` accepts --headless/--headed (bilibili
 # delegates to biliup and rejects them).  ``title``/``tags``/``desc`` are the
-# publish limits we clamp metadata to before invoking the CLI.
+# publish limits we clamp metadata to before invoking the CLI.  ``covers`` lists
+# the ``(flag, preset)`` pairs the platform accepts, where preset names one of
+# cover.COVER_PRESETS — douyin/tencent take a landscape cover as well as the
+# 3:4 portrait one, kuaishou/xiaohongshu take a single image, and bilibili's
+# cover is landscape-first.
 PLATFORM_SPECS: dict[str, dict[str, Any]] = {
-    "douyin":      {"label": "抖音",  "title": 30, "tags": 4,  "desc": 150, "runtime_flags": True,  "tid": None},
-    "bilibili":    {"label": "B站",   "title": 80, "tags": 10, "desc": 2000, "runtime_flags": False, "tid": BILIBILI_FINANCE_TID},
-    "kuaishou":    {"label": "快手",  "title": 30, "tags": 6,  "desc": 150, "runtime_flags": True,  "tid": None},
-    "xiaohongshu": {"label": "小红书", "title": 20, "tags": 10, "desc": 1000, "runtime_flags": True,  "tid": None},
-    "tencent":     {"label": "视频号", "title": 30, "tags": 6,  "desc": 120, "runtime_flags": True,  "tid": None},
+    "douyin":      {"label": "抖音",  "title": 30, "tags": 4,  "desc": 150, "runtime_flags": True,  "tid": None,
+                    "covers": (("--thumbnail", "portrait"), ("--thumbnail-landscape", "landscape"))},
+    "bilibili":    {"label": "B站",   "title": 80, "tags": 10, "desc": 2000, "runtime_flags": False, "tid": BILIBILI_FINANCE_TID,
+                    "covers": (("--thumbnail", "wide"),)},
+    "kuaishou":    {"label": "快手",  "title": 30, "tags": 6,  "desc": 150, "runtime_flags": True,  "tid": None,
+                    "covers": (("--thumbnail", "portrait"),)},
+    "xiaohongshu": {"label": "小红书", "title": 20, "tags": 10, "desc": 1000, "runtime_flags": True,  "tid": None,
+                    "covers": (("--thumbnail", "portrait"),)},
+    "tencent":     {"label": "视频号", "title": 30, "tags": 6,  "desc": 120, "runtime_flags": True,  "tid": None,
+                    "covers": (("--thumbnail-portrait", "portrait"), ("--thumbnail-landscape", "landscape"))},
 }
 
 # Backwards-compatible views over PLATFORM_SPECS.
@@ -68,7 +77,62 @@ TITLE_LIMITS: dict[str, int] = {name: spec["title"] for name, spec in PLATFORM_S
 
 DEFAULT_TAGS: tuple[str, ...] = ("A股", "股票", "财经", "价值投资", "上市公司分析")
 
-DEFAULT_SPEC: dict[str, Any] = {"label": "", "title": 30, "tags": 4, "desc": 150, "runtime_flags": True, "tid": None}
+DEFAULT_SPEC: dict[str, Any] = {"label": "", "title": 30, "tags": 4, "desc": 150, "runtime_flags": True,
+                                "tid": None, "covers": ()}
+
+
+def cover_sizes_for(platforms: Sequence[str]) -> list[str]:
+    """Which cover presets the given platforms actually consume.
+
+    Rendering is the expensive part, so only the sizes at least one platform
+    asks for are produced (a 抖音-only run never renders the B站 横向 cover).
+    """
+    sizes: list[str] = []
+    for platform in platforms:
+        for _, preset in PLATFORM_SPECS.get(platform, DEFAULT_SPEC).get("covers", ()):
+            if preset not in sizes:
+                sizes.append(preset)
+    return sizes
+
+
+# The local toolchain each stage depends on.  Only ``required`` entries decide
+# the exit code of the preflight command: a missing npx (render) or Chrome
+# (cover) degrades gracefully, a missing sau CLI does not publish anything.
+ENVIRONMENT_CHECKS: tuple[tuple[str, str, bool], ...] = (
+    ("sau", "sau CLI（发布）", True),
+    ("npx", "Node/npx（MP4 渲染）", False),
+    ("chrome", "Chrome（封面图，缺失则无封面发布）", False),
+)
+
+
+def check_environment(config: Mapping[str, Any] | None = None, publisher: SauPublisher | None = None) -> list[dict[str, Any]]:
+    """Probe the toolchain the render/publish path shells out to.
+
+    Never raises: an unreachable tool is reported, not thrown, so the caller can
+    print one complete table instead of dying on the first problem.
+    """
+    resolved = publisher or SauPublisher(config)
+    found: dict[str, tuple[bool, str]] = {}
+    try:
+        found["sau"] = (True, resolved._require_sau())
+    except PublishError as exc:
+        found["sau"] = (False, str(exc))
+    except Exception as exc:  # pragma: no cover - defensive
+        found["sau"] = (False, str(exc))
+    npx = shutil.which("npx")
+    found["npx"] = (bool(npx), npx or "未找到 npx；MP4 渲染需要 Node.js")
+    try:
+        from stocktalk.modules.cover import CoverGenerator
+
+        chrome = CoverGenerator(resolved.config).chrome_path()
+        found["chrome"] = (bool(chrome), chrome or "未找到 Chrome/Chromium；封面图将跳过")
+    except Exception as exc:  # pragma: no cover - defensive
+        found["chrome"] = (False, str(exc))
+    checks: list[dict[str, Any]] = []
+    for name, label, required in ENVIRONMENT_CHECKS:
+        ok, detail = found.get(name, (False, "未检查"))
+        checks.append({"name": name, "label": label, "ok": ok, "detail": detail, "required": required})
+    return checks
 
 
 @dataclass(frozen=True)
@@ -244,11 +308,15 @@ class SauPublisher:
                 stock_code: str, platforms: Sequence[str] | None = None,
                 schedule: str | None = None,
                 platform_videos: Mapping[str, str | Path] | None = None,
+                covers: Mapping[str, str | Path] | None = None,
                 on_event: Callable[[str, str, str], None] | None = None) -> dict[str, Any]:
         """Upload one MP4 to each configured platform; returns a per-platform report.
 
         ``platform_videos`` lets a platform receive its own cut (e.g. a
-        horizontal render for Bilibili) instead of the default file.
+        horizontal render for Bilibili) instead of the default file, and
+        ``covers`` maps a cover preset name (portrait/landscape/wide) to its
+        PNG.  Either can be missing — every platform still gets published, just
+        with that platform's default cut or without cover art.
         """
         video = Path(video_path)
         if not video.is_file():
@@ -262,6 +330,9 @@ class SauPublisher:
         for name, path in videos.items():
             if not path.is_file():
                 raise PublishError(f"video not found for {name}: {path}")
+        # A cover that is not there is not an error: `--publish-only` and
+        # `--republish` may run long after the covers were rendered.
+        cover_files = {preset: Path(path) for preset, path in dict(covers or {}).items() if Path(path).is_file()}
 
         # Pre-flight: a 8-minute render should not be wasted on a stale cookie.
         # Failing platforms are pulled out of the run and reported as skipped.
@@ -271,14 +342,18 @@ class SauPublisher:
         outcomes: dict[str, PlatformResult] = {}
         if self.preflight:
             on_event and on_event("*", "全部平台", "预检登录态")
-            checks = self.check_platforms([p for p in pending if p in PLATFORM_SPECS])
-            for platform, check in checks.items():
-                if check["ok"]:
-                    continue
-                outcomes[platform] = PlatformResult(
-                    platform=platform, ok=False, retryable=False,
-                    detail=f"发布前预检未通过（很可能需要重新登录 sau {platform} login）: {check['detail']}")
-                pending.remove(platform)
+            try:
+                checks = self.check_platforms([p for p in pending if p in PLATFORM_SPECS])
+            except Exception as exc:  # A broken probe must not block every platform.
+                on_event and on_event("*", "预检", f"预检异常，跳过预检继续发布: {exc}")
+            else:
+                for platform, check in checks.items():
+                    if check["ok"]:
+                        continue
+                    outcomes[platform] = PlatformResult(
+                        platform=platform, ok=False, retryable=False,
+                        detail=f"发布前预检未通过（很可能需要重新登录 sau {platform} login）: {check['detail']}")
+                    pending.remove(platform)
 
         for platform in pending:
             spec = PLATFORM_SPECS.get(platform)
@@ -287,7 +362,7 @@ class SauPublisher:
                 outcomes[platform] = PlatformResult(platform=platform, ok=False, detail="unsupported platform")
                 continue
             on_event and on_event(platform, label, "上传中")
-            outcome = self._publish_one(platform, videos.get(platform, video), metadata, schedule)
+            outcome = self._publish_safely(platform, videos.get(platform, video), metadata, schedule, cover_files)
             on_event and on_event(platform, label, "完成" if outcome.ok else "失败")
             outcomes[platform] = outcome
 
@@ -302,7 +377,7 @@ class SauPublisher:
             for platform in retry_targets:
                 label = PLATFORM_LABELS.get(platform, platform)
                 on_event and on_event(platform, label, "重试中")
-                outcome = self._publish_one(platform, videos.get(platform, video), metadata, schedule)
+                outcome = self._publish_safely(platform, videos.get(platform, video), metadata, schedule, cover_files)
                 outcome.attempts = outcomes[platform].attempts + 1
                 outcomes[platform] = outcome
                 on_event and on_event(platform, label, "完成" if outcome.ok else "失败")
@@ -310,6 +385,7 @@ class SauPublisher:
         results = [outcomes[p] for p in platform_list if p in outcomes]
         return {
             "video": str(video),
+            "covers": {preset: str(path) for preset, path in cover_files.items()},
             "metadata": {"title": metadata.title, "description": metadata.description,
                          "tags": list(metadata.tags), "disclaimer": metadata.disclaimer},
             "platforms": [{"platform": r.platform, "label": PLATFORM_LABELS.get(r.platform, r.platform),
@@ -350,8 +426,22 @@ class SauPublisher:
     # ------------------------------------------------------------------
     # Internals
     # ------------------------------------------------------------------
+    def _publish_safely(self, platform: str, video: Path, metadata: PublishMetadata,
+                        schedule: str | None, covers: Mapping[str, Path]) -> PlatformResult:
+        """Publish one platform, absorbing *any* failure into its own result.
+
+        ``_publish_one`` already handles the failures we anticipate; this is the
+        backstop that keeps an unforeseen bug (a metadata edge case, a missing
+        file) from taking down the other four platforms in the same run.
+        """
+        try:
+            return self._publish_one(platform, video, metadata, schedule, covers)
+        except Exception as exc:  # pragma: no cover - defensive
+            return PlatformResult(platform=platform, ok=False,
+                                  detail=f"{type(exc).__name__}: {exc}")
+
     def _publish_one(self, platform: str, video: Path, metadata: PublishMetadata,
-                     schedule: str | None) -> PlatformResult:
+                     schedule: str | None, covers: Mapping[str, Path] | None = None) -> PlatformResult:
         spec = PLATFORM_SPECS[platform]
         account = self.accounts.get(platform, "default")
         scoped = self.metadata_gen.for_platform(metadata, platform)
@@ -366,6 +456,10 @@ class SauPublisher:
             command += ["--schedule", schedule]
         if spec.get("tid"):
             command += ["--tid", str(spec["tid"])]
+        for flag, preset in spec.get("covers", ()):
+            cover = (covers or {}).get(preset)
+            if cover is not None and Path(cover).is_file():
+                command += [flag, str(Path(cover).resolve())]
         if spec.get("runtime_flags"):
             # bilibili delegates to the biliup binary, whose CLI rejects these.
             command.append("--headless" if self.headless else "--headed")

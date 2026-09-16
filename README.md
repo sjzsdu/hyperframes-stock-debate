@@ -53,8 +53,9 @@ tangulunjin 601689 --publish
 ```
 
 这一条会依次完成：拉行情与个股资讯 → 生成对话脚本 → 合规审核 → TTS 配音 →
-构建 HyperFrames 工程 → 渲染竖版主片（B站需要横版时再渲一版）→ 发布前预检 cookie →
-逐个平台上传，并在 `output/<代码>_<时间戳>.json` 里留下完整结果（含每个平台的命令与失败原因）。
+构建 HyperFrames 工程 → 渲染竖版主片（B站需要横版时再渲一版）→ **自动生成封面图** →
+发布前预检 cookie → 逐个平台上传（带封面），并在 `output/<代码>_<时间戳>.json` 里
+留下完整结果（含每个平台的命令、封面路径与失败原因）。
 
 **前置条件（只做一次）：**
 
@@ -70,15 +71,50 @@ B站特殊：它的上传走外部 `biliup` 二进制（首次使用时自动下
 **批量与选择性发布：**
 
 ```bash
+tangulunjin --check                               # 发布预检：工具链 + 各平台登录态
 tangulunjin 601689 600519 000001 --publish        # 依次生成并发布多只票
 tangulunjin --watchlist watchlist.txt --publish   # 从文件读代码（每行一个，支持「601689 拓普集团」）
 tangulunjin 601689 --platforms douyin,xiaohongshu # 本次只发指定平台
-tangulunjin 601689 --publish-only output/601689_20260916_110907.mp4   # 只重发已生成的片子
+tangulunjin 601689 --republish                    # 补发：只重发上次失败的平台
+tangulunjin 601689 --republish --platforms douyin # 强制只补抖音
+tangulunjin 601689 --publish-only output/601689_20260916_110907.mp4   # 指定 MP4 重发
 ```
 
 批量运行时任一环节失败**不会中断后面的票**，结束时打印汇总并以退出码 1 退出，方便接到
-cron 或自动化里判断成败。`--publish-only` 会从 MP4 同名的 `.json` 读回原标题、简介与
-分平台视频路径，不会退化成文件名。
+cron 或自动化里判断成败。`--publish-only` / `--republish` 会从 MP4 同名的 `.json` 读回
+原标题、简介、分平台视频路径与已渲染的封面，不会退化成文件名。
+
+### 发布预检（`--check`）
+
+```bash
+tangulunjin --check
+```
+
+输出两类结果，任一项失败退出码为 1：
+
+- **环境**：sau CLI（必需）、Node/npx（渲染用）、Chrome（封面用）——后两项缺失只降级
+  （渲染不了 MP4 / 没有封面），不算硬失败；
+- **平台登录态**：逐个执行 `sau <平台> check`，失败的会直接给出对应登录命令。
+
+### 补发（`--republish`）
+
+某次发布里抖音失败了，不需要重新渲染，也不用抄 MP4 路径：
+
+```bash
+tangulunjin 601689 --republish
+```
+
+它会自动找到 `output/` 里 601689 最近一次的成片，读回上次的标题、简介和封面，
+**只补发上次失败的平台**；上次全部成功时会提示无需补发。要强制重发某平台加
+`--platforms douyin`。单个平台失败依旧不影响其他平台，失败退出码为 1。
+
+### 封面图
+
+发布前会自动用 headless Chrome 截图生成封面，并按平台支持的能力下发
+（`portrait` 1080×1440 给抖音/快手/小红书/视频号，`wide` 1440×810 给 B站封面，
+抖音与视频号还会带一张 `landscape` 横版）。封面复用视频的配色与 A股 红涨绿跌
+约定，内容为股票名/代码/最新价/涨跌幅/真实收盘曲线/看点一句话。封面失败只会
+降级为「不带封面发布」，绝不影响已经渲染好的视频发布。配置见 `cover:` 段。
 
 ## CLI 命令
 
@@ -95,6 +131,8 @@ tangulunjin <股票代码...> [选项]
   --duration-minutes N  对话目标时长（默认 2-8 分钟，按素材量自然伸缩）
   --publish             渲染后自动发布到已配置的平台（抖音/B站/快手/小红书/视频号）
   --publish-only MP4    跳过生成，直接发布已有 MP4
+  --republish           补发：自动找最近一次成片，只重发上次失败的平台
+  --check               发布预检：工具链 + 各平台登录态，全过才退出码 0
   --platforms LIST      本次只发布指定平台，逗号分隔
   --watchlist FILE      从文件读取股票代码（每行一个，# 之后为注释）
   --help                显示帮助信息

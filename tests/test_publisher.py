@@ -18,6 +18,8 @@ from stocktalk.modules.publisher import (
     SauPublisher,
     SmsChallengeGuard,
     StreamAbort,
+    check_environment,
+    cover_sizes_for,
 )
 
 
@@ -417,3 +419,107 @@ def test_streaming_runner_merges_output_and_enforces_timeout(tmp_path: Path) -> 
         publisher._run_subprocess(
             [sys.executable, "-u", "-c", "import time; time.sleep(30)", "upload-video"], tmp_path,
         )
+
+
+# ---------------------------------------------------------------------------
+# Cover art plumbing
+# ---------------------------------------------------------------------------
+
+def test_cover_sizes_follow_configured_platforms() -> None:
+    assert cover_sizes_for(["douyin"]) == ["portrait", "landscape"]
+    assert cover_sizes_for(["bilibili"]) == ["wide"]
+    assert cover_sizes_for(["kuaishou", "xiaohongshu"]) == ["portrait"]
+    assert cover_sizes_for(["nope"]) == []
+
+
+def _video(tmp_path: Path) -> Path:
+    video = tmp_path / "v.mp4"
+    video.write_bytes(b"0")
+    return video
+
+
+def _cover(tmp_path: Path, name: str) -> Path:
+    cover = tmp_path / name
+    cover.write_bytes(b"png")
+    return cover
+
+
+def test_publish_passes_each_platform_its_own_covers(tmp_path: Path) -> None:
+    commands: list[list[str]] = []
+    publisher = SauPublisher({"publish": {"sau_dir": str(tmp_path), "preflight": False, "platforms": []}},
+                             runner=fake_runner_factory(commands), sau_bin="sau")
+    covers = {"portrait": _cover(tmp_path, "p.png"), "landscape": _cover(tmp_path, "l.png"),
+              "wide": _cover(tmp_path, "w.png")}
+
+    publisher.publish(_video(tmp_path), SCRIPT, "贵州茅台", "600519",
+                      platforms=["douyin", "bilibili", "tencent", "kuaishou"], covers=covers)
+
+    by_platform = {cmd[1]: cmd for cmd in commands}  # cmd = [sau, <platform>, upload-video, ...]
+    douyin = by_platform["douyin"]
+    assert str(covers["portrait"].resolve()) in douyin
+    assert str(covers["landscape"].resolve()) in douyin
+    assert "--thumbnail-landscape" not in by_platform["bilibili"]
+    assert str(covers["wide"].resolve()) in by_platform["bilibili"]
+    assert "--thumbnail-portrait" in by_platform["tencent"]
+    assert "--thumbnail-landscape" in by_platform["tencent"]
+    assert str(covers["portrait"].resolve()) in by_platform["kuaishou"]
+
+
+def test_publish_skips_a_missing_cover_file(tmp_path: Path) -> None:
+    commands: list[list[str]] = []
+    publisher = SauPublisher({"publish": {"sau_dir": str(tmp_path), "preflight": False, "platforms": []}},
+                             runner=fake_runner_factory(commands), sau_bin="sau")
+    ghost = tmp_path / "missing.png"
+
+    publisher.publish(_video(tmp_path), SCRIPT, "贵州茅台", "600519",
+                      platforms=["douyin"], covers={"portrait": ghost, "landscape": _cover(tmp_path, "l.png")})
+
+    (command,) = commands
+    assert "--thumbnail" not in command
+    assert "--thumbnail-landscape" in command
+
+
+def test_a_broken_platform_never_blocks_the_rest(tmp_path: Path) -> None:
+    """The isolation backstop: an unexpected exception stays on its platform."""
+    commands: list[list[str]] = []
+    publisher = SauPublisher({"publish": {"sau_dir": str(tmp_path), "preflight": False, "platforms": []}},
+                             runner=fake_runner_factory(commands), sau_bin="sau")
+    exploded: list[str] = []
+    real_publish_one = publisher._publish_one
+
+    def flaky(platform, video, metadata, schedule, covers=None):
+        if platform == "douyin":
+            exploded.append(platform)
+            raise RuntimeError("boom")
+        return real_publish_one(platform, video, metadata, schedule, covers)
+
+    publisher._publish_one = flaky  # type: ignore[method-assign]
+    report = publisher.publish(_video(tmp_path), SCRIPT, "贵州茅台", "600519",
+                               platforms=["douyin", "kuaishou"])
+
+    assert exploded == ["douyin"]
+    statuses = {item["platform"]: item["ok"] for item in report["platforms"]}
+    assert statuses == {"douyin": False, "kuaishou": True}
+    assert "boom" in next(item["detail"] for item in report["platforms"] if item["platform"] == "douyin")
+
+
+def test_a_broken_preflight_does_not_block_the_rest(tmp_path: Path) -> None:
+    commands: list[list[str]] = []
+    publisher = SauPublisher({"publish": {"sau_dir": str(tmp_path), "preflight": True, "platforms": []}},
+                             runner=fake_runner_factory(commands), sau_bin="sau")
+    publisher.check_platforms = lambda platforms: (_ for _ in ()).throw(RuntimeError("probe exploded"))  # type: ignore[method-assign]
+
+    report = publisher.publish(_video(tmp_path), SCRIPT, "贵州茅台", "600519", platforms=["kuaishou"])
+
+    assert report["succeeded"] == ["kuaishou"]
+
+
+def test_environment_check_reports_every_tool(tmp_path: Path) -> None:
+    publisher = SauPublisher({"publish": {"sau_dir": str(tmp_path)}})
+    checks = check_environment({"publish": {"sau_dir": str(tmp_path)}}, publisher)
+
+    names = {item["name"] for item in checks}
+    assert names == {"sau", "npx", "chrome"}
+    sau = next(item for item in checks if item["name"] == "sau")
+    assert not sau["ok"] and sau["required"]
+    assert all(item["required"] is False for item in checks if item["name"] != "sau")

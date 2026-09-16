@@ -120,6 +120,14 @@ class ComplianceAgent:
         approved_script["compliance_issues"] = issues
         return approved_script
 
+    def sanitize(self, text: str) -> str:
+        """Neutralise advice-like wording in free text (e.g. a cover headline).
+
+        ``review`` only rewrites dialogue turns, but every user-visible string
+        needs the same treatment — the cover image is published too.
+        """
+        return self._fix_line(str(text or "")) if text else ""
+
     def _append_disclaimers(self, existing: Iterable[Any]) -> List[str]:
         """Append configured notices without duplicating existing notices."""
         notices: List[str] = []

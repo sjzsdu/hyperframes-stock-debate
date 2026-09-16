@@ -124,5 +124,22 @@ publish:
   # 发布时间，留空立即发布；格式 %Y-%m-%d %H:%M，如 "2026-09-16 19:30"（晚高峰）。
   schedule: ""
 
+# 封面图（headless Chrome 截图，随发布一起下发）。
+# 尺寸按各平台实际支持的能力自动裁剪，平台与参数对应关系见
+# stocktalk/modules/publisher.py 的 PLATFORM_SPECS[platform]["covers"]：
+#   portrait  1080×1440（3:4）—— 抖音/快手/小红书/视频号
+#   landscape 1080×810 （4:3）—— 抖音与视频号的横版封面位
+#   wide      1440×810（16:9）—— B站封面
+# 封面失败只会降级为「不带封面发布」，不会中断发布。
+cover:
+  enabled: true
+  # 留空自动探测（macOS 的 Google Chrome / Chromium / Edge，再退到 PATH）。
+  chrome_path: ""
+  # 单张封面的截图超时。Chrome 截完图后常被辅助进程拖着不退出，
+  # 这里靠轮询产物文件判断完成，因此超时值只影响异常情况。
+  timeout_seconds: 90
+  # 截图前的虚拟时间预算，等待字体与 CSS 渐变就绪。
+  virtual_time_budget_ms: 4000
+
 output:
   dir: output
