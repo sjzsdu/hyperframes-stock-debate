@@ -3,9 +3,9 @@ requires = ["setuptools>=68.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "stocktalk"
+name = "tangulunjin"
 version = "0.1.0"
-description = "全自动 AI 财报对话视频生成工具"
+description = "谈股论金 — 全自动 AI 财报对话视频生成工具"
 readme = "README.md"
 license = {text = "MIT"}
 requires-python = ">=3.12"
@@ -22,7 +22,7 @@ dev = [
 ]
 
 [project.scripts]
-stocktalk = "stocktalk.cli:main"
+tangulunjin = "stocktalk.cli:main"
 
 [tool.setuptools.packages.find]
 include = ["stocktalk*"]

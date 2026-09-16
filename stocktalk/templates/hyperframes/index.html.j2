@@ -2,13 +2,13 @@
 <html lang="zh-CN" data-theme="{{ theme }}">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=1920,height=1080">
+  <meta name="viewport" content="width={{ canvas_width }},height={{ canvas_height }}">
   <title>{{ name }}</title>
   <link rel="stylesheet" href="stock-debate.css">
   <script src="gsap.min.js"></script>
 </head>
 <body>
-<main id="root" data-composition-id="stock-debate" data-start="0" data-width="1920" data-height="1080" data-duration="{{ duration }}" data-fps="30">
+<main id="root" class="layout-{{ layout }}{{ ' no-subtitle' if subtitle_mode == 'off' else (' captions-line' if subtitle_mode == 'line' else '') }}" data-composition-id="stock-debate" data-start="0" data-width="{{ canvas_width }}" data-height="{{ canvas_height }}" data-duration="{{ duration }}" data-fps="30">
 {% set outro_start = duration - 0.45 %}
   <div id="ambient-orb-a" class="ambient-orb orb-a clip" data-start="0" data-duration="{{ duration }}" data-track-index="1" data-layout-ignore></div>
   <div id="ambient-orb-b" class="ambient-orb orb-b clip" data-start="0" data-duration="{{ duration }}" data-track-index="2" data-layout-ignore></div>
@@ -32,10 +32,16 @@
     <div class="slide-kicker">{{ segment.topic_title }}</div>
     <div class="slide-keywords">{% for keyword in segment.keywords %}<span>{{ keyword }}</span>{% endfor %}</div>
     <div class="slide-visual">{{ segment.visual|safe }}</div>
-    <section id="speech-{{ loop.index }}" class="speech panel" data-layout-allow-caption-zone>
+    {% if subtitles %}
+    <section id="speech-{{ loop.index }}" class="speech panel{{ ' speech-line' if subtitle_mode == 'line' else '' }}" data-layout-allow-caption-zone>
+      {% if subtitle_mode == 'line' %}
+      {% for caption in segment.caption_lines %}<p class="speech-line-item" data-offset="{{ caption.offset }}" data-duration="{{ caption.duration }}">{{ caption.text }}</p>
+      {% endfor %}{% else %}
       <p class="type-text">{{ segment.line }}</p>
+      {% endif %}
       <div class="speech-progress" data-layout-ignore><i></i></div>
     </section>
+    {% endif %}
   </section>
   {% endfor %}
 

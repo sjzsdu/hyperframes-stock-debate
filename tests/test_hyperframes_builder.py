@@ -116,8 +116,11 @@ class HyperFramesBuilderTests(unittest.TestCase):
             )
             content = project.composition_path.read_text(encoding="utf-8")
             self.assertIn("公司与行业", content)
-            # Without any F10 directory the card falls back to a clean name/price card.
-            self.assertIn('aria-label="公司概览"', content)
+            # Every turn gets its own real-data board; with no quote/kline it
+            # degrades to a clean "暂无K线数据" panel instead of fabricating data.
+            self.assertIn("公司与行业·真实数据", content)
+            self.assertIn("暂无K线数据", content)
+            self.assertNotIn('aria-label="公司概览"', content)
 
     def test_close_line_used_when_no_real_ohlc(self):
         """Without genuine OHLC bars the chart must be a close line, never fake candles."""
@@ -154,10 +157,31 @@ class HyperFramesBuilderTests(unittest.TestCase):
     def test_render_requires_nonempty_mp4(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
-            builder = HyperFramesBuilder(self._config(root), runner=lambda command, cwd: subprocess.CompletedProcess(command, 0, "", ""))
+            builder = HyperFramesBuilder(self._config(root), runner=lambda command, cwd, env=None: subprocess.CompletedProcess(command, 0, "", ""))
             project = builder.build_project({}, {}, {})
             with self.assertRaises(HyperFramesBuildError):
                 builder.render_mp4(project, root / "missing.mp4")
+
+    def test_render_enables_streaming_encode_for_long_compositions(self):
+        """Long renders must stream frames instead of buffering ~60GB on disk."""
+        captured: dict[str, Any] = {}
+
+        def fake_runner(command, cwd, env=None):
+            captured["command"] = command
+            captured["env"] = env
+            return subprocess.CompletedProcess(command, 0, "", "")
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            destination = root / "out.mp4"
+            destination.write_bytes(b"x")
+            builder = HyperFramesBuilder(self._config(root), runner=fake_runner)
+            project = builder.build_project({}, {}, {})
+            builder.render_mp4(project, destination)
+        self.assertGreaterEqual(int(captured["env"]["PRODUCER_STREAMING_ENCODE_MAX_DURATION_SECONDS"]), 7200)
+        self.assertEqual(captured["env"]["HF_CAPTURE_PARALLEL_STREAM"], "true")
+        self.assertEqual(captured["env"]["HF_DE_PARALLEL_STREAM"], "true")
+        self.assertIn("render", captured["command"])
 
 
 if __name__ == "__main__":

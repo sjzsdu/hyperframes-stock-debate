@@ -57,8 +57,11 @@
     const isCover = index === 1;
     const accent = slide.classList.contains('bull') ? '#ff78bc' : '#65baff';
 
-    // Hold the first slide visible until the second one takes over.
-    const exitAt = isCover ? Number.MAX_SAFE_INTEGER : start + Math.max(.3, duration - .16);
+    // Slides carry opaque backgrounds, so hand-offs do not cross-fade: the old
+    // slide stays fully opaque underneath while the new one fades in on top,
+    // and is only hidden once the new slide has fully covered it.  A cross-fade
+    // here briefly revealed the stage behind both slides (the visible "flash").
+    const isLast = index === document.querySelectorAll('.slide').length;
 
     if (!isCover) {
       tl.set(slide, { opacity: 0, visibility: 'visible' }, start);
@@ -67,10 +70,26 @@
       tl.fromTo(slide.querySelectorAll('.slide-keywords span'),
         { opacity: 0, y: 18, scale: .94 }, { opacity: 1, y: 0, scale: 1, stagger: .07, duration: .3 }, start + .12);
       tl.fromTo(slide.querySelector('.slide-visual'), { opacity: 0, y: 34, scale: .975 }, { opacity: 1, y: 0, scale: 1, duration: .4 }, start + .1);
-      tl.fromTo(slide.querySelector('.speech'), { opacity: 0, y: 30 }, { opacity: 1, y: 0, duration: .36 }, start + .14);
-      tl.fromTo(slide.querySelector('.speech-progress i'), { scaleX: 0 }, { scaleX: 1, duration: Math.max(.2, duration - .2), ease: 'none' }, start + .1);
-      tl.to(slide, { opacity: 0, y: -18, duration: Math.min(.18, duration * .08), ease: 'power1.in' }, exitAt);
-      tl.set(slide, { visibility: 'hidden' }, exitAt + Math.min(.18, duration * .08));
+      const speech = slide.querySelector('.speech');
+      if (speech) {
+        const captions = speech.querySelectorAll('.speech-line-item');
+        if (captions.length) {
+          // One-line captions: each chunk owns a slice of the turn, so only one
+          // row is ever on screen and it matches what is being spoken.
+          captions.forEach(caption => {
+            const at = start + Number(caption.dataset.offset || 0);
+            tl.set(caption, { opacity: 1 }, Math.max(0, at));
+            tl.set(caption, { opacity: 0 }, Math.max(0, at + Number(caption.dataset.duration || .8)));
+          });
+        } else {
+          tl.fromTo(speech, { opacity: 0, y: 30 }, { opacity: 1, y: 0, duration: .36 }, start + .14);
+        }
+        tl.fromTo(slide.querySelector('.speech-progress i'), { scaleX: 0 }, { scaleX: 1, duration: Math.max(.2, duration - .2), ease: 'none' }, start + .1);
+      }
+      if (!isLast && index > 2) {
+        const previous = document.querySelector('#slide-' + (index - 1));
+        if (previous) tl.set(previous, { visibility: 'hidden' }, start + .42);
+      }
     } else {
       // The cover slide is a transparent title card: the headline, real chart
       // and data panel stay visible while the first line plays over them.
@@ -78,8 +97,20 @@
       tl.fromTo(slide.querySelector('.slide-kicker'), { opacity: 0, x: -26 }, { opacity: 1, x: 0, duration: .34 }, .5);
       tl.fromTo(slide.querySelectorAll('.slide-keywords span'),
         { opacity: 0, y: 18, scale: .94 }, { opacity: 1, y: 0, scale: 1, stagger: .07, duration: .3 }, .62);
-      tl.fromTo(slide.querySelector('.speech'), { opacity: 0, y: 30 }, { opacity: 1, y: 0, duration: .4 }, .7);
-      tl.fromTo(slide.querySelector('.speech-progress i'), { scaleX: 0 }, { scaleX: 1, duration: Math.max(.2, duration - .2), ease: 'none' }, .6);
+      const speech = slide.querySelector('.speech');
+      if (speech) {
+        const captions = speech.querySelectorAll('.speech-line-item');
+        if (captions.length) {
+          captions.forEach(caption => {
+            const at = Number(caption.dataset.offset || 0);
+            tl.set(caption, { opacity: 1 }, Math.max(0, at));
+            tl.set(caption, { opacity: 0 }, Math.max(0, at + Number(caption.dataset.duration || .8)));
+          });
+        } else {
+          tl.fromTo(speech, { opacity: 0, y: 30 }, { opacity: 1, y: 0, duration: .4 }, .7);
+        }
+        tl.fromTo(slide.querySelector('.speech-progress i'), { scaleX: 0 }, { scaleX: 1, duration: Math.max(.2, duration - .2), ease: 'none' }, .6);
+      }
       tl.set(slide, { opacity: 0, visibility: 'hidden' }, Number(document.querySelector('#slide-2')?.dataset.start || 1e9));
     }
 

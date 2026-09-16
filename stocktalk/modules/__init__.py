@@ -1,1 +1,1 @@
-"""Pipeline modules for StockTalk."""
+"""谈股论金流水线模块。"""

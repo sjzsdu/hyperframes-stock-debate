@@ -1,1 +1,1 @@
-"""StockTalk video generation package."""
+"""谈股论金视频生成包。"""

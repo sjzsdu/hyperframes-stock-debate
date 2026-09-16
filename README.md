@@ -1,4 +1,4 @@
-# StockTalk · 股会说
+# 谈股论金
 
 全自动 AI 财报对话视频生成工具。输入股票代码，自动完成：数据获取 → 对话脚本生成 → 合规审核 → 双角色语音合成 → HyperFrames 视频工程构建 → 渲染输出 MP4。
 
@@ -40,27 +40,63 @@ bl auth login --api-key sk-xxx
 
 ```bash
 # 一条命令生成视频
-stocktalk 600519 --name 贵州茅台
+tangulunjin 600519 --name 贵州茅台
 
 # 或使用模块方式运行
 python -m stocktalk.pipeline 600519 --name 贵州茅台
 ```
 
+## 一条命令：生成 MP4 + 全平台发布
+
+```bash
+tangulunjin 601689 --publish
+```
+
+这一条会依次完成：拉行情与个股资讯 → 生成对话脚本 → 合规审核 → TTS 配音 →
+构建 HyperFrames 工程 → 渲染竖版主片（B站需要横版时再渲一版）→ 发布前预检 cookie →
+逐个平台上传，并在 `output/<代码>_<时间戳>.json` 里留下完整结果（含每个平台的命令与失败原因）。
+
+**前置条件（只做一次）：**
+
+```bash
+cd third_party/social-auto-upload
+uv sync                                        # 初始化 sau 环境
+uv run sau douyin login --account default      # 每个平台各登录一次，cookie 会保存
+cd ../..
+```
+
+B站特殊：它的上传走外部 `biliup` 二进制（首次使用时自动下载），且**登录必须在交互终端里执行**。
+
+**批量与选择性发布：**
+
+```bash
+tangulunjin 601689 600519 000001 --publish        # 依次生成并发布多只票
+tangulunjin --watchlist watchlist.txt --publish   # 从文件读代码（每行一个，支持「601689 拓普集团」）
+tangulunjin 601689 --platforms douyin,xiaohongshu # 本次只发指定平台
+tangulunjin 601689 --publish-only output/601689_20260916_110907.mp4   # 只重发已生成的片子
+```
+
+批量运行时任一环节失败**不会中断后面的票**，结束时打印汇总并以退出码 1 退出，方便接到
+cron 或自动化里判断成败。`--publish-only` 会从 MP4 同名的 `.json` 读回原标题、简介与
+分平台视频路径，不会退化成文件名。
+
 ## CLI 命令
 
 ```
-stocktalk <股票代码> [选项]
+tangulunjin <股票代码...> [选项]
 
 参数：
-  股票代码              6位A股代码，如 600519、000001
+  股票代码              6位A股代码，如 600519、000001；可一次给多个，逐个生成并发布
 
 选项：
-  --name NAME           股票名称（可选，会自动获取）
+  --name NAME           股票名称（可选，会自动获取；仅在单个代码时生效）
   --config PATH         自定义配置文件路径
   --output-dir DIR      输出目录（默认 output/）
   --duration-minutes N  对话目标时长（默认 2-8 分钟，按素材量自然伸缩）
   --publish             渲染后自动发布到已配置的平台（抖音/B站/快手/小红书/视频号）
   --publish-only MP4    跳过生成，直接发布已有 MP4
+  --platforms LIST      本次只发布指定平台，逗号分隔
+  --watchlist FILE      从文件读取股票代码（每行一个，# 之后为注释）
   --help                显示帮助信息
 ```
 
@@ -68,19 +104,19 @@ stocktalk <股票代码> [选项]
 
 ```bash
 # 基础用法
-stocktalk 600519
+tangulunjin 600519
 
 # 指定名称和配置
-stocktalk 600519 --name 贵州茅台 --config my_config.yaml
+tangulunjin 600519 --name 贵州茅台 --config my_config.yaml
 
 # 指定输出目录和目标时长
-stocktalk 000001 --name 平安银行 --output-dir ./videos --duration-minutes 3
+tangulunjin 000001 --name 平安银行 --output-dir ./videos --duration-minutes 3
 
 # 生成并自动发布到所有已配置平台
-stocktalk 600519 --publish
+tangulunjin 600519 --publish
 
 # 只发布一个已有视频
-stocktalk 600519 --publish-only output/600519_20260915_120000.mp4
+tangulunjin 600519 --publish-only output/600519_20260915_120000.mp4
 ```
 
 ## 多平台自动发布
@@ -97,6 +133,11 @@ uv run sau douyin login --account default     # 每个平台登录一次
 cd ../..
 ```
 
+登录时会自动弹出浏览器窗口（login 永远有头，即使配置里 headless: true），
+在**弹出的浏览器里**扫码并在手机上点「确认登录」即可，等待窗口为 5 分钟。
+注意：不要只扫保存的二维码 PNG 截图——抖音截图二维码常因风控校验不生效；
+若手机点了确认但终端仍报超时，直接重跑一次登录命令。
+
 **配置**（`stocktalk/config/default.yaml`）：
 
 ```yaml
@@ -104,12 +145,27 @@ publish:
   platforms: [douyin, bilibili, kuaishou, xiaohongshu, tencent]
   accounts: {douyin: default, bilibili: default, ...}  # 每平台的账号名
   headless: true
+  preflight: true            # 上传前用 sau <p> check 验 cookie，失效平台直接跳过
+  retries: 1                 # 上传失败的平台在同一轮内自动重试
+  retry_delay_seconds: 30
+  verify_code_wait_seconds: 150  # 抖音短信验证码等待上限，超出即中止该平台
+  platform_canvas:           # 给个别平台单独渲一版画幅
+    bilibili: horizontal
   schedule: ""               # 留空立即发布；如 "2026-09-16 19:30" 定时发布
   extra_tags: []             # 追加自定义话题标签
 ```
 
 发布内容（标题/简介/话题标签）从审核后的对话脚本自动生成，标题按平台字数限制截断，
 简介自动附上“不构成投资建议”免责声明，B站自动选择财经分区。
+
+**无人值守运行时的三个已知坑：**
+
+1. **抖音短信验证码**：发布瞬间可能触发风控弹窗，sau 会无声地无限等待验证码。
+   现在检测到该状态后会在 `verify_code_wait_seconds` 内等 `third_party/social-auto-upload/verify_code.txt`，
+   超时即中止该平台并给出提示（不再白等到 15 分钟上传超时）。想抢救就在窗口期内写文件：
+   `echo -n "123456" > third_party/social-auto-upload/verify_code.txt`（sau 读到后自动提交并删除）。
+2. **cookie 失效**：预检会拦下失效平台并在报告里提示 `sau <platform> login`，不会浪费一次渲染。
+3. **B站首次上传**：会从 GitHub 下载 `biliup` 二进制，网络不通时 B站失败但**不影响其他平台**。
 
 ## 配置
 

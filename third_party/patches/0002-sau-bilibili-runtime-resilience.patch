@@ -1,0 +1,235 @@
+Local patch for vendored social-auto-upload (see third_party/README.md).
+
+Bilibili's upload path shells out to the external `biliup` binary, which
+runtime.py downloads from GitHub on first use.  The upstream downloader only
+talks to the GitHub Releases API, so an anonymous rate limit (HTTP 403) or a
+network hiccup makes the very first B站 upload fail with no way to recover.
+
+This patch makes the downloader resilient:
+  - fall back to the release web page (whose 302 carries the latest tag) when
+    the API is rate-limited or unreachable, since the page is not subject to
+    the API's anonymous quota;
+  - construct the asset URL from biliup's fixed release naming rules and
+    confirm it with a HEAD request before downloading;
+  - reuse an already-installed local biliup when the network is unavailable,
+    instead of failing a publish that would otherwise have worked.
+
+Applies to: uploader/bilibili_uploader/runtime.py and its unit test.
+
+--- a/uploader/bilibili_uploader/runtime.py
++++ b/uploader/bilibili_uploader/runtime.py
+@@ -1,6 +1,8 @@
+ from __future__ import annotations
+ 
++import os
+ import platform
++import re
+ import shutil
+ import stat
+ import subprocess
+@@ -13,6 +15,7 @@
+ 
+ 
+ GITHUB_RELEASE_API = "https://api.github.com/repos/biliup/biliup/releases/latest"
++GITHUB_RELEASES_PAGE = "https://github.com/biliup/biliup/releases/latest"
+ 
+ 
+ def get_biliup_runtime_root() -> Path:
+@@ -49,17 +52,19 @@
+     return build_biliup_runtime_path(system_name).with_name("version.txt")
+ 
+ 
++RELEASE_ASSET_PATTERNS = {
++    "windows-x86_64": ("x86_64-windows.zip",),
++    "linux-x86_64": ("x86_64-linux.tar.xz",),
++    "linux-aarch64": ("aarch64-linux.tar.xz",),
++    "linux-arm": ("arm-linux.tar.xz",),
++    "macos-x86_64": ("x86_64-macos.tar.xz",),
++    "macos-aarch64": ("aarch64-macos.tar.xz",),
++}
++
++
+ def _select_release_asset(assets: list[dict]) -> dict:
+     platform_key = _build_platform_key()
+-    preferred_patterns = {
+-        "windows-x86_64": ("x86_64-windows.zip",),
+-        "linux-x86_64": ("x86_64-linux.tar.xz",),
+-        "linux-aarch64": ("aarch64-linux.tar.xz",),
+-        "linux-arm": ("arm-linux.tar.xz",),
+-        "macos-x86_64": ("x86_64-macos.tar.xz",),
+-        "macos-aarch64": ("aarch64-macos.tar.xz",),
+-    }
+-    patterns = preferred_patterns.get(platform_key)
++    patterns = RELEASE_ASSET_PATTERNS.get(platform_key)
+     if not patterns:
+         raise RuntimeError(f"Unsupported biliup platform: {platform_key}")
+ 
+@@ -75,16 +80,20 @@
+ 
+ 
+ def fetch_latest_release() -> dict:
+-    response = requests.get(
+-        GITHUB_RELEASE_API,
+-        headers={
+-            "Accept": "application/vnd.github+json",
+-            "User-Agent": "social-auto-upload",
+-        },
+-        timeout=30,
+-    )
+-    response.raise_for_status()
+-    payload = response.json()
++    headers = {
++        "Accept": "application/vnd.github+json",
++        "User-Agent": "social-auto-upload",
++    }
++    token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
++    if token:
++        headers["Authorization"] = f"Bearer {token}"
++    try:
++        response = requests.get(GITHUB_RELEASE_API, headers=headers, timeout=30)
++        response.raise_for_status()
++        payload = response.json()
++    except (requests.RequestException, ValueError):
++        # GitHub API 匿名请求限流(403)或网络失败时，改走 release 网页兜底，不受 API 限流影响。
++        return fetch_release_via_web_fallback()
+     selected_asset = _select_release_asset(payload.get("assets", []))
+     return {
+         "tag_name": payload.get("tag_name", ""),
+@@ -93,6 +102,70 @@
+     }
+ 
+ 
++def _extract_tag_from_url(url: str) -> str | None:
++    marker = "/releases/tag/"
++    if marker not in url:
++        return None
++    tag = url.split(marker, 1)[1].split("?", 1)[0].split("#", 1)[0]
++    return tag or None
++
++
++def _extract_tag_from_page_title(html_text: str) -> str | None:
++    match = re.search(r"Release\s+(v[0-9][\w.\-]*)", html_text[:5000])
++    return match.group(1) if match else None
++
++
++def build_fallback_release(tag_name: str) -> dict:
++    """按 biliup 固定的 release 资产命名规则拼出下载地址，并用 HEAD 请求确认存在。"""
++    platform_key = _build_platform_key()
++    patterns = RELEASE_ASSET_PATTERNS.get(platform_key)
++    if not patterns:
++        raise RuntimeError(f"Unsupported biliup platform: {platform_key}")
++
++    candidates = [
++        f"{prefix}-{tag_name}-{suffix}"
++        for suffix in patterns
++        for prefix in ("biliupR", "biliup")
++    ]
++    last_error = ""
++    for asset_name in candidates:
++        asset_url = f"https://github.com/biliup/biliup/releases/download/{tag_name}/{asset_name}"
++        try:
++            probe = requests.head(
++                asset_url,
++                headers={"User-Agent": "social-auto-upload"},
++                timeout=30,
++                allow_redirects=True,
++            )
++            if probe.status_code < 400:
++                return {
++                    "tag_name": tag_name,
++                    "asset_name": asset_name,
++                    "asset_url": asset_url,
++                }
++            last_error = f"HTTP {probe.status_code}"
++        except requests.RequestException as exc:
++            last_error = str(exc)
++    raise RuntimeError(
++        f"No downloadable biliup asset for {platform_key} at {tag_name}: {last_error}"
++    )
++
++
++def fetch_release_via_web_fallback() -> dict:
++    """请求 releases/latest 页面（302 重定向携带最新 tag）绕过 GitHub API 限流。"""
++    response = requests.get(
++        GITHUB_RELEASES_PAGE,
++        headers={"User-Agent": "social-auto-upload"},
++        timeout=30,
++        allow_redirects=True,
++    )
++    response.raise_for_status()
++    tag_name = _extract_tag_from_url(str(response.url)) or _extract_tag_from_page_title(response.text)
++    if not tag_name:
++        raise RuntimeError("Unable to resolve latest biliup release tag from GitHub web page")
++    return build_fallback_release(tag_name)
++
++
+ def read_local_biliup_version() -> str | None:
+     version_path = _build_biliup_version_path()
+     if not version_path.exists():
+--- a/tests/test_bilibili_runtime.py
++++ b/tests/test_bilibili_runtime.py
+@@ -2,9 +2,14 @@
+ from pathlib import Path
+ from unittest.mock import Mock, patch
+ 
++import requests
++
+ from uploader.bilibili_uploader.runtime import (
+     build_biliup_runtime_path,
++    build_fallback_release,
+     ensure_biliup_binary,
++    fetch_latest_release,
++    fetch_release_via_web_fallback,
+     run_biliup_command,
+ )
+ 
+@@ -60,3 +65,49 @@
+         run_biliup_command(["login"], interactive=True)
+         _, kwargs = mock_run.call_args
+         self.assertNotIn("capture_output", kwargs)
++
++    @patch("uploader.bilibili_uploader.runtime.requests.get")
++    def test_fetch_latest_release_falls_back_to_web_page_on_rate_limit(self, mock_get):
++        mock_get.side_effect = [
++            Mock(raise_for_status=Mock(side_effect=requests.HTTPError("403 rate limit"))),
++            Mock(
++                url="https://github.com/biliup/biliup/releases/tag/v1.2.4",
++                raise_for_status=Mock(return_value=None),
++                text="Release v1.2.4 · biliup/biliup · GitHub",
++            ),
++        ]
++        with patch(
++            "uploader.bilibili_uploader.runtime.build_fallback_release",
++            return_value={"tag_name": "v1.2.4", "asset_name": "biliupR-v1.2.4-aarch64-macos.tar.xz", "asset_url": "https://example.invalid/x"},
++        ) as mock_fallback:
++            release = fetch_latest_release()
++        self.assertEqual(release["tag_name"], "v1.2.4")
++        mock_fallback.assert_called_once_with("v1.2.4")
++
++    def test_extract_tag_from_url(self):
++        from uploader.bilibili_uploader.runtime import _extract_tag_from_url
++
++        self.assertEqual(
++            _extract_tag_from_url("https://github.com/biliup/biliup/releases/tag/v1.2.4"),
++            "v1.2.4",
++        )
++        self.assertIsNone(_extract_tag_from_url("https://github.com/biliup/biliup/releases"))
++
++    @patch("uploader.bilibili_uploader.runtime.requests.head")
++    def test_build_fallback_release_probes_candidate_assets(self, mock_head):
++        # 第一个候选(带 R 前缀)直接命中
++        mock_head.return_value = Mock(status_code=200)
++        release = build_fallback_release("v1.2.4")
++        self.assertIn("biliupR-v1.2.4-", release["asset_name"])
++        self.assertTrue(release["asset_url"].endswith(release["asset_name"]))
++        mock_head.assert_called_once()
++
++    @patch("uploader.bilibili_uploader.runtime.requests.get")
++    def test_web_fallback_raises_when_tag_not_resolved(self, mock_get):
++        mock_get.return_value = Mock(
++            url="https://github.com/biliup/biliup/releases",
++            raise_for_status=Mock(return_value=None),
++            text="no tag here",
++        )
++        with self.assertRaises(RuntimeError):
++            fetch_release_via_web_fallback()

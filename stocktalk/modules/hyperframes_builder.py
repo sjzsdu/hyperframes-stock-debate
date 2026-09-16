@@ -4,6 +4,7 @@ from __future__ import annotations
 import html
 import json
 import math
+import os
 import shutil
 import subprocess
 from dataclasses import dataclass
@@ -18,6 +19,14 @@ class HyperFramesBuildError(RuntimeError):
 
 
 Runner = Callable[[Sequence[str], Path], subprocess.CompletedProcess[str]]
+
+# One-line captions: the spoken line is split at punctuation so every caption
+# fits a single row of the 968px caption strip at 46px (~19 CJK chars).  18
+# leaves a safety margin for punctuation and latin runs.
+CAPTION_MAX_CHARS = 18
+CAPTION_BREAKS = "，。；！？、：,.!?;:"
+# Punctuation that ends a sentence — never merge a chunk across one of these.
+CAPTION_SENTENCE_ENDS = "。；！？.!?;"
 
 # Discussion topics, detected from the dialogue text itself. The first matching
 # entry wins, so specific topics precede generic ones.
@@ -41,15 +50,93 @@ class HyperFramesProject:
     duration: float
 
 
+def split_caption_lines(line: str, max_chars: int = CAPTION_MAX_CHARS) -> list[str]:
+    """Split one spoken line into single-row caption chunks.
+
+    Chunks break at punctuation where possible and hard-split an over-long
+    clause, then greedily merge short neighbours — a caption that flashes past
+    faster than it can be read is worse than a slightly denser one.
+    """
+    text = " ".join(str(line or "").split())
+    if not text:
+        return []
+    atoms: list[str] = []
+    buffer = ""
+    for char in text:
+        buffer += char
+        if char in CAPTION_BREAKS:
+            atoms.append(buffer)
+            buffer = ""
+    if buffer:
+        atoms.append(buffer)
+
+    pieces: list[str] = []
+    for atom in atoms:
+        while len(atom) > max_chars:
+            pieces.append(atom[:max_chars])
+            atom = atom[max_chars:]
+        if atom:
+            pieces.append(atom)
+
+    merged: list[str] = []
+    for piece in pieces:
+        # A hard split can leave a leading "，"; punctuation belongs at the end of
+        # the chunk it follows.  One extra char still fits the 888px caption row.
+        while piece and piece[0] in CAPTION_BREAKS and merged and len(merged[-1]) < max_chars + 1:
+            merged[-1] += piece[0]
+            piece = piece[1:]
+        previous = merged[-1] if merged else ""
+        if previous and previous[-1] not in CAPTION_SENTENCE_ENDS and len(previous) + len(piece) <= max_chars:
+            merged[-1] = previous + piece
+        elif piece:
+            merged.append(piece)
+    return merged
+
+
+# Canvas presets: name -> (width, height).  Vertical is the default target
+# because抖音/快手/小红书 play 9:16 full-screen — a 16:9 video there only fills
+# the middle 56% of the phone screen.  Horizontal stays for B站/YouTube.
+CANVAS_PRESETS: dict[str, tuple[int, int]] = {
+    "horizontal": (1920, 1080),
+    "vertical": (1080, 1920),
+}
+
+
 class HyperFramesBuilder:
-    """Create a 1920×1080 discussion composition from separate Jinja/CSS/JS assets."""
+    """Create a discussion composition from separate Jinja/CSS/JS assets.
+
+    The canvas size is configurable via ``video.canvas`` ("horizontal" for
+    1920×1080, "vertical" for 1080×1920); both carry the same pixel count, so
+    render time is unaffected by the choice.
+    """
 
     def __init__(self, config: Mapping[str, Any] | None = None, runner: Runner | None = None) -> None:
         self.config = dict(config or {})
         video = self.config.get("video", {})
         self.video_config = dict(video) if isinstance(video, Mapping) else {}
         self.characters = self.config.get("characters", {})
+        self.layout = str(self.video_config.get("canvas", "horizontal")).strip().lower()
+        if self.layout not in CANVAS_PRESETS:
+            self.layout = "horizontal"
+        self.canvas_width, self.canvas_height = CANVAS_PRESETS[self.layout]
+        # off  — no on-screen captions; the spoken line is left to the platform
+        # line — one-line captions, split at punctuation and cycled per turn
+        # full — the whole spoken line as one large caption block
+        self.subtitle_mode = self._subtitle_mode(self.video_config.get("subtitles"))
+        self.subtitles = self.subtitle_mode != "off"
         self._runner = runner or self._run_subprocess
+
+    def _subtitle_mode(self, raw: Any) -> str:
+        """Resolve ``video.subtitles`` into off/line/full (bool kept for compat)."""
+        valid = ("off", "line", "full")
+        if raw is None:
+            return "full" if self.layout == "horizontal" else "line"
+        if isinstance(raw, bool):
+            return "full" if raw else "off"
+        mode = str(raw).strip().lower()
+        mode = {"true": "full", "false": "off", "on": "full", "off": "off",
+                "one-line": "line", "single": "line", "1line": "line"}.get(mode, mode)
+        return mode if mode in valid else ("full" if self.layout == "horizontal" else "line")
 
     def build_project(self, stock_data: Mapping[str, Any], script: Mapping[str, Any] | None, tts_timeline: Mapping[str, Any] | None) -> HyperFramesProject:
         directory = Path(self.video_config.get("project_dir", self._output_dir / "hyperframes")); directory.mkdir(parents=True, exist_ok=True)
@@ -79,11 +166,26 @@ class HyperFramesBuilder:
             raise HyperFramesBuildError("Node.js/npx is required to run HyperFrames CLI")
         quality = str(self.video_config.get("quality", "high"))
         timeout_seconds = float(self.video_config.get("render_timeout_seconds", 3600))
+        # Long compositions (2-8 min at 30fps = 3600-14400 frames) must stream frames
+        # to the encoder instead of buffering ~8MB/frame on disk (a 4-minute render
+        # would otherwise demand ~60GB of free space and abort on the disk precheck).
+        # 1) Raise the streaming-encode duration ceiling (default 240s).
+        # 2) Stream parallel (multi-worker) capture too — HF_CAPTURE_PARALLEL_STREAM
+        #    routes interleaved beginFrame capture from all workers into the encoder;
+        #    without it, >1 worker silently falls back to the disk path.
+        max_streaming = max(7200, int((timeout_seconds / 3) if timeout_seconds else 7200))
+        parallel_stream = "false" if str(self.video_config.get("parallel_stream_capture", True)).lower() in {"0", "false", "no"} else "true"
+        env = {
+            **os.environ,
+            "PRODUCER_STREAMING_ENCODE_MAX_DURATION_SECONDS": str(max_streaming),
+            "HF_CAPTURE_PARALLEL_STREAM": parallel_stream,
+            "HF_DE_PARALLEL_STREAM": parallel_stream,
+        }
         # --yes keeps npx from blocking on its interactive install prompt
         # (stdout/stderr are captured here, so the prompt would never be seen).
         command = ("npx", "--yes", "hyperframes", "render", str(directory), "--output", str(destination), "--quality", quality)
         try:
-            completed = self._runner(command, directory)
+            completed = self._runner(command, directory, env=env)
         except subprocess.TimeoutExpired as exc:
             raise HyperFramesBuildError(
                 f"HyperFrames render timed out after {timeout_seconds:g}s — "
@@ -116,9 +218,11 @@ class HyperFramesBuilder:
     def _output_dir(self) -> Path: return Path(self.video_config.get("output_dir", "./output"))
     @property
     def _asset_dir(self) -> Path: return Path(__file__).resolve().parents[1] / "templates" / "hyperframes"
-    def _run_subprocess(self, command: Sequence[str], cwd: Path) -> subprocess.CompletedProcess[str]:
+    def _run_subprocess(self, command: Sequence[str], cwd: Path,
+                        env: Mapping[str, str] | None = None) -> subprocess.CompletedProcess[str]:
         timeout = float(self.video_config.get("render_timeout_seconds", 3600))
-        return subprocess.run(command, cwd=cwd, capture_output=True, text=True, timeout=timeout, check=False)
+        return subprocess.run(command, cwd=cwd, capture_output=True, text=True, timeout=timeout,
+                              check=False, env=dict(env) if env else None)
 
     def _segments(self, script: Mapping[str, Any], timeline: Mapping[str, Any]) -> list[dict[str, Any]]:
         """Build slide segments; classify each discussion topic from the line text."""
@@ -193,8 +297,31 @@ class HyperFramesBuilder:
                 "fx_chain": fx_chain,
                 "audio_automation": json.dumps(automation, separators=(",", ":")),
                 "is_first": index == 0,
+                # Caption offsets are relative to the slide's own start (visual_start),
+                # because that is the origin the JS timeline seeks from.  Time is
+                # shared out by character count, so a caption is on screen while the
+                # matching part of the line is being spoken.
+                "caption_lines": self._caption_timing(segment.get("line", ""), start, duration, visual_start),
             })
         return segments
+
+    @staticmethod
+    def _caption_timing(line: Any, start: float, duration: float,
+                        visual_start: float) -> list[dict[str, Any]]:
+        """Lay single-row caption chunks out across one turn's spoken duration."""
+        chunks = split_caption_lines(str(line or ""))
+        if not chunks:
+            return []
+        total = sum(len(chunk) for chunk in chunks)
+        cursor = start
+        timed: list[dict[str, Any]] = []
+        for chunk in chunks:
+            share = duration * len(chunk) / total
+            timed.append({"text": chunk,
+                          "offset": round(max(0.0, cursor - visual_start), 3),
+                          "duration": round(max(.35, share), 3)})
+            cursor += share
+        return timed
 
     @staticmethod
     def _visual_topic(text: str) -> tuple[str, str]:
@@ -253,7 +380,9 @@ class HyperFramesBuilder:
         if not history:
             history = self._real_close_bars(technical)
         visuals = self._visuals(quote, financials, history, f10, technical, news)
-        rendered_segments = [dict(segment, visual=visuals.get(str(segment.get("topic")), visuals["industry"])) for segment in segments]
+        rendered_segments = [dict(segment,
+                                  visual=self._turn_board_svg(segment, quote, history, technical, news))
+                             for segment in segments]
         stock_name = str(quote.get("name") or stock.get("name") or stock.get("code") or "股票")
         env = Environment(loader=FileSystemLoader(self._asset_dir), autoescape=select_autoescape(("html", "xml")))
         return env.get_template("index.html.j2").render(
@@ -266,6 +395,11 @@ class HyperFramesBuilder:
             outro_svg=visuals["outro"],
             duration=duration,
             theme=str(self.video_config.get("theme", "dark")),
+            layout=self.layout,
+            subtitles=self.subtitles,
+            subtitle_mode=self.subtitle_mode,
+            canvas_width=self.canvas_width,
+            canvas_height=self.canvas_height,
             financials=self._financials(quote, financials, technical),
             chart=self._candles(history),
             f10_text=self._f10_text(f10, ("公司概况", "经营分析")),
@@ -412,6 +546,229 @@ class HyperFramesBuilder:
         direction = "up" if close_values[-1] >= close_values[0] else "down"
         line_class = "ma draw-line" if has_ohlc else f"close-line draw-line {direction}"
         return '<svg viewBox="0 0 760 410" role="img" aria-label="价格走势（真实行情数据）">' + ''.join(out) + f'<polyline class="{line_class}" points="{" ".join(closes)}"/></svg>'
+
+    # ------------------------------------------------------------------
+    # Per-turn talking-point board
+    # ------------------------------------------------------------------
+    def _turn_board_svg(self, segment: Mapping[str, Any], quote: Mapping[str, Any],
+                        bars: list[Any], technical: Mapping[str, Any], news: Mapping[str, Any] | None) -> str:
+        """A visual unique to the spoken turn: the real facts the line mentions
+        (left) plus an annotated real mini K-line (right).
+
+        Replaces the old one-SVG-per-topic card, which repeated the same graphic
+        for every turn classified to the same topic.
+        """
+        line = str(segment.get("line") or "")
+        topic = str(segment.get("topic") or "industry")
+        topic_title = html.escape(str(segment.get("topic_title") or "公司与行业"))
+        facts = self._turn_facts(line, quote, bars, technical)
+        W, H = 1160, 500
+        parts = [f'<svg viewBox="0 0 {W} {H}" role="img" aria-label="{topic_title}·真实数据">']
+        # divider between fact zone and chart zone
+        parts.append('<line x1="392" y1="24" x2="392" y2="476" stroke="rgba(101,151,196,.22)" stroke-width="1"/>')
+        # header kicker
+        parts.append('<circle cx="36" cy="42" r="5" fill="#ffd166"/>')
+        parts.append(f'<text x="52" y="50" class="snap-label" style="font-size:20px;letter-spacing:2px">{topic_title}</text>')
+        # fact blocks
+        y = 104
+        for fact in facts[:3]:
+            parts.append(f'<text x="34" y="{y}" class="snap-label" style="font-size:19px">{html.escape(fact["label"])}</text>')
+            value = html.escape(fact["value"])
+            parts.append(f'<text x="34" y="{y + 56}" class="snap-value {fact.get("tone","")}" style="font-size:44px">{value}</text>')
+            if fact.get("sub"):
+                parts.append(f'<text x="34" y="{y + 88}" class="snap-label" style="font-size:16px">{html.escape(fact["sub"])}</text>')
+            y += 132
+        if not facts:
+            parts.append('<text x="34" y="170" class="snap-label" style="font-size:20px">真实行情数据</text>')
+        # right body
+        keywords = [str(k).strip() for k in (segment.get("keywords") or []) if str(k).strip()]
+        if topic == "news":
+            parts.append(self._turn_news_body(news or {}))
+        else:
+            parts.append(self._mini_chart_body(bars, topic, quote, keywords))
+        # Speech-tied focus caption: guarantees each turn's card is distinct and
+        # visibly tied to exactly what is being said (keywords are LLM labels,
+        # never fabricated numbers).
+        if topic != "news" and keywords:
+            focus = " · ".join(keywords[:2])[:30]
+            parts.append(f'<text x="442" y="478" fill="#ffd166" font-size="18" font-weight="700">◆ 讨论点</text>')
+            parts.append(f'<text x="536" y="478" fill="#dbe7f5" font-size="18">{html.escape(focus)}</text>')
+        parts.append('<text x="1130" y="492" text-anchor="end" class="snap-label" style="font-size:14px">数据来源：通达信实时行情</text>')
+        parts.append('</svg>')
+        return ''.join(parts)
+
+    def _turn_facts(self, line: str, quote: Mapping[str, Any], bars: list[Any],
+                    technical: Mapping[str, Any]) -> list[dict[str, str]]:
+        """Pick up to 3 real metrics whose names actually occur in the line."""
+        text = line.lower().replace(" ", "")
+        def has(*terms: str) -> bool:
+            return any(t in text for t in terms)
+        facts: list[dict[str, str]] = []
+
+        def add(label: str, value: str, tone: str = "", sub: str = "") -> None:
+            if value and value != "—" and all(f["label"] != label for f in facts):
+                facts.append({"label": label, "value": value, "tone": tone, "sub": sub})
+
+        price = self._float(quote.get("price"), float("nan"))
+        change = self._float(quote.get("change_pct"), float("nan"))
+        tone = "up" if math.isfinite(change) and change > 0 else "down" if math.isfinite(change) and change < 0 else ""
+        closes = [self._float(b.get("close"), float("nan")) for b in bars if isinstance(b, Mapping)] if isinstance(bars, list) else []
+        closes = [c for c in closes if math.isfinite(c)]
+
+        if has("成交额", "成交", "放量", "缩量", "量能", "换手", "资金", "活跃"):
+            amount = self._lookup(quote, keys=("amount", "turnover"))
+            if amount is not None:
+                add("成交额", self._format_metric("成交额", amount))
+        if has("开盘"):
+            v = self._lookup(quote, keys=("open",))
+            if v is not None: add("今日开盘", f"{v:,.2f}")
+        if has("最高", "高点", "压力位"):
+            v = self._lookup(quote, keys=("high",))
+            if v is not None: add("日内最高", f"{v:,.2f}")
+        if has("最低", "低点", "支撑位"):
+            v = self._lookup(quote, keys=("low",))
+            if v is not None: add("日内最低", f"{v:,.2f}")
+        if has("回撤", "回调", "风险", "下行", "下跌空间") and len(closes) >= 5:
+            peak = closes[0]; worst = 0.0
+            for c in closes:
+                peak = max(peak, c)
+                if peak:
+                    worst = min(worst, c / peak - 1)
+            if worst < 0:
+                add("区间最大回撤", f"{worst * 100:.1f}%", "down", f"近{len(closes)}个交易日高点回落")
+        if has("金叉", "死叉", "均线", "ma5", "ma20", "macd", "指标", "多头", "空头", "技术信号"):
+            summary = technical.get("summary") if isinstance(technical.get("summary"), Mapping) else {}
+            signal = self._text(summary.get("signal") or summary.get("trend") or None)
+            if signal != "—":
+                hist = technical.get("history") if isinstance(technical.get("history"), list) else []
+                last = hist[-1] if hist and isinstance(hist[-1], Mapping) else {}
+                ma = last.get("ma") if isinstance(last.get("ma"), Mapping) else {}
+                ma5, ma20 = self._float(ma.get("ma5"), float("nan")), self._float(ma.get("ma20"), float("nan"))
+                sub = ""
+                if math.isfinite(ma5) and math.isfinite(ma20):
+                    sub = f"MA5 {ma5:,.1f} / MA20 {ma20:,.1f}"
+                add("技术信号", signal, "", sub)
+        if has("区间", "这段时间", "这波", "走势", "累计", "涨了", "跌了") and len(closes) >= 2 and closes[0]:
+            interval = (closes[-1] / closes[0] - 1) * 100
+            add(f"近{len(closes)}日涨跌", f"{interval:+.2f}%",
+                "up" if interval > 0 else "down" if interval < 0 else "")
+        # Defaults: anchor every board on the real latest price; surface today's
+        # change only when the line actually discusses the daily move or the card
+        # would otherwise be sparse, so consecutive cards do not repeat verbatim.
+        content_fact_count = len(facts)
+        if math.isfinite(price):
+            add("最新价", f"{price:,.2f}", tone)
+        if math.isfinite(change) and (content_fact_count == 0
+                                      or has("今天", "今日", "收盘", "翻红", "收涨", "收跌", "逆势")):
+            add("今日涨跌幅", f"{change:+.2f}%", tone)
+        return facts[:3]
+
+    def _mini_chart_body(self, bars: list[Any], topic: str, quote: Mapping[str, Any],
+                         keywords: list[str] | None = None) -> str:
+        """Real last-40-bar candle/close chart with a topic-driven annotation."""
+        X0, X1, TOP, BOT = 438, 1130, 78, 392
+        data = [b for b in bars if isinstance(b, Mapping)][-40:] if isinstance(bars, list) else []
+        closes = [self._float(b.get("close"), float("nan")) for b in data]
+        closes = [c for c in closes if math.isfinite(c)]
+        if not data or not closes:
+            return ('<text x="784" y="250" text-anchor="middle" class="snap-label" style="font-size:22px">'
+                    '暂无K线数据</text>')
+        has_ohlc = all(math.isfinite(self._float(b.get("open"), float("nan")))
+                       and math.isfinite(self._float(b.get("high"), float("nan")))
+                       and math.isfinite(self._float(b.get("low"), float("nan"))) for b in data)
+        lows = [self._float(b.get("low"), c) for b, c in zip(data, closes)]
+        highs = [self._float(b.get("high"), c) for b, c in zip(data, closes)]
+        floor, top = min(lows), max(highs)
+        spread = max(top - floor, max(abs(top) * .03, .01))
+        def y(v: float) -> float: return BOT - ((v - floor) / spread) * (BOT - TOP)
+        n = len(data)
+        step = (X1 - X0) / n
+        out = ['<line x1="438" y1="392" x2="1130" y2="392" stroke="rgba(101,151,196,.28)"/>']
+        for g in (0.25, 0.5, 0.75):
+            gy = TOP + (BOT - TOP) * g
+            out.append(f'<line x1="438" y1="{gy:.0f}" x2="1130" y2="{gy:.0f}" stroke="rgba(101,151,196,.10)"/>')
+        volumes = [self._float(b.get("volume"), 0) for b in data]
+        max_vol = max(volumes, default=0) or 0
+        for i, b in enumerate(data):
+            cl = closes[i]
+            px = X0 + (i + .5) * step
+            w = min(15, step * .58)
+            if has_ohlc:
+                op = self._float(b.get("open"), cl)
+                hi = self._float(b.get("high"), cl)
+                lo = self._float(b.get("low"), cl)
+                color = "up" if cl >= op else "down"
+                out.append(f'<g class="candle {color}"><line x1="{px:.1f}" y1="{y(hi):.1f}" x2="{px:.1f}" y2="{y(lo):.1f}"/>'
+                           f'<rect x="{px - w/2:.1f}" y="{min(y(op),y(cl)):.1f}" width="{w:.1f}" height="{max(2,abs(y(op)-y(cl))):.1f}"/></g>')
+            if max_vol and topic == "money":
+                vh = max(2, volumes[i] / max_vol * 42)
+                tone = "up" if i > 0 and cl >= closes[i-1] else "down"
+                out.append(f'<rect class="volume candle {tone}" x="{px - w/2:.1f}" y="{BOT + 44 - vh:.1f}" width="{w:.1f}" height="{vh:.1f}"/>')
+        if not has_ohlc:
+            pts = " ".join(f"{X0 + (i + .5) * step:.1f},{y(c):.1f}" for i, c in enumerate(closes))
+            direction = "up" if closes[-1] >= closes[0] else "down"
+            out.append(f'<polyline class="close-line {direction}" points="{pts}" fill="none" stroke-width="2.5"/>')
+        # latest-price marker
+        last_px = X0 + (n - .5) * step
+        last_y = y(closes[-1])
+        out.append(f'<line x1="438" y1="{last_y:.1f}" x2="1122" y2="{last_y:.1f}" stroke="#ffd166" stroke-dasharray="4 4" opacity=".7"/>')
+        out.append(f'<text x="1126" y="{last_y + 5:.1f}" text-anchor="end" fill="#ffd166" font-size="17" font-weight="700">{closes[-1]:,.2f}</text>')
+        # topic-specific highlight
+        if topic == "risk":
+            trough_i = min(range(n), key=lambda i: closes[i])
+            tx, ty2 = X0 + (trough_i + .5) * step, y(closes[trough_i])
+            out.append(f'<circle cx="{tx:.1f}" cy="{ty2:.1f}" r="6" fill="#5ee0a7" stroke="#04121d" stroke-width="2"/>')
+            out.append(f'<text x="{tx:.1f}" y="{ty2 - 14:.1f}" text-anchor="middle" fill="#5ee0a7" font-size="15" font-weight="700">区间低点</text>')
+        if topic == "money" and max_vol:
+            peak_i = max(range(n), key=lambda i: volumes[i])
+            px2 = X0 + (peak_i + .5) * step
+            out.append(f'<circle cx="{px2:.1f}" cy="{y(closes[peak_i]):.1f}" r="12" fill="none" stroke="#ffd166" stroke-width="2.5"/>')
+            out.append(f'<text x="{px2:.1f}" y="{TOP - 10:.1f}" text-anchor="middle" fill="#ffd166" font-size="15" font-weight="700">放量日</text>')
+        if topic == "technical" and n >= 5:
+            ma_pts = []
+            for i in range(4, n):
+                ma = sum(closes[i - 4:i + 1]) / 5
+                ma_pts.append(f"{X0 + (i + .5) * step:.1f},{y(ma):.1f}")
+            out.append(f'<polyline points="{" ".join(ma_pts)}" fill="none" stroke="#ffd166" stroke-width="2.2" opacity=".95"/>')
+            last_ma_x = X0 + (n - .5) * step
+            last_ma_y = y(sum(closes[-5:]) / 5)
+            out.append(f'<circle cx="{last_ma_x:.1f}" cy="{last_ma_y:.1f}" r="4.5" fill="#ffd166"/>')
+            out.append(f'<text x="{last_ma_x - 8:.1f}" y="{last_ma_y - 10:.1f}" text-anchor="end" fill="#ffd166" font-size="14" font-weight="700">MA5</text>')
+        # header readout
+        interval = (closes[-1] / closes[0] - 1) * 100 if closes[0] else 0.0
+        itone = "#ff7188" if interval >= 0 else "#5ee0a7"
+        out.append(f'<text x="442" y="52" fill="#91a8bf" font-size="17">近{n}个交易日 · 真实日K</text>')
+        out.append(f'<text x="1126" y="52" text-anchor="end" fill="{itone}" font-size="20" font-weight="800">{interval:+.2f}%</text>')
+        # date labels
+        dates = [str(b.get("date") or "") for b in data]
+        for i in (0, n // 2, n - 1):
+            if dates[i]:
+                label = dates[i][5:10] if len(dates[i]) >= 10 else dates[i]
+                out.append(f'<text x="{X0 + (i + .5) * step:.1f}" y="424" text-anchor="middle" fill="#91a8bf" font-size="15">{html.escape(label)}</text>')
+        return ''.join(out)
+
+    def _turn_news_body(self, news: Mapping[str, Any]) -> str:
+        """Real headline list for news turns (strictly from fetched items)."""
+        items = news.get("items") if isinstance(news.get("items"), list) else []
+        rows = []
+        y = 120
+        for item in [x for x in items if isinstance(x, Mapping)][:4]:
+            title = str(item.get("title") or "").strip()
+            if not title:
+                continue
+            date = str(item.get("publish_time") or "")
+            date_label = date[5:10] if len(date) >= 10 else ""
+            kind = str(item.get("type") or "资讯")
+            head = f"{date_label + ' · ' if date_label else ''}{title[:30]}"
+            rows.append(f'<circle cx="452" cy="{y - 7}" r="5" fill="#ffd166"/>'
+                        f'<text x="470" y="{y}" class="news-title" style="font-size:23px">{html.escape(head)}</text>'
+                        f'<text x="1126" y="{y}" text-anchor="end" class="snap-label" style="font-size:15px">{html.escape(kind)}</text>')
+            y += 82
+            if len(rows) == 4:
+                break
+        if not rows:
+            rows.append('<text x="784" y="250" text-anchor="middle" class="snap-label" style="font-size:22px">暂无相关资讯</text>')
+        return ''.join(rows)
 
     def _visuals(self, quote: Mapping[str, Any], financials: Mapping[str, Any], bars: list[Any], f10: Mapping[str, Any], technical: Mapping[str, Any], news: Mapping[str, Any] | None = None) -> dict[str, str]:
         """SVG topic visuals for every discussion topic, derived from fetched data only.

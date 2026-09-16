@@ -1,8 +1,7 @@
-"""Content safety checks for generated StockTalk dialogue.
+"""谈股论金生成对话的内容安全检查。
 
-The compliance pass is deliberately deterministic: it identifies language that
-could be interpreted as investment advice, replaces it with neutral wording,
-and records every intervention alongside the approved script.
+合规审核是确定性的：它识别可能被解释为投资建议的语言，
+将其替换为中性措辞，并记录每次干预 alongside the approved script。
 """
 
 from __future__ import annotations

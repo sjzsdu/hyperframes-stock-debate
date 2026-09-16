@@ -1,8 +1,7 @@
-"""Bailian TTS orchestration for StockTalk dialogue scripts.
+"""谈股论金对话脚本的百炼 TTS 编排。
 
-Each dialogue line is rendered separately so the video timeline can switch the
-active speaker accurately.  Subtitle timings are derived from the generated
-audio, rather than estimated from the number of characters in a line.
+每句对话单独渲染，以便视频时间轴准确切换活跃说话者。
+字幕时间是从生成的音频中导出的，而不是根据行中字符数估算的。
 """
 
 from __future__ import annotations
@@ -247,6 +246,67 @@ class TTSAgent:
                     pass
         return results
 
+    @staticmethod
+    def _clamp(value: float, low: float, high: float) -> float:
+        return max(low, min(high, value))
+
+    def _apply_prosody(self, line: str, character_config: Mapping[str, Any]) -> tuple[str, float, float, bool]:
+        """Return (synth_text, speed, pitch, use_ssml) for one spoken line.
+
+        System voices (cosyvoice-v3-flash) reject SSML emphasis/prosody tags,
+        but accept <break>.  So cadence comes from two levers: per-line
+        pitch/rate derived from punctuation and intent, plus a couple of
+        rhetorical pauses at clause boundaries.  The original line is returned
+        untouched to the caller for subtitles.
+        """
+        base_pitch = float(character_config.get("pitch", self.tts_config.get("pitch", 1.0)))
+        base_rate = float(character_config.get("speed", self.tts_config.get("speed", 1.0)))
+        pitch_delta = rate_delta = 0.0
+        if "？" in line or "?" in line:
+            pitch_delta += 0.06          # questions lift
+            rate_delta -= 0.02
+        if "！" in line or "!" in line:
+            pitch_delta += 0.05          # emphasis push
+            rate_delta += 0.04
+        if any(word in line for word in ("风险", "警惕", "回撤", "不确定", "小心", "危险", "亏损", "隐患")):
+            pitch_delta -= 0.02          # warnings sink and slow
+            rate_delta -= 0.06
+        if any(word in line for word in ("你看", "打个比方", "说白了", "也就是说", "举个例子")):
+            rate_delta -= 0.03          # explanatory asides ease off
+        pitch = round(self._clamp(base_pitch + pitch_delta, 0.82, 1.22), 3)
+        speed = round(self._clamp(base_rate + rate_delta, 0.92, 1.18), 3)
+        synth_text, use_ssml = self._with_breaks(line)
+        return synth_text, speed, pitch, use_ssml
+
+    @staticmethod
+    def _with_breaks(line: str) -> tuple[str, bool]:
+        """Insert a few real SSML pauses for natural rhythm (system voices only
+        support <break>, not emphasis/prosody).  The first one or two clause
+        commas become short pauses; ellipsis/dash become longer ones.
+        """
+        text = line.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+        text = text.replace("……", '<break time="300ms"/>')
+        text = text.replace("——", '<break time="260ms"/>')
+        comma_count = 0
+
+        def pause_comma(_match: re.Match[str]) -> str:
+            nonlocal comma_count
+            comma_count += 1
+            return '<break time="150ms"/>' if comma_count <= 2 else "，"
+
+        text = re.sub("，", pause_comma, text)
+
+        def pause_terminal(match: re.Match[str]) -> str:
+            # Keep the punctuation; add a short beat only when the line continues.
+            if match.end() < len(text):
+                return match.group(0) + '<break time="130ms"/>'
+            return match.group(0)
+
+        text = re.sub("[？！]", pause_terminal, text)
+        if "<break" in text:
+            return f"<speak>{text}</speak>", True
+        return line, False
+
     def _synthesize_line_cli(self, line: str, character: str, output_path: Path) -> Dict[str, Any]:
         character_config = self.characters.get(character, {})
         voice_id = character_config.get("voice_id")
@@ -256,28 +316,29 @@ class TTSAgent:
                 "Set characters.<name>.voice_id to a voice returned by "
                 "`bl speech synthesize --list-voices --model cosyvoice-v3-flash`."
             )
+        # Per-line prosody: questions lift, exclamations push, risk lines slow
+        # down; strategic <break> tags add rhetorical rhythm.  The original line
+        # is kept untouched for subtitles.
+        synth_text, speed, pitch, use_ssml = self._apply_prosody(line, character_config)
         command = [
             "bl", "speech", "synthesize",
-            "--text", line,
+            "--text", synth_text,
             "--model", str(self.tts_config.get("model", "cosyvoice-v3-flash")),
             "--format", self._audio_format,
             "--out", str(output_path),
         ]
         command.extend(["--voice", str(voice_id)])
+        if use_ssml:
+            command.append("--enable-ssml")
 
         sample_rate = self.tts_config.get("sample_rate")
         if sample_rate:
             command.extend(["--sample-rate", str(sample_rate)])
-        # Voice normalization: always pass speed/pitch/volume to ensure
-        # consistent prosody across all segments and both speakers.
-        speed = character_config.get("speed", self.tts_config.get("speed"))
-        if speed is not None:
-            command.extend(["--rate", str(speed)])
+        command.extend(["--rate", str(speed)])
         volume = self.tts_config.get("volume")
         if volume is not None:
             volume_f = float(volume)
             command.extend(["--volume", str(round(volume_f * 100) if volume_f <= 1 else round(volume_f))])
-        pitch = character_config.get("pitch", self.tts_config.get("pitch"))
         if pitch is not None and 0.5 <= float(pitch) <= 2.0:
             command.extend(["--pitch", str(pitch)])
         # Some cloned/designed voices support natural-language instructions.

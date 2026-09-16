@@ -7,3 +7,16 @@ __pycache__/
 # Pipeline output artifacts (video, audio, subtitles, HyperFrames projects)
 output/
 .freebuff
+.workbuddy
+
+# Vendored deps under third_party/: runtime env is rebuilt with `uv sync`, never commit.
+third_party/*/.venv/
+third_party/*/node_modules/
+
+# social-auto-upload runtime artifacts (login session cookies are secrets)
+third_party/social-auto-upload/cookies/
+third_party/social-auto-upload/logs/
+third_party/social-auto-upload/db/*.db
+# Login QR dumped by sau during `sau <platform> login`
+third_party/social-auto-upload/qrcode.png
+verify_code.txt

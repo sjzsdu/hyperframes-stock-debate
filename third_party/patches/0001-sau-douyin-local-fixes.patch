@@ -1,0 +1,93 @@
+diff --git a/sau_cli.py b/sau_cli.py
+index 0a12602..c7dbb35 100644
+--- a/sau_cli.py
++++ b/sau_cli.py
+@@ -1445,6 +1445,10 @@ async def dispatch(args: argparse.Namespace) -> int:
+ def main(argv: Sequence[str] | None = None) -> int:
+     parser = build_parser()
+     args = parser.parse_args(list(argv) if argv is not None else None)
++    # 登录是唯一需要人交互的环节：扫码/验证码必须在可见的浏览器窗口里完成。
++    # headless 模式下用户只能扫保存的截图 PNG，经常因为耗时超过等待窗口而超时。
++    if getattr(args, "action", "") == "login" and getattr(args, "headless", False):
++        args.headless = False
+     try:
+         return asyncio.run(dispatch(args))
+     except Exception as exc:
+diff --git a/uploader/douyin_uploader/main.py b/uploader/douyin_uploader/main.py
+index f6ac2be..536ebd2 100644
+--- a/uploader/douyin_uploader/main.py
++++ b/uploader/douyin_uploader/main.py
+@@ -216,7 +216,6 @@ async def _is_douyin_login_completed(page: Page) -> bool:
+         page.get_by_text("扫码登录", exact=True).first,
+         page.get_by_text("手机号登录", exact=True).first,
+         page.get_by_text("二维码失效", exact=True).first,
+-        page.get_by_role("img", name="二维码").first,
+     ]
+ 
+     for marker in login_markers:
+@@ -231,11 +230,22 @@ async def _is_douyin_login_completed(page: Page) -> bool:
+     return True
+ 
+ 
+-async def _wait_for_douyin_login(page: Page, account_file: str, qrcode_info: dict, qrcode_callback=None, poll_interval: int = 3, max_checks: int = 100) -> dict:
++async def _wait_for_douyin_login(page: Page, account_file: str, qrcode_info: dict, qrcode_callback=None, poll_interval: int = 3, max_checks: int = 100, context=None) -> dict:
+     qrcode_path = Path(qrcode_info["image_path"]) if qrcode_info.get("image_path") else None
+     original_url = page.url
+     saw_2fa = False
+     for _ in range(max_checks):
++        # 会话 cookie 是最可靠的成功信号：URL/元素判定可能被首页残留的
++        # 二维码/登录元素误伤（登录成功却一直判未完成，转满超时）。
++        if context is not None:
++            try:
++                cookies = await context.cookies()
++                if any(c.get("name") == "sessionid" and c.get("value") for c in cookies):
++                    douyin_logger.info(_msg("🥳", "已拿到抖音 sessionid，登录确认成功"))
++                    return _build_login_result(True, "success", "抖音扫码登录成功", account_file, qrcode_info, page.url)
++            except Exception:
++                pass
++
+         if await _is_douyin_login_completed(page):
+             douyin_logger.info(_msg("🥳", f"扫码成功，已经跳转到登录后页面: {page.url}"))
+             return _build_login_result(True, "success", "抖音扫码登录成功", account_file, qrcode_info, page.url)
+@@ -250,6 +260,7 @@ async def _wait_for_douyin_login(page: Page, account_file: str, qrcode_info: dic
+             await asyncio.sleep(poll_interval)
+             continue
+ 
++
+         expired_box = page.get_by_text("二维码失效", exact=True).locator("..").first
+         if await expired_box.count() and await expired_box.is_visible():
+             douyin_logger.warning(_msg("😵", "二维码失效了，小人马上去刷新"))
+@@ -260,13 +271,22 @@ async def _wait_for_douyin_login(page: Page, account_file: str, qrcode_info: dic
+ 
+         await asyncio.sleep(poll_interval)
+ 
+-    return _build_login_result(False, "timeout", "等待抖音扫码登录超时", account_file, qrcode_info, page.url)
++    waited = max_checks * poll_interval
++    return _build_login_result(
++        False,
++        "timeout",
++        f"等待抖音扫码登录超时（{waited // 60} 分钟）。请确认：弹出的浏览器窗口里已扫码、并在手机上点了「确认登录」；"
++        f"若手机已确认仍超时，多数是触发了风控验证，请重跑并在弹出的浏览器中按页面提示操作。最后页面: {page.url}",
++        account_file,
++        qrcode_info,
++        page.url,
++    )
+ 
+ async def douyin_cookie_gen(
+     account_file,
+     qrcode_callback=None,
+-    poll_interval: int = 2,
+-    max_checks: int = 60,
++    poll_interval: int = 3,
++    max_checks: int = 100,
+     headless: bool = LOCAL_CHROME_HEADLESS,
+     cdp_url: str | None = None,
+ ):
+@@ -295,6 +315,7 @@ async def douyin_cookie_gen(
+                 qrcode_callback=qrcode_callback,
+                 poll_interval=poll_interval,
+                 max_checks=max_checks,
++                context=context,
+             )
+             if result["success"]:
+                 await asyncio.sleep(2)
