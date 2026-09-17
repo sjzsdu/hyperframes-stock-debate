@@ -3,17 +3,19 @@
 
 dialogue:
   model: qwen3.6-plus
-  # 抖音风格短视频节奏：3-8 分钟正片，内容更充分展开。
-  min_duration_seconds: 180
-  max_duration_seconds: 480
-  max_line_chars: 130
-  # 8 分钟对话正文约 2000-3000 字，JSON 开销另计。
-  max_tokens: 6000
+  # 成片时长目标：70-110 秒。平台播放分成只算「有效播放」，完播率是决定性因素，
+  # 3 分钟以上的长片完播率通常跌到 20% 以下，实际分成反而不如 90 秒的短片。
+  # 语速约 2.8 字/秒，110 秒 ≈ 300 字正文，见 max_line_chars 与 _user_prompt 的字数预算。
+  min_duration_seconds: 70
+  max_duration_seconds: 110
+  max_line_chars: 90
+  # 2 分钟对话正文约 250-350 字，JSON 开销另计。
+  max_tokens: 2500
   temperature: 0.8
   # Measured end-to-end `bl text chat` latency for a full 2-5 min script is
-  # ~90-100s; a 3-8 min script runs longer, and retries each cost the full
+  # ~90-100s; a short script is faster, but retries each cost the full
   # timeout, so keep a wide margin.
-  timeout_seconds: 360
+  timeout_seconds: 180
 
 # tongstock connects to the remote TDX server on every invocation, which
 # typically takes 20-30s.  The timeout must comfortably exceed that so a
@@ -69,14 +71,17 @@ tts:
 video:
   output_dir: output
   quality: high
-  # 画幅。vertical = 1080×1920（抖音/快手/小红书竖屏全屏，手机上字最大）；
-  # horizontal = 1920×1080（B站/YouTube 横屏）。两者像素数相同，渲染耗时一致。
-  canvas: vertical
+  # 画幅。horizontal = 1920×1080（默认）；vertical = 1080×1920。
+  # 默认横版的原因：抖音/视频号/快手的播放分成都要求「原创横屏 ≥1 分钟」，
+  # 竖版主片等于把这三家的分成通道关掉（见 publish.platform_canvas 与变现说明）。
+  # 想改回竖版主发：这里改 vertical，并把 platform_canvas 换成 douyin/tencent/kuaishou: horizontal。
+  canvas: horizontal
   # 画面字幕模式：
-  #   line — 一行轮播（默认）。整句按标点切成 ≤18 字的片段，按字数分配时间逐条显示，
-  #          手机上只占 132px（约 7%），且每条都在安全区内、不会被平台 UI 压住。
-  #   full — 整句大字幕块（横版默认，B站等横屏播放更自然）。
+  #   line — 一行轮播（默认）。整句按标点切成片段，按字数分配时间逐条显示，
+  #          说到哪一句就显示哪一行；横版一行 ≤22 字、竖版 ≤18 字。
+  #   full — 整句整块显示（字幕带更高，可动区域更小）。
   #   off  — 不显示画面字幕，完全交给平台自动字幕。
+  # 两版画幅都用 line：一行不会因换行把版面上顶，主画面才能保持不动。
   subtitles: line
   # MP4 渲染实测常超过 15 分钟（3-8 分钟正片 + 高质量逐帧渲染）。
   # npx 还可能先下载 hyperframes 包，首次更慢；超时大幅放宽并可在用户配置覆盖。
@@ -100,14 +105,30 @@ publish:
     xiaohongshu: default
     tencent: default
   headless: true
+  # AI 生成声明。财经内容不标注 AI 会被限流甚至取消变现资格（小红书《社区金融生态
+  # 公约》明确要求）。快手/小红书的选项文案由这里传给上传器，文案若随站点改版变化，
+  # 改这里即可，不用动代码；抖音（内容由AI生成）和视频号（含AI生成内容）由上传器
+  # 自行勾选，B站走 biliup 无此字段，声明写在简介里。
+  ai_content_label:
+    kuaishou: 内容由AI生成
+    xiaohongshu: AI生成
   # 发布前用 `sau <platform> check` 预检登录态（每个平台约 10-30 秒）。
   # 渲染一条正片要 8 分钟，先花一分钟拦下 cookie 失效比渲染完再失败划算。
   preflight: true
   check_timeout_seconds: 120
-  # 需要单独渲染其他画幅的平台。B站是横屏生态，竖版主片会为它额外渲一版横版
-  # （多花一次渲染时长，字幕自动回到横版的整句块模式）；删掉这行则所有平台共用主片。
+  # 每个平台想发哪一版画幅。与主画幅不同的平台会额外渲染一次（多一份渲染耗时），
+  # 所以这里同时决定了「要渲几版」：列出几个画幅就渲几版。
+  # 选版依据：
+  #   horizontal（桌面版 1920×1080）——抖音/视频号/快手/B站。这三家的播放分成
+  #     只认原创横屏 ≥1 分钟，B站本身也是横屏生态，发竖版等于自断收益。
+  #   vertical（手机版 1080×1920）——小红书。它是 9:16 社区，竖版完播和互动更好，
+  #     而且目前没有播放分成，画幅不影响收益。
   platform_canvas:
+    douyin: horizontal
     bilibili: horizontal
+    kuaishou: horizontal
+    xiaohongshu: vertical
+    tencent: horizontal
   # 每个平台上传的超时；浏览器上传 2-8 分钟视频通常 1-3 分钟完成。
   timeout_seconds: 900
   # 上传失败后在同一轮内自动重试的次数。只重试「上传失败」的平台，

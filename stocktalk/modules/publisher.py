@@ -71,16 +71,28 @@ CODE_PATTERN = re.compile(r"\d{4,8}")
 # cover.COVER_PRESETS — douyin/tencent take a landscape cover as well as the
 # 3:4 portrait one, kuaishou/xiaohongshu take a single image, and bilibili's
 # cover is landscape-first.
+#
+# ``ai_statement_cli`` marks the platforms whose uploader needs the exact
+# AI-content option text handed to it (the wording lives in a site dropdown and
+# changes between redesigns).  The others declare it themselves: douyin picks
+# 「内容由AI生成」 in its 自主声明 dialog, tencent picks 「含AI生成内容」 in its
+# 视频标注 dropdown.  bilibili has no such field in the biliup CLI at all —
+# there the AI notice rides along in the description instead.
 PLATFORM_SPECS: dict[str, dict[str, Any]] = {
     "douyin":      {"label": "抖音",  "title": 30, "tags": 4,  "desc": 150, "runtime_flags": True,  "tid": None,
+                    "ai_statement_cli": False,
                     "covers": (("--thumbnail", "portrait"), ("--thumbnail-landscape", "landscape"))},
     "bilibili":    {"label": "B站",   "title": 80, "tags": 10, "desc": 2000, "runtime_flags": False, "tid": BILIBILI_FINANCE_TID,
+                    "ai_statement_cli": False,
                     "covers": (("--thumbnail", "wide"),)},
     "kuaishou":    {"label": "快手",  "title": 30, "tags": 6,  "desc": 150, "runtime_flags": True,  "tid": None,
+                    "ai_statement_cli": True,
                     "covers": (("--thumbnail", "portrait"),)},
     "xiaohongshu": {"label": "小红书", "title": 20, "tags": 10, "desc": 1000, "runtime_flags": True,  "tid": None,
+                    "ai_statement_cli": True,
                     "covers": (("--thumbnail", "portrait"),)},
     "tencent":     {"label": "视频号", "title": 30, "tags": 6,  "desc": 120, "runtime_flags": True,  "tid": None,
+                    "ai_statement_cli": False,
                     "covers": (("--thumbnail-portrait", "portrait"), ("--thumbnail-landscape", "landscape"))},
 }
 
@@ -469,6 +481,12 @@ class SauPublisher:
         # Ask for the SMS code in the terminal when there is one; cron/CI falls
         # back to dropping it into verify_code.txt by hand.
         self.interactive_verify_code = bool(publish.get("interactive_verify_code", True))
+        # AI-generated content must be labelled on every platform: it is a
+        # monetisation prerequisite now, not a nicety.  Most platforms take a
+        # checkbox the uploader clicks; kuaishou/xiaohongshu need the option
+        # text passed in because站点改版会换文案.  Accepts either one string or
+        # a per-platform mapping.
+        self.ai_content_label = publish.get("ai_content_label")
         self._sleep = sleep
         self.metadata_gen = PublishMetadataGenerator(self.config)
         self._runner = runner or self._run_subprocess
@@ -727,6 +745,9 @@ class SauPublisher:
             cover = (covers or {}).get(preset)
             if cover is not None and Path(cover).is_file():
                 command += [flag, str(Path(cover).resolve())]
+        label = self._ai_label_for(platform)
+        if label and spec.get("ai_statement_cli"):
+            command += ["--ai-content-label", label]
         if spec.get("runtime_flags"):
             # bilibili delegates to the biliup binary, whose CLI rejects these.
             command.append("--headless" if self.headless else "--headed")
@@ -748,6 +769,18 @@ class SauPublisher:
         shown = detail[-800:] + (f"\n{verdict.hint}" if verdict.hint else "")
         return PlatformResult(platform=platform, ok=False, command=command, detail=shown,
                               retryable=verdict.retryable, retry_after=verdict.wait_seconds)
+
+    def _ai_label_for(self, platform: str) -> str:
+        """Resolve the AI-content option text for one platform.
+
+        ``publish.ai_content_label`` is either a single string (used for every
+        platform that supports the flag) or a ``{platform: text}`` mapping for
+        when 快手 and 小红书 word it differently.
+        """
+        raw = self.ai_content_label
+        if isinstance(raw, Mapping):
+            return str(raw.get(platform) or "").strip()
+        return str(raw or "").strip()
 
     def _require_sau(self) -> str:
         """Resolve the sau entrypoint inside the vendored project's venv."""

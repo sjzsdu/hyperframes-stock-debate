@@ -322,6 +322,8 @@ class XiaoHongShuBaseUploader(BaseVideoUploader):
         self.date_format = "%Y年%m月%d日 %H:%M"
         self.local_executable_path = LOCAL_CHROME_PATH
         self.headless = headless
+        # 「内容类型声明」里要选中的 AI 选项文字（子类可用 ai_content_label 覆盖）。
+        self.ai_content_label = "AI生成"
 
     async def validate_base_args(self):
         if not os.path.exists(self.account_file):
@@ -466,6 +468,56 @@ class XiaoHongShuBaseUploader(BaseVideoUploader):
         await self.fill_desc(page)
         await self.fill_tags(page)
 
+    async def apply_ai_statement(self, page: Page) -> None:
+        """在「添加内容类型声明」里如实勾选 AI 生成。
+
+        小红书《社区金融生态公约》要求 AI 生成的金融内容必须主动标注；不标注会被
+        限流乃至取消商业变现资格。流程与 check_original_declaration 同构：
+        点「添加内容类型声明」→ 点 AI 选项 → 点「确认」。
+        选项文案随站点改版会变，选不中只记 warning 继续发布——描述里另有
+        「本内容由 AI 生成」兜底，不因为一个弹窗把整次发布打断。
+        """
+        label = getattr(self, "ai_content_label", "") or "AI生成"
+        try:
+            trigger = page.get_by_text("添加内容类型声明", exact=False).first
+            try:
+                await trigger.scroll_into_view_if_needed(timeout=5000)
+            except Exception:
+                pass
+            await trigger.click(force=True)
+            await page.wait_for_timeout(1200)
+
+            import re as _re_ai
+            option = page.locator("#publish-container div").filter(
+                has_text=_re_ai.compile(rf"^{_re_ai.escape(label)}$")
+            ).last
+            if await option.count():
+                await option.click(force=True)
+            else:
+                if not await _js_click_by_text(page, label):
+                    xiaohongshu_logger.warning(
+                        _msg("🧾", f"内容类型声明里没有「{label}」选项（站点可能已改版），跳过 AI 声明继续发布")
+                    )
+                    await page.keyboard.press("Escape")
+                    return
+            await page.wait_for_timeout(1000)
+
+            # 声明弹窗可能还要点一次「确认」；点不到就当已选中，不阻断发布。
+            try:
+                confirm = page.get_by_role("button", name="确认").first
+                await confirm.wait_for(state="visible", timeout=4000)
+                await confirm.click()
+            except Exception:
+                pass
+            await page.wait_for_timeout(800)
+            xiaohongshu_logger.success(_msg("🧾", f"AI 生成已声明（{label}）"))
+        except Exception as exc:
+            xiaohongshu_logger.warning(_msg("⚠️", f"设置 AI 声明失败，跳过继续发布: {exc}"))
+            try:
+                await page.keyboard.press("Escape")
+            except Exception:
+                pass
+
     async def check_original_declaration(self, page: Page) -> None:
         """设置「来源转载」声明，填写转载来源。
 
@@ -534,6 +586,7 @@ class XiaoHongShuVideo(XiaoHongShuBaseUploader):
         publish_strategy: str = XIAOHONGSHU_PUBLISH_STRATEGY_IMMEDIATE,
         debug: bool = DEBUG_MODE,
         headless: bool = LOCAL_CHROME_HEADLESS,
+        ai_content_label: str | None = None,
     ):
         super().__init__(
             publish_date=publish_date,
@@ -547,6 +600,8 @@ class XiaoHongShuVideo(XiaoHongShuBaseUploader):
         self.tags = tags or []
         self.thumbnail_path = thumbnail_path
         self.desc = desc or ""
+        if ai_content_label:
+            self.ai_content_label = ai_content_label
 
     async def validate_upload_args(self):
         await self.validate_base_args()
@@ -674,6 +729,8 @@ class XiaoHongShuVideo(XiaoHongShuBaseUploader):
         await self.set_thumbnail(page, self.thumbnail_path)
 
         # await self.set_location(page, "青岛市")
+
+        await self.apply_ai_statement(page)
 
         await self.check_original_declaration(page)
 

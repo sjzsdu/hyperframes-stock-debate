@@ -1,3 +1,4 @@
+import re
 import subprocess
 import tempfile
 import unittest
@@ -31,8 +32,8 @@ class HyperFramesBuilderTests(unittest.TestCase):
             self.assertIn("<svg", content)
             self.assertIn('data-topic="financial"', content)
             self.assertIn('class="ma draw-line"', content)
-            self.assertIn('id="slide-1"', content)
-            self.assertIn('data-cover-slide', content)
+            self.assertIn('id="visual-frame"', content)
+            self.assertIn('data-slot="visual"', content)
             self.assertIn('data-audio-group="dialogue"', content)
             self.assertIn('data-fx-chain="', content)
             self.assertIn('data-automation="', content)
@@ -55,7 +56,7 @@ class HyperFramesBuilderTests(unittest.TestCase):
                            "谈什么", "字幕突出", "visual_prompt", "股市新手", "股市老登", "THE ROOKIE",
                            "THE VETERAN", "TOPIC VISUAL", "正在讨论", "正在发言", "AI", "生成"):
                 self.assertNotIn(banned, content)
-            self.assertIn("class=\"slide bear risk", content)
+            self.assertIn("slot-kicker bear", content)
             self.assertIn('data-topic="risk"', content)
 
     def test_news_topic_slide_shows_real_headlines(self):
@@ -64,7 +65,8 @@ class HyperFramesBuilderTests(unittest.TestCase):
                 {"code": "600519", "quote": {"name": "贵州茅台"},
                  "news": {"items": [{"title": "线下自营店调价，短期催化值得关注", "type": "其他", "publish_time": "2026-09-09"},
                                     {"title": "研报：Q3主动降速", "type": "研报", "publish_time": "2025-11-02"}]}},
-                {"turns": [{"speaker": "bull", "line": "最近研报和消息面都提到，公司对线下自营店的产品进行了调价。"}]},
+                {"turns": [{"speaker": "bear", "line": "这些消息会不会已经被价格消化掉了？"},
+                            {"speaker": "bull", "line": "最近研报和消息面都提到，公司对线下自营店的产品进行了调价。"}]},
                 {},
             )
             content = project.composition_path.read_text(encoding="utf-8")
@@ -86,6 +88,41 @@ class HyperFramesBuilderTests(unittest.TestCase):
             self.assertIn("最新价", content)
             self.assertIn("1,500.00", content)
             self.assertNotIn("暂无资讯数据", content)
+
+    def test_unchanged_slot_content_is_merged_into_one_element(self):
+        """连续几轮讲同一话题：标签槽合并成单个元素，时间轴上不产生任何新动画。
+
+        「内容没变就不要动」就是靠这次合并实现的——窗口延长而不是重建。
+        """
+        with tempfile.TemporaryDirectory() as temp:
+            project = HyperFramesBuilder(self._config(temp)).build_project(
+                {},
+                {"turns": [
+                    {"speaker": "bull", "line": "行业格局稳定，渠道和品牌都很扎实。"},
+                    {"speaker": "bull", "line": "同行业的对手份额变化也值得看。"},
+                    {"speaker": "bear", "line": "这个业务的护城河主要来自渠道规模。"}]},
+                {},
+            )
+            content = project.composition_path.read_text(encoding="utf-8")
+            self.assertEqual(content.count('data-slot="kicker"'), 1)
+            # 话题没变，但说话人换了：氛围层按说话人合并，仍是两层。
+            self.assertEqual(content.count('data-slot="tint"'), 2)
+
+    def test_captions_are_single_rows_on_an_absolute_clock(self):
+        """一行字幕按绝对时间排布：逐条递增、首条从 0 开始、都不超过一行上限。"""
+        long_line = "这家公司的主营业务是锂电池和电子器件，产能扩张之后收入弹性很大，但资本开支也水涨船高。"
+        with tempfile.TemporaryDirectory() as temp:
+            builder = HyperFramesBuilder(self._config(temp))
+            project = builder.build_project({}, {"turns": [{"speaker": "bull", "line": long_line}]}, {})
+            content = project.composition_path.read_text(encoding="utf-8")
+            starts = [float(x) for x in re.findall(
+                r'class="caption-line[^"]*" data-start="([0-9.]+)"', content)]
+            self.assertEqual(starts, sorted(starts))
+            self.assertEqual(starts[0], 0.0)
+            rows = re.findall(r'data-slot="caption" data-layout-ignore>([^<]+)</p>', content)
+            self.assertGreater(len(rows), 1, "长句必须切成多条一行字幕，而不是换行撑高版面")
+            for row in rows:
+                self.assertLessEqual(len(row), builder.caption_max_chars + 1)
 
     def test_every_topic_card_has_data_or_real_fallback(self):
         """All 9 topic visuals must exist; none may be an empty placeholder SVG."""
@@ -111,13 +148,15 @@ class HyperFramesBuilderTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             project = HyperFramesBuilder(self._config(temp)).build_project(
                 {},
-                {"turns": [{"speaker": "bull", "line": "嗯，这个话题值得展开聊聊。"}]},
+                {"turns": [{"speaker": "bull", "line": "嗯，这个话题值得展开聊聊。"},
+                            {"speaker": "bear", "line": "那我们拆开看看这门生意到底靠什么赚钱。"}]},
                 {},
             )
             content = project.composition_path.read_text(encoding="utf-8")
             self.assertIn("公司与行业", content)
-            # Every turn gets its own real-data board; with no quote/kline it
-            # degrades to a clean "暂无K线数据" panel instead of fabricating data.
+            # Every turn after the opening market panel gets its own real-data
+            # board; with no quote/kline it degrades to a clean "暂无K线数据"
+            # panel instead of fabricating data.
             self.assertIn("公司与行业·真实数据", content)
             self.assertIn("暂无K线数据", content)
             self.assertNotIn('aria-label="公司概览"', content)

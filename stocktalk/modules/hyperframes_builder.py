@@ -124,19 +124,28 @@ class HyperFramesBuilder:
         # full — the whole spoken line as one large caption block
         self.subtitle_mode = self._subtitle_mode(self.video_config.get("subtitles"))
         self.subtitles = self.subtitle_mode != "off"
+        # A one-line caption strip has to fit the stage width: the vertical
+        # column is 968px at 46px/char, the horizontal one 1220px at 34px.
+        self.caption_max_chars = 22 if self.layout == "horizontal" else 18
         self._runner = runner or self._run_subprocess
 
     def _subtitle_mode(self, raw: Any) -> str:
-        """Resolve ``video.subtitles`` into off/line/full (bool kept for compat)."""
+        """Resolve ``video.subtitles`` into off/line/full (bool kept for compat).
+
+        Unset means ``line``: one caption row at a time, swapped as the sentence
+        is spoken.  Both canvases use it — a caption block that wraps to three
+        rows would need a taller band and would push the stage around, which is
+        exactly the reflow the one-line strip exists to avoid.
+        """
         valid = ("off", "line", "full")
         if raw is None:
-            return "full" if self.layout == "horizontal" else "line"
+            return "line"
         if isinstance(raw, bool):
-            return "full" if raw else "off"
+            return "line" if raw else "off"
         mode = str(raw).strip().lower()
-        mode = {"true": "full", "false": "off", "on": "full", "off": "off",
+        mode = {"true": "line", "false": "off", "on": "line", "off": "off",
                 "one-line": "line", "single": "line", "1line": "line"}.get(mode, mode)
-        return mode if mode in valid else ("full" if self.layout == "horizontal" else "line")
+        return mode if mode in valid else "line"
 
     def build_project(self, stock_data: Mapping[str, Any], script: Mapping[str, Any] | None, tts_timeline: Mapping[str, Any] | None) -> HyperFramesProject:
         directory = Path(self.video_config.get("project_dir", self._output_dir / "hyperframes")); directory.mkdir(parents=True, exist_ok=True)
@@ -149,9 +158,10 @@ class HyperFramesBuilder:
         self._copy_assets(directory)
         composition = directory / "index.html"; composition.write_text(self._html(stock_data, segments, duration), encoding="utf-8")
         (directory / "index.motion.json").write_text(json.dumps({"duration": duration, "assertions": [
-            {"kind": "appearsBy", "selector": "#headline", "bySec": .8},
-            {"kind": "staysInFrame", "selector": "#market-stage"},
-            {"kind": "appearsBy", "selector": "#slide-1", "bySec": 1.2},
+            {"kind": "appearsBy", "selector": "#headline", "bySec": 2.6},
+            {"kind": "staysInFrame", "selector": "#visual-frame"},
+            {"kind": "staysInFrame", "selector": "#caption-zone"},
+            {"kind": "appearsBy", "selector": ".visual-item", "bySec": 2.6},
         ]}, ensure_ascii=False, indent=2), encoding="utf-8")
         return HyperFramesProject(directory, composition, duration)
     build = build_project
@@ -297,31 +307,125 @@ class HyperFramesBuilder:
                 "fx_chain": fx_chain,
                 "audio_automation": json.dumps(automation, separators=(",", ":")),
                 "is_first": index == 0,
-                # Caption offsets are relative to the slide's own start (visual_start),
-                # because that is the origin the JS timeline seeks from.  Time is
-                # shared out by character count, so a caption is on screen while the
-                # matching part of the line is being spoken.
-                "caption_lines": self._caption_timing(segment.get("line", ""), start, duration, visual_start),
+                # Caption offsets are relative to the turn's own audio start, so
+                # the JS timeline can place every row on one absolute clock and a
+                # row is on screen exactly while that part is spoken.
+                "caption_lines": self._caption_timing(segment.get("line", ""), duration, start),
             })
         return segments
 
-    @staticmethod
-    def _caption_timing(line: Any, start: float, duration: float,
-                        visual_start: float) -> list[dict[str, Any]]:
+    def _caption_timing(self, line: Any, duration: float, origin: float) -> list[dict[str, Any]]:
         """Lay single-row caption chunks out across one turn's spoken duration."""
-        chunks = split_caption_lines(str(line or ""))
+        text = " ".join(str(line or "").split())
+        if not text:
+            return []
+        if self.subtitle_mode == "full":
+            return [{"text": text, "offset": 0.0, "duration": round(max(.35, duration), 3)}]
+        chunks = split_caption_lines(text, self.caption_max_chars)
         if not chunks:
             return []
         total = sum(len(chunk) for chunk in chunks)
-        cursor = start
+        cursor = 0.0
         timed: list[dict[str, Any]] = []
         for chunk in chunks:
             share = duration * len(chunk) / total
             timed.append({"text": chunk,
-                          "offset": round(max(0.0, cursor - visual_start), 3),
+                          "offset": round(max(0.0, cursor), 3),
                           "duration": round(max(.35, share), 3)})
             cursor += share
         return timed
+
+    # ------------------------------------------------------------------
+    # Stable stage: content slots instead of one full-screen slide per turn
+    # ------------------------------------------------------------------
+    # The stage (backdrop, headline, panel frame, caption box) is permanent.
+    # Only these slots change, and each one is diffed against the previous turn:
+    # an unchanged slot is merged into a longer window and therefore never
+    # re-animates, while a changed one dissolves in place.  Nothing on screen
+    # translates or scales, which is what removes the per-turn "jump".
+    SLOT_NAMES = ("tint", "kicker", "keywords", "visual", "caption", "progress")
+    # When the permanent stage (headline, panel frame, caption box) fades in.
+    # Deliberately early: the opening title card only covers the panel area, so
+    # the headline and the first caption are live from the very first word.
+    STAGE_IN = 0.35
+
+    @staticmethod
+    def _merge_slot(entries: Sequence[tuple[float, float, str, dict[str, Any]]]) -> list[dict[str, Any]]:
+        """Collapse adjacent slot entries that carry identical content.
+
+        ``entries`` are ``(start, duration, key, payload)`` tuples in timeline
+        order.  A run of turns that keeps the same speaker / topic / artwork
+        becomes one element with a longer window, so the timeline has nothing to
+        animate at the seam — the picture simply does not move.
+        """
+        runs: list[dict[str, Any]] = []
+        for start, duration, key, payload in entries:
+            if not key:
+                continue
+            begin = max(0.0, float(start))
+            end = begin + max(0.25, float(duration))
+            if runs and runs[-1]["key"] == key:
+                runs[-1]["duration"] = round(end - runs[-1]["start"], 3)
+                continue
+            runs.append({"start": round(begin, 3),
+                         "duration": round(end - begin, 3),
+                         "key": key, **payload})
+        return runs
+
+    def _slots(self, segments: Sequence[Mapping[str, Any]], duration: float = 0.0) -> dict[str, list[dict[str, Any]]]:
+        """Split the dialogue into independently-updating stage slots."""
+        slots: dict[str, list[dict[str, Any]]] = {name: [] for name in self.SLOT_NAMES}
+        first = dict(segments[0]) if segments else {}
+        market_end = (float(first.get("visual_start") or 0.0) + float(first.get("visual_duration") or 1.0)
+                      if first else max(1.0, float(duration) - 0.9))
+        # The opening beat shows the real market stage (K-line + quote panel)
+        # instead of a talking-point board, so the clip opens on actual data.
+        market_start = min(self.STAGE_IN, max(0.2, market_end - 0.6))
+        market_span = max(0.6, market_end - market_start)
+        visual_entries: list[tuple[float, float, str, dict[str, Any]]] = [
+            (market_start, market_span, "__market__", {"kind": "market"})]
+        first_character = str(first.get("character") or "bull")
+        tint_entries: list[tuple[float, float, str, dict[str, Any]]] = [
+            (market_start, market_span, first_character, {"character": first_character})]
+        kicker_entries: list[tuple[float, float, str, dict[str, Any]]] = []
+        keyword_entries: list[tuple[float, float, str, dict[str, Any]]] = []
+        for index, segment in enumerate(segments):
+            start = float(segment.get("visual_start") or 0.0)
+            # The last turn holds its slot content through the recap pad, so the
+            # stage never sits bare between the final turn and the outro card.
+            duration = max(0.25, float(segment.get("visual_duration") or 1.0))
+            if index == len(segments) - 1:
+                duration += 0.5
+            character = str(segment.get("character") or "bull")
+            topic = str(segment.get("topic") or "industry")
+            title = str(segment.get("topic_title") or "公司与行业")
+            if index:
+                tint_entries.append((start, duration, character, {"character": character}))
+            kicker_entries.append((start, duration, f"{topic}|{title}",
+                                   {"text": title, "character": character, "topic": topic}))
+            keywords = [str(k) for k in (segment.get("keywords") or []) if str(k).strip()]
+            keyword_entries.append((start, duration, "||".join(keywords),
+                                    {"keywords": keywords, "character": character}))
+            if index:
+                visual = str(segment.get("visual") or "")
+                visual_entries.append((start, duration, visual, {"kind": "board", "svg": visual}))
+            turn_start = float(segment.get("start") or 0.0)
+            for caption in (segment.get("caption_lines") or []):
+                text = str(caption.get("text") or "").strip()
+                if not text:
+                    continue
+                slots["caption"].append({
+                    "start": round(max(0.0, turn_start + float(caption.get("offset") or 0.0)), 3),
+                    "duration": round(max(0.3, float(caption.get("duration") or 0.8)), 3),
+                    "text": text, "character": character,
+                })
+            slots["progress"].append({"start": round(turn_start, 3),
+                                      "duration": round(max(0.2, float(segment.get("duration") or 1.0)), 3)})
+        slots["tint"] = self._merge_slot(tint_entries)
+        slots["kicker"] = self._merge_slot(kicker_entries)
+        slots["keywords"] = self._merge_slot(keyword_entries)
+        slots["visual"] = self._merge_slot(visual_entries)
+        return slots
 
     @staticmethod
     def _visual_topic(text: str) -> tuple[str, str]:
@@ -383,6 +487,7 @@ class HyperFramesBuilder:
         rendered_segments = [dict(segment,
                                   visual=self._turn_board_svg(segment, quote, history, technical, news))
                              for segment in segments]
+        slots = self._slots(rendered_segments, duration)
         stock_name = str(quote.get("name") or stock.get("name") or stock.get("code") or "股票")
         env = Environment(loader=FileSystemLoader(self._asset_dir), autoescape=select_autoescape(("html", "xml")))
         return env.get_template("index.html.j2").render(
@@ -400,10 +505,12 @@ class HyperFramesBuilder:
             subtitle_mode=self.subtitle_mode,
             canvas_width=self.canvas_width,
             canvas_height=self.canvas_height,
+            stage_in=self.STAGE_IN,
             financials=self._financials(quote, financials, technical),
             chart=self._candles(history),
             f10_text=self._f10_text(f10, ("公司概况", "经营分析")),
             segments=rendered_segments,
+            slots=slots,
         )
 
     @staticmethod

@@ -40,17 +40,27 @@ patches here so they survive an upgrade and can be sent upstream later:
     (whose 302 carries the latest tag), HEAD-checks the URL derived from
     biliup's asset naming rules, and reuses an already-installed local `biliup`
     when the network is unavailable.
+- `patches/0003-sau-ai-content-declaration.patch`
+  - 快手/小红书的上传器原本不会标注 AI 生成内容。财经内容不标注会被限流乃至取消
+    变现资格（小红书《社区金融生态公约》明确要求），所以给两家都加了声明步骤：
+    快手在「作者声明」下拉里选，小红书在「添加内容类型声明」弹窗里选。
+  - 新增 `sau kuaishou|xiaohongshu upload-video --ai-content-label <文案>`：选项
+    文案随站点改版会变，做成参数后改配置即可，不必改代码。上层通过
+    `publish.ai_content_label` 传入（见 `stocktalk/config/default.yaml`）。
+  - 找不到入口或选项时只记 warning 继续发布——描述里另有「本内容由AI生成」兜底，
+    不因为一个下拉框把整次发布打断。
 
-Re-apply after an upgrade (both patches are diffed against `0012d2c` and
-verified with `git apply --check`; 0001 must land first):
+Re-apply after an upgrade (all patches are diffed against `0012d2c` and
+verified with `git apply --check`; apply in numeric order):
 
 ```bash
 cd third_party/social-auto-upload
 git apply ../patches/0001-sau-douyin-local-fixes.patch
 git apply ../patches/0002-sau-bilibili-runtime-resilience.patch
+git apply ../patches/0003-sau-ai-content-declaration.patch
 ```
 
-Both patches together reproduce this directory exactly apart from the
+All patches together reproduce this directory exactly apart from the
 force-added `conf.py` — re-verify after any upgrade with:
 
 ```bash

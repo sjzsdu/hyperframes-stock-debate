@@ -11,10 +11,12 @@ import re
 from typing import Any, Dict, Iterable, List, Mapping, Tuple
 
 
+# 三条要求一次说清：AI 生成必须如实标注（各平台公约的硬性要求；B站走 biliup，投稿
+# 命令没有声明字段，全靠简介里这一句）、不得构成投资建议、风险自担。合起来约 35 字，
+# 视频号简介上限 120 字时仍能完整保留（_fit_description 优先保住这段结尾）。
 DEFAULT_DISCLAIMERS = (
-    "本内容仅供学习交流，不构成投资建议",
+    "本内容由AI生成，仅供学习交流，不构成投资建议",
     "投资有风险，入市需谨慎",
-    "视频中观点不代表真实投资意见",
 )
 
 # Longer, more specific phrases must be processed first.  The values are

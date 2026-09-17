@@ -16,15 +16,22 @@ class DialogueGenerationError(RuntimeError):
 Runner = Callable[[Sequence[str], float], str]
 
 
+# Measured on real renders: a 1331-character script came out at 275s of speech,
+# i.e. ~4.8 Chinese characters per second including inter-turn pauses.  The
+# prompt turns a duration target into a character budget with this rate, because
+# asking a model for "a 90-second dialogue" reliably overshoots.
+SPEECH_CHARS_PER_SECOND = 4.8
+
+
 @dataclass(frozen=True)
 class DialogueConfig:
     model: str = "qwen3.6-plus"
-    min_duration_seconds: int = 120
-    max_duration_seconds: int = 300
-    max_line_chars: int = 130
-    max_tokens: int = 3200
+    min_duration_seconds: int = 70
+    max_duration_seconds: int = 110
+    max_line_chars: int = 90
+    max_tokens: int = 2500
     temperature: float = 0.8
-    timeout_seconds: float = 240.0
+    timeout_seconds: float = 180.0
 
 
 class DialogueGenerator:
@@ -97,17 +104,23 @@ class DialogueGenerator:
         )
 
     def _user_prompt(self, payload: Mapping[str, Any]) -> str:
+        min_s, max_s = self.config.min_duration_seconds, self.config.max_duration_seconds
+        min_chars = int(min_s * SPEECH_CHARS_PER_SECOND)
+        budget_chars = int(max_s * SPEECH_CHARS_PER_SECOND)
+        floor_chars = max(30, self.config.max_line_chars // 2)
+        min_turns = max(4, min_chars // self.config.max_line_chars)
+        max_turns = max(min_turns + 2, budget_chars // floor_chars)
         schema = {"title": "股票名（代码）：一句话点出这门生意或行业看点", "turns": [
-            {"speaker": "bull", "line": "30 到 150 字的自然发言；允许极短打断或停顿",
+            {"speaker": "bull", "line": f"{floor_chars} 到 {self.config.max_line_chars} 字的自然发言；允许极短打断或停顿",
              "beat": "生意本质",
              "visual": ["line 中提到的关键词1", "关键词2"]}],
             }
-        min_minutes, max_minutes = self.config.min_duration_seconds // 60, self.config.max_duration_seconds // 60
         return (
-            f"生成一段时长在 {min_minutes}-{max_minutes} 分钟之间、按内容自然伸缩的中文对话流："
-            "素材和数据多就往长处展开（可到上限），素材少就收得住（不低于下限），不要为凑时长注水，也不要意犹未尽地草草收尾。"
-            f"常规发言 30-{self.config.max_line_chars} 个中文字符；不要编号、不要 Round、不要强制一来一回。"
-            "整体保持充足信息量：3 分钟不少于 10 轮发言，5 分钟约 16-22 轮，更长时长可到 24-30 轮，"
+            f"生成一段成片时长在 {min_s}-{max_s} 秒之间的中文对话流："
+            f"正文总字数控制在 {min_chars}-{budget_chars} 字之间（配音约 4.8 字/秒，超字数就会超时长），"
+            f"分 {min_turns}-{max_turns} 轮发言，单轮 {floor_chars}-{self.config.max_line_chars} 字。"
+            "素材和数据多就往上限展开，素材少就收得住（不低于下限），不要为凑时长注水，也不要意犹未尽地草草收尾。"
+            "不要编号、不要 Round、不要强制一来一回；"
             "允许一方连续追问、另一方长答后短驳，长短句交错，不要每轮等长。"
             "至少一半的篇幅围绕公司业务和行业本身（生意模式、行业格局、竞争与需求），技术信号最多作为一句带过的佐证。"
             "内容要充分展开：覆盖业务模式、行业格局、盈利来源、财务印证、风险与不确定性等多个层面，"

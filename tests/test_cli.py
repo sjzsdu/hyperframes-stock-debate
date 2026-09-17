@@ -80,6 +80,39 @@ def test_collect_targets_rejects_missing_watchlist() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Run summary
+# ---------------------------------------------------------------------------
+
+
+def test_summary_lists_every_canvas_cut_and_its_platforms() -> None:
+    """两种画幅都要出现在摘要里——只列主片会让人以为手机版没渲出来。"""
+    result = _result("002246")
+    result["canvas"] = "horizontal"
+    result["platform_canvas"] = {"douyin": "horizontal", "bilibili": "horizontal",
+                                 "kuaishou": "horizontal", "tencent": "horizontal",
+                                 "xiaohongshu": "vertical"}
+    result["platform_videos"] = {"xiaohongshu": "output/x.vertical.mp4"}
+
+    lines = cli._video_lines(result)
+
+    assert len(lines) == 2
+    assert lines[0].startswith("桌面版（横屏）: output/x.mp4")
+    assert "抖音" in lines[0] and "小红书" not in lines[0]
+    assert lines[1].startswith("手机版（竖屏）: output/x.vertical.mp4")
+    assert "小红书" in lines[1]
+
+
+def test_summary_falls_back_to_filename_when_result_omits_canvas() -> None:
+    """旧结果 JSON 没有 canvas 字段时，仍要把分画幅成片列出来。"""
+    result = _result("002246")
+    result["platform_videos"] = {"xiaohongshu": "output/x.vertical.mp4"}
+
+    lines = cli._video_lines(result)
+
+    assert [line.split(":")[0] for line in lines] == ["主片", "手机版（竖屏）"]
+
+
+# ---------------------------------------------------------------------------
 # Batch orchestration
 # ---------------------------------------------------------------------------
 

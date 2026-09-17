@@ -36,6 +36,17 @@ class DialogueGeneratorTests(unittest.TestCase):
         self.assertIn("至少一半的篇幅围绕公司业务和行业本身", message)
         self.assertIn("技术信号最多作为一句带过的佐证", message)
 
+    def test_prompt_budgets_characters_from_the_duration_target(self):
+        """A 110s target must become a hard character budget, not 'about 2 minutes'."""
+        generator = DialogueGenerator({"dialogue": {"min_duration_seconds": 70, "max_duration_seconds": 110,
+                                                    "max_line_chars": 90}})
+        message = generator._user_prompt({"code": "1"})
+        self.assertIn("70-110 秒", message)
+        # 110s * 4.8 chars/s = 528, 70s * 4.8 = 336
+        self.assertIn("336-528 字", message)
+        self.assertIn("45-90 字", message)
+        self.assertNotIn("分钟之间", message)
+
     def test_script_has_no_disclaimer_or_visual_prompt_fields(self):
         generator = DialogueGenerator(runner=lambda argv, timeout: self._response())
         with patch("stocktalk.modules.dialogue_generator.shutil.which", return_value="bl"):

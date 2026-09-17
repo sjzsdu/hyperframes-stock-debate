@@ -13,6 +13,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+import stocktalk.pipeline as pipeline_module
 from stocktalk.pipeline import Pipeline, load_config
 
 
@@ -165,3 +166,43 @@ def test_preview_skips_rendering(tmp_path: Path) -> None:
 
     pipeline.builder.render_mp4.assert_not_called()
     assert result["preview"] is True
+
+
+def test_platform_cuts_follow_each_platforms_preferred_canvas(tmp_path: Path, monkeypatch: Any) -> None:
+    """桌面版+手机版各渲一次，五平台各取自己那一版。
+
+    platform_canvas 列了两种画幅 → 除主片外只补渲一版竖版，
+    且只有小红书拿竖版，其余四家拿主片（横版）。
+    """
+    from rich.progress import Progress
+
+    pipeline = Pipeline({
+        "output": {"dir": str(tmp_path / "out")},
+        "video": {"canvas": "horizontal"},
+        "publish": {
+            "platforms": ["douyin", "bilibili", "kuaishou", "xiaohongshu", "tencent"],
+            "platform_canvas": {"douyin": "horizontal", "bilibili": "horizontal",
+                                "kuaishou": "horizontal", "xiaohongshu": "vertical",
+                                "tencent": "horizontal"},
+        },
+    })
+
+    class FakeBuilder:
+        def __init__(self, config: Any) -> None:
+            self.config = config
+
+        def build(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
+            return {}
+
+        def render_mp4(self, variant: Any, output_path: Any) -> Path:
+            Path(output_path).write_bytes(b"mp4")
+            return Path(output_path)
+
+    monkeypatch.setattr(pipeline_module, "HyperFramesBuilder", FakeBuilder)
+    with Progress() as progress:
+        task = progress.add_task("render", total=1)
+        cuts = pipeline._render_platform_cuts(FAKE_STOCK_DATA, FAKE_SCRIPT, FAKE_AUDIO,
+                                              tmp_path, "tag", progress, task)
+    # 只补渲了与主画幅不同的小红书竖版。
+    assert set(cuts) == {"xiaohongshu"}
+    assert cuts["xiaohongshu"].endswith(".vertical.mp4")

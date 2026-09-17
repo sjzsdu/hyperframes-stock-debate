@@ -8,51 +8,70 @@
   <script src="gsap.min.js"></script>
 </head>
 <body>
-<main id="root" class="layout-{{ layout }}{{ ' no-subtitle' if subtitle_mode == 'off' else (' captions-line' if subtitle_mode == 'line' else '') }}" data-composition-id="stock-debate" data-start="0" data-width="{{ canvas_width }}" data-height="{{ canvas_height }}" data-duration="{{ duration }}" data-fps="30">
+{# One permanent stage.  The headline, the panel frame and the caption box never
+   move; only the four content slots below change, and only when their content
+   actually differs from the previous turn (see HyperFramesBuilder._merge_slot). #}
+<main id="root" class="layout-{{ layout }} captions-{{ subtitle_mode }}" data-composition-id="stock-debate" data-start="0" data-width="{{ canvas_width }}" data-height="{{ canvas_height }}" data-duration="{{ duration }}" data-stage-in="{{ stage_in }}" data-fps="30">
 {% set outro_start = duration - 0.45 %}
   <div id="ambient-orb-a" class="ambient-orb orb-a clip" data-start="0" data-duration="{{ duration }}" data-track-index="1" data-layout-ignore></div>
   <div id="ambient-orb-b" class="ambient-orb orb-b clip" data-start="0" data-duration="{{ duration }}" data-track-index="2" data-layout-ignore></div>
 
-  <header id="headline" class="clip" data-start="0" data-duration="{{ outro_start }}" data-track-index="3">
+  {# Slot 0 — speaker ambience.  A run of turns by the same speaker is one
+     layer, so the backdrop only changes when the speaker actually changes. #}
+  {% for item in slots.tint %}
+  <div class="stage-tint {{ item.character }} clip" data-start="{{ item.start }}" data-duration="{{ item.duration }}" data-track-index="5" data-slot="tint" data-layout-ignore></div>
+  {% endfor %}
+
+  {# Permanent: stock name, code and the real quote #}
+  <header id="headline" class="clip" data-start="0" data-duration="{{ outro_start }}" data-track-index="3" data-layout-ignore>
     <div class="title-row"><h1>{{ name }} <em>{{ code }}</em></h1></div>
     <p class="{{ price_tone }}">{{ price_line }}</p>
   </header>
 
-  <section id="market-stage" class="clip" data-start="0.35" data-duration="{{ outro_start - 0.35 if outro_start > 0.35 else 0.1 }}" data-track-index="4">
-    <section id="kline-chart" class="panel chart">
-      <div class="chart-camera">{{ chart|safe }}</div>
-    </section>
-    <section id="finance-card" class="panel finance">
-      <div class="metric-list">{% for metric in financials %}<div class="metric"><span>{{ metric.label }}</span><strong class="{{ metric.tone or '' }}">{{ metric.value }}</strong></div>{% endfor %}</div>
-    </section>
-  </section>
-
-  {% for segment in segments %}
-  <section id="slide-{{ loop.index }}" class="slide {{ segment.character }} {{ segment.topic }} clip {{ 'slide-cover' if segment.is_first else '' }}" data-start="{{ segment.visual_start }}" data-duration="{{ segment.visual_duration }}" data-track-index="{{ 50 + loop.index }}" data-topic="{{ segment.topic }}" {% if segment.is_first %}data-cover-slide{% endif %}>
-    <div class="slide-kicker">{{ segment.topic_title }}</div>
-    <div class="slide-keywords">{% for keyword in segment.keywords %}<span>{{ keyword }}</span>{% endfor %}</div>
-    <div class="slide-visual">{{ segment.visual|safe }}</div>
-    {% if subtitles %}
-    <section id="speech-{{ loop.index }}" class="speech panel{{ ' speech-line' if subtitle_mode == 'line' else '' }}" data-layout-allow-caption-zone>
-      {% if subtitle_mode == 'line' %}
-      {% for caption in segment.caption_lines %}<p class="speech-line-item" data-offset="{{ caption.offset }}" data-duration="{{ caption.duration }}">{{ caption.text }}</p>
-      {% endfor %}{% else %}
-      <p class="type-text">{{ segment.line }}</p>
-      {% endif %}
-      <div class="speech-progress" data-layout-ignore><i></i></div>
-    </section>
-    {% endif %}
-  </section>
+  {# Slot 1 — topic label #}
+  {% for item in slots.kicker %}
+  <div class="slot-kicker {{ item.character }} clip" data-start="{{ item.start }}" data-duration="{{ item.duration }}" data-track-index="10" data-slot="kicker" data-topic="{{ item.topic }}" data-layout-ignore>{{ item.text }}</div>
   {% endfor %}
 
-  {# Natural opening: the intro card rides in over the headline + real chart, then fades into the first slide #}
-  <section id="intro-card" class="intro-card clip" data-start="0" data-duration="2.4" data-track-index="40" data-layout-ignore>
+  {# Slot 2 — talking-point chips #}
+  {% for item in slots.keywords %}
+  <div class="slot-keywords {{ item.character }} clip" data-start="{{ item.start }}" data-duration="{{ item.duration }}" data-track-index="11" data-slot="keywords" data-layout-ignore>{% for keyword in item.keywords %}<span>{{ keyword }}</span>{% endfor %}</div>
+  {% endfor %}
+
+  {# Permanent: the panel frame.  Contents swap inside it, the frame itself
+     never moves, so a turn change never shifts the surrounding layout. #}
+  <div id="visual-frame" class="clip" data-start="0" data-duration="{{ outro_start }}" data-track-index="4" data-layout-ignore></div>
+
+  {# Slot 3 — the panel contents (real market data, then one board per turn) #}
+  {% for item in slots.visual %}
+  {% if item.kind == 'market' %}
+  <div class="visual-item visual-market clip" data-start="{{ item.start }}" data-duration="{{ item.duration }}" data-track-index="{{ 20 + loop.index }}" data-slot="visual" data-layout-ignore>
+    <div class="market-chart"><div class="chart-camera">{{ chart|safe }}</div></div>
+    <div class="market-finance"><div class="metric-list">{% for metric in financials %}<div class="metric"><span>{{ metric.label }}</span><strong class="{{ metric.tone or '' }}">{{ metric.value }}</strong></div>{% endfor %}</div></div>
+  </div>
+  {% else %}
+  <div class="visual-item clip" data-start="{{ item.start }}" data-duration="{{ item.duration }}" data-track-index="{{ 20 + loop.index }}" data-slot="visual" data-layout-ignore>{{ item.svg|safe }}</div>
+  {% endif %}
+  {% endfor %}
+
+  {# Permanent: single-row caption box #}
+  {% if subtitles %}
+  <section id="caption-zone" class="clip" data-start="0" data-duration="{{ outro_start }}" data-track-index="30" data-layout-allow-caption-zone>
+    {% for caption in slots.caption %}
+    <p class="caption-line {{ caption.character }}" data-start="{{ caption.start }}" data-duration="{{ caption.duration }}" data-slot="caption" data-layout-ignore>{{ caption.text }}</p>
+    {% endfor %}
+    {% for bar in slots.progress %}<i class="progress-fill" data-start="{{ bar.start }}" data-duration="{{ bar.duration }}" data-layout-ignore></i>{% endfor %}
+  </section>
+  {% endif %}
+
+  {# Natural opening: the title card takes over the panel area, then dissolves
+     to reveal the real market data that was already standing behind it. #}
+  <section id="intro-card" class="intro-card clip" data-start="0" data-duration="{{ stage_in + 1.5 }}" data-track-index="40" data-layout-ignore>
     <div class="intro-kicker">聊公司</div>
     <div class="intro-title">{{ name }} <em>{{ code }}</em></div>
-    <div class="intro-svg">{{ intro_svg|safe }}</div>
   </section>
 
-  {# Natural closing: recap card with the real interval numbers, fading over the last slide #}
+  {# Natural closing: recap card with the real interval numbers #}
   <section id="outro-card" class="outro-card clip" data-start="{{ outro_start }}" data-duration="0.45" data-track-index="60" data-layout-ignore>
     <div class="outro-kicker">今天聊到这</div>
     <div class="outro-title">{{ outro_title }}</div>

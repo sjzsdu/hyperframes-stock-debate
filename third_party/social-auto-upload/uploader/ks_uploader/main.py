@@ -520,6 +520,7 @@ class KSVideo(KSBaseUploader):
         thumbnail_path=None,
         desc: str | None = None,
         collection_name: str | None = None,
+        ai_content_label: str | None = None,
     ):
         super().__init__(
             publish_date=publish_date,
@@ -534,6 +535,9 @@ class KSVideo(KSBaseUploader):
         self.thumbnail_path = thumbnail_path
         self.desc = desc or ""
         self.collection_name = collection_name
+        # 「作者声明」下拉里要选中的选项文字。本项目成片含 AI 配音/字幕，依平台合规
+        # 要求如实标注；选项文案会随站点改版变化，所以做成可覆盖参数而不是写死。
+        self.ai_content_label = ai_content_label or "内容由AI生成"
 
     async def apply_collection(self, page: Page) -> None:
         """在发布表单页选择"加入合集"下拉框（Ant Design Select，label 属性=合集名）。
@@ -569,6 +573,46 @@ class KSVideo(KSBaseUploader):
             kuaishou_logger.success(_msg("🥳", f"已选择合集：{self.collection_name}"))
         except Exception as exc:
             kuaishou_logger.warning(_msg("😵", f"选择合集失败，跳过归集继续发布: {exc}"))
+            try:
+                await page.keyboard.press("Escape")
+            except Exception:
+                pass
+
+    async def apply_ai_statement(self, page: Page) -> None:
+        """在发布表单页的「作者声明」下拉里如实选 AI 生成（Ant Design Select）。
+
+        与 apply_collection 同一个思路：用 label 文字定位紧邻的 ant-select，避免误选
+        页面上其它下拉框。平台对未标注的 AI 内容会限流甚至取消分成资格，所以这里
+        **必须**尝试；但选项文案随改版会变，选不中只记 warning 继续发布——描述里
+        另有「本内容由 AI 生成」兜底，不因为一个下拉框把整次发布打断。
+        """
+        label = getattr(self, "ai_content_label", "") or "内容由AI生成"
+        try:
+            trigger = page.locator(
+                'label:text-is("作者声明")'
+            ).locator("xpath=following-sibling::div[contains(@class,'ant-select')]").first
+            if await trigger.count() == 0:
+                kuaishou_logger.warning(_msg("🧾", "未找到「作者声明」下拉框，跳过 AI 声明继续发布"))
+                return
+            await trigger.locator(".ant-select-selector").click(timeout=8000)
+            await page.wait_for_timeout(800)
+
+            option = page.locator(f'div.ant-select-item-option[label="{label}"]')
+            if await option.count() == 0:
+                option = page.locator("div.ant-select-item-option").filter(has_text=label)
+            if await option.count() == 0:
+                kuaishou_logger.warning(
+                    _msg("🧾", f"「作者声明」里没有「{label}」选项（站点可能已改版），跳过 AI 声明继续发布")
+                )
+                await page.keyboard.press("Escape")
+                await page.wait_for_timeout(300)
+                return
+
+            await option.first.click(timeout=8000)
+            await page.wait_for_timeout(500)
+            kuaishou_logger.success(_msg("🧾", f"作者声明已选择：{label}"))
+        except Exception as exc:
+            kuaishou_logger.warning(_msg("🧾", f"设置 AI 声明失败，跳过继续发布: {exc}"))
             try:
                 await page.keyboard.press("Escape")
             except Exception:
@@ -704,6 +748,8 @@ class KSVideo(KSBaseUploader):
             await self.set_thumbnail(page)
 
             await self.apply_collection(page)
+
+            await self.apply_ai_statement(page)
 
             if self.publish_strategy == KUAISHOU_PUBLISH_STRATEGY_SCHEDULED and self.publish_date != 0:
                 await self.set_schedule_time(page, self.publish_date)

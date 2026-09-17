@@ -123,6 +123,47 @@ def test_publish_builds_sau_commands_for_all_platforms(tmp_path: Path) -> None:
     assert bili[bili.index("--tid") + 1] == str(BILIBILI_FINANCE_TID)
 
 
+def test_ai_content_label_only_goes_to_platforms_that_need_it(tmp_path: Path) -> None:
+    """快手/小红书靠 CLI 传选项文案；抖音、视频号自己勾选，B站写进简介。"""
+    commands: list[list[str]] = []
+    video = tmp_path / "video.mp4"
+    video.write_bytes(b"\x00\x00\x00\x18ftypmp42")
+    publisher = SauPublisher(
+        {"publish": {"platforms": ["douyin", "bilibili", "kuaishou", "xiaohongshu", "tencent"],
+                     "headless": True, "preflight": False, "sau_dir": str(tmp_path / "nonexistent"),
+                     "ai_content_label": {"kuaishou": "内容由AI生成", "xiaohongshu": "AI生成"}}},
+        runner=fake_runner_factory(commands), sau_bin="sau",
+    )
+    publisher.publish(video, SCRIPT, "贵州茅台", "600519")
+
+    ks = next(c for c in commands if c[1] == "kuaishou")
+    assert ks[ks.index("--ai-content-label") + 1] == "内容由AI生成"
+    xhs = next(c for c in commands if c[1] == "xiaohongshu")
+    assert xhs[xhs.index("--ai-content-label") + 1] == "AI生成"
+    for name in ("douyin", "bilibili", "tencent"):
+        assert "--ai-content-label" not in next(c for c in commands if c[1] == name)
+
+
+def test_ai_content_label_absent_when_not_configured(tmp_path: Path) -> None:
+    commands: list[list[str]] = []
+    publisher = _publisher(tmp_path, commands)
+    publisher.publish(tmp_path / "video.mp4", SCRIPT, "贵州茅台", "600519")
+    assert all("--ai-content-label" not in c for c in commands)
+
+
+def test_bilibili_description_carries_the_ai_notice(tmp_path: Path) -> None:
+    """biliup has no AI field, so the notice has to survive in the description."""
+    script = {**SCRIPT, "disclaimers": ["本内容由AI生成，仅供学习交流，不构成投资建议"]}
+    gen = PublishMetadataGenerator()
+    meta = gen.generate(script, "贵州茅台", "600519")
+    bili = gen.for_platform(meta, "bilibili")
+    assert "AI生成" in bili.description
+    # 视频号只有 120 字，免责结尾必须活下来
+    tencent = gen.for_platform(meta, "tencent")
+    assert len(tencent.description) <= 120
+    assert "AI生成" in tencent.description
+
+
 def test_publish_clamps_title_for_xiaohongshu(tmp_path: Path) -> None:
     commands: list[list[str]] = []
     publisher = _publisher(tmp_path, commands)

@@ -117,11 +117,13 @@ class Pipeline:
     def _render_platform_cuts(self, stock_data: Mapping[str, Any], script: Mapping[str, Any],
                               audio: Mapping[str, Any], project_dir: Path, tag: str,
                               progress: Progress, task) -> dict[str, str]:
-        """Render alternate canvas cuts for platforms that need one.
+        """Render the desktop / mobile cuts the configured platforms ask for.
 
-        Bilibili is a landscape-first ecosystem, so a vertical master gets a
-        horizontal cut just for it (``publish.platform_canvas``).  A failed cut
-        degrades to the master video rather than blocking the run.
+        ``publish.platform_canvas`` maps every platform to its preferred
+        canvas, so the set of canvases named there is exactly the set of cuts
+        rendered: a landscape master plus a vertical cut for 小红书 means two
+        MP4s from one script.  A failed cut degrades to the master video
+        rather than blocking the run.
         """
         platforms = [p for p in self.config.get("publish", {}).get("platforms", []) if p in PLATFORM_LABELS]
         canvas_map = dict(self.config.get("publish", {}).get("platform_canvas", {}) or {})
@@ -135,10 +137,9 @@ class Pipeline:
         for canvas, targets in needed.items():
             progress.update(task, description=f"Rendering {canvas} cut for {', '.join(targets)}")
             video_cfg = dict(self.config.get("video", {}) or {})
-            # A cut falls back to its canvas's natural caption mode (horizontal =
-            # full block, vertical = one-line strip) instead of inheriting the
-            # master's mode, which is tuned for the master's aspect ratio.
-            video_cfg.pop("subtitles", None)
+            # The cut inherits the master's caption mode: one-line captions are
+            # the same on both canvases, and letting the cut drift to a
+            # different mode would silently change the layout it was tuned for.
             video_cfg.update({"canvas": canvas, "project_dir": str(project_dir / canvas)})
             builder = HyperFramesBuilder({**self.config, "video": video_cfg})
             try:
@@ -270,6 +271,11 @@ class Pipeline:
                   "srt": audio.get("srt_path"), "project_dir": str(project_dir),
                   "video_path": str(video_path) if video_path else None, "rendered": bool(video_path),
                   "platform_videos": platform_videos, "covers": cover_files,
+                  # Kept on the result so the CLI summary can name both cuts and
+                  # say which platforms each one feeds; otherwise the alternate
+                  # canvas render is invisible unless you open the JSON.
+                  "canvas": str(self.builder.video_config.get("canvas", "vertical")),
+                  "platform_canvas": dict(self.config.get("publish", {}).get("platform_canvas", {}) or {}),
                   "preview": preview, "publish": publish_report,
                   "elapsed_seconds": round(time.monotonic() - t0, 1)}
         result_path = self.output_dir / f"{tag}.json"
