@@ -83,6 +83,17 @@ video:
   #   off  — 不显示画面字幕，完全交给平台自动字幕。
   # 两版画幅都用 line：一行不会因换行把版面上顶，主画面才能保持不动。
   subtitles: line
+  # 安全区：平台 App 会在画面上盖自己的 UI（顶部作者/关注栏、底部文案+互动栏、
+  # 抖音右侧还有一排竖排按钮），内容只排进安全区才不会被压住。数值是该画幅下的像素。
+  #   竖版 240/460：顶部留 240（作者栏），底部留 460（标题+正文+话题+互动栏，
+  #                 取各平台公开安全区数据的保守值，Shorts 底部更狠，按需上调）。
+  #   横版 60/100：只需避开进度条与标题条。
+  #   side — 左右留边。小红书的按钮在底部横排，56 就够；抖音是右侧竖排
+  #         点赞/评论/分享，竖版要发抖音时把 vertical.side 调到 120。
+  # 想看这几条带子在哪：预览时给 URL 加 #guides（只在预览显示，不会进成片）。
+  safe_area:
+    vertical: {top: 240, bottom: 460, side: 56}
+    horizontal: {top: 60, bottom: 100, side: 70}
   # MP4 渲染实测常超过 15 分钟（3-8 分钟正片 + 高质量逐帧渲染）。
   # npx 还可能先下载 hyperframes 包，首次更慢；超时大幅放宽并可在用户配置覆盖。
   render_timeout_seconds: 3600
@@ -137,9 +148,18 @@ publish:
   retries: 1
   retry_delay_seconds: 30
   # B站（biliup）会对连续上传限流：upload rate limit (code: 601)「上传视频过快」。
-  # 它的冷却是分钟级的，30 秒的普通重试间隔只会再失败一次，所以单独给一个等待窗口，
-  # 等待期间通过进度条显示倒计时；设 0 表示限流后不重试。
+  # 这是**账号级**的：一次 601 之后，紧接着的每次尝试都会重置冷却窗口，10 分钟后
+  # 再试只会再吃一个 601。所以：
+  #   1) 冷却按次数翻倍（10 → 20 → 40 分钟，上限 rate_limit_max_wait_seconds）；
+  #   2) 冷却期写入状态文件，**跨运行生效**——冷却期内的平台直接跳过（不烧请求），
+  #      到点后再 `tangulunjin <code> --republish`；
+  #   3) 单次运行最多阻塞 rate_limit_block_seconds，超出的不再空等，直接留给补发。
+  # 设 rate_limit_wait_seconds: 0 表示限流后不重试（想自己控制节奏时用它）。
   rate_limit_wait_seconds: 600
+  rate_limit_max_wait_seconds: 3600
+  rate_limit_block_seconds: 600
+  # 限流冷却记录（各平台解限时间戳），跨运行共享，避免每次重跑都白烧一次上传。
+  state_file: .publish_state.json
   # 抖音发布瞬间可能弹短信验证码风控：sau 检测到后会无声地无限等待验证码。
   # 超过这段时间仍未收到（verify_code.txt 出现即视为收到）就中止该平台并给出提示，
   # 避免白等到 timeout_seconds。设为 0 关闭该保护。

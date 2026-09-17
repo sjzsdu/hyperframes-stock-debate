@@ -13,6 +13,7 @@ import argparse
 import json
 import sys
 from pathlib import Path
+from collections.abc import Mapping
 from typing import Any
 
 from stocktalk.modules.publisher import PLATFORM_SPECS, SauPublisher, check_environment
@@ -58,10 +59,10 @@ def main(argv: list[str] | None = None) -> None:
                         help="不询问任何问题（抖音要短信验证码时只等待手工写入 verify_code.txt）")
 
     args = parser.parse_args(argv)
+    # Config first: --no-interactive mutates the publish section before anything runs.
+    config = load_config(args.config)
     if args.no_interactive:
         config.setdefault("publish", {})["interactive_verify_code"] = False
-
-    config = load_config(args.config)
 
     if args.output_dir:
         config.setdefault("output", {})["dir"] = args.output_dir
@@ -177,6 +178,8 @@ def _republish(pipeline: Pipeline, args: argparse.Namespace, config: dict, parse
             print("  如需强制重发某个平台，加上 --platforms <平台>（如 --platforms douyin）")
             return
     script, stock_name, platform_videos, covers = _recover_publish_context(video, args)
+    # Same reason as --publish-only: art only exists once a run has published.
+    covers = _ensure_covers(pipeline, covers, script, code, video.stem, stock_name)
     print(f"补发 {stock_name}（{code}）→ {', '.join(PLATFORM_SPECS[p]['label'] for p in platforms)}")
     print(f"  成片: {video}")
     try:
@@ -186,6 +189,7 @@ def _republish(pipeline: Pipeline, args: argparse.Namespace, config: dict, parse
             schedule=str(config.get("publish", {}).get("schedule") or "") or None)
     except Exception as exc:
         parser.exit(1, f"\n补发失败：{exc}\n")
+    _record_publish(video, report, covers)
     _print_publish_report(parser, report)
     if report["failed"]:
         sys.exit(1)
@@ -219,14 +223,19 @@ def _publish_only(pipeline: Pipeline, args: argparse.Namespace, config: dict, pa
     if not video.is_file():
         parser.exit(1, f"\n发布失败：找不到视频文件 {video}\n")
     script, stock_name, platform_videos, covers = _recover_publish_context(video, args)
+    code = args.stock_codes[0] if args.stock_codes else str(_sidecar(video).get("stock_code") or "")
+    # A run that never published left `covers` empty; make the art now instead
+    # of shipping a cover-less video to every platform.
+    covers = _ensure_covers(pipeline, covers, script, code, video.stem, stock_name)
     try:
         report = pipeline.publisher.publish(video, script, stock_name=stock_name,
-                                            stock_code=args.stock_codes[0] if args.stock_codes else "",
+                                            stock_code=code,
                                             platform_videos=platform_videos or None,
                                             covers=covers or None,
                                             schedule=str(config.get("publish", {}).get("schedule") or "") or None)
     except Exception as exc:
         parser.exit(1, f"\n发布失败：{exc}\n")
+    _record_publish(video, report, covers)
     _print_publish_report(parser, report)
     if report["failed"]:
         sys.exit(1)
@@ -388,6 +397,45 @@ def _recover_publish_context(video: Path, args: argparse.Namespace) -> tuple[dic
             if Path(path).is_file():
                 covers[preset] = path
     return script, stock_name, platform_videos, covers
+
+
+def _sidecar(video: Path) -> dict:
+    """The metadata JSON the last full run wrote next to the MP4 ({} if none)."""
+    path = video.with_suffix(".json")
+    if not path.is_file():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _ensure_covers(pipeline: Pipeline, covers: Mapping[str, str], script: Mapping[str, Any],
+                   stock_code: str, tag: str, stock_name: str) -> dict[str, str]:
+    """Make cover art when the original run never got as far as publishing."""
+    if covers:
+        return dict(covers)
+    try:
+        return pipeline.render_covers(script, stock_code, tag, stock_name=stock_name)
+    except Exception as exc:  # A cover is a nice-to-have; never block the upload.
+        print(f"  封面图生成失败，将不带封面发布: {exc}")
+        return {}
+
+
+def _record_publish(video: Path, report: Mapping[str, Any], covers: Mapping[str, str]) -> None:
+    """Write the result back next to the MP4 so `--republish` knows what failed."""
+    sidecar = video.with_suffix(".json")
+    if not sidecar.is_file():
+        return
+    try:
+        data = json.loads(sidecar.read_text(encoding="utf-8"))
+        data["publish"] = dict(report)
+        if covers:
+            data["covers"] = dict(covers)
+        sidecar.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    except (OSError, ValueError):
+        pass
 
 
 def _one_line(text: str, limit: int = 160) -> str:

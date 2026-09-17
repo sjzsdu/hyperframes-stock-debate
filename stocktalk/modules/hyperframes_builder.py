@@ -28,6 +28,16 @@ CAPTION_BREAKS = "，。；！？、：,.!?;:"
 # Punctuation that ends a sentence — never merge a chunk across one of these.
 CAPTION_SENTENCE_ENDS = "。；！？.!?;"
 
+# Insets (top, bottom) kept clear per canvas: every short-video app overlays
+# the author row on top and the caption / action bar at the bottom, so content
+# laid out to the very edge gets covered once it is live.  Values are pixels on
+# the 1080×1920 vertical and 1920×1080 horizontal canvases.
+DEFAULT_SAFE_AREA: dict[str, tuple[int, int]] = {"vertical": (240, 460), "horizontal": (60, 100)}
+# Side inset.  小红书 keeps its controls on the bottom bar, but 抖音 stacks
+# like / comment / share down the right edge, so a vertical cut meant for 抖音
+# wants ~120 here.
+DEFAULT_SAFE_SIDE: dict[str, int] = {"vertical": 56, "horizontal": 70}
+
 # Discussion topics, detected from the dialogue text itself. The first matching
 # entry wins, so specific topics precede generic ones.
 TOPICS: dict[str, tuple[str, tuple[str, ...]]] = {
@@ -127,7 +137,52 @@ class HyperFramesBuilder:
         # A one-line caption strip has to fit the stage width: the vertical
         # column is 968px at 46px/char, the horizontal one 1220px at 34px.
         self.caption_max_chars = 22 if self.layout == "horizontal" else 18
+        # Insets the platform's own player UI will cover: a vertical feed puts
+        # the author row on top and the caption + action bar at the bottom.
+        self.safe_top, self.safe_bottom = self._safe_area(self.video_config.get("safe_area"))
+        self.safe_side = self._safe_side(self.video_config.get("safe_area"))
         self._runner = runner or self._run_subprocess
+
+    def _safe_side(self, raw: Any) -> int:
+        """Resolve the left/right inset kept clear of the platform UI."""
+        side = DEFAULT_SAFE_SIDE.get(self.layout, 0)
+        if isinstance(raw, Mapping):
+            per_canvas = raw.get(self.layout)
+            source = per_canvas if isinstance(per_canvas, Mapping) else raw
+            if isinstance(source, Mapping) and "side" in source:
+                try:
+                    side = int(source["side"])
+                except (TypeError, ValueError):
+                    pass
+        return max(0, min(int(side), self.canvas_width // 6))
+
+    def _safe_area(self, raw: Any) -> tuple[int, int]:
+        """Resolve per-canvas insets (top, bottom) reserved for platform UI.
+
+        Published vertical values follow the conservative end of the published
+        safe-zone guides: ~240px top (author row + follow button) and ~460px
+        bottom (title, body text, hashtags, action bar).  Landscape only needs
+        to clear a progress bar and a title strip.
+        """
+        top, bottom = DEFAULT_SAFE_AREA.get(self.layout, (0, 0))
+        if isinstance(raw, Mapping):
+            per_canvas = raw.get(self.layout)
+            source = per_canvas if isinstance(per_canvas, Mapping) else raw
+            if isinstance(source, Mapping):
+                for key, current in (("top", top), ("bottom", bottom)):
+                    if key in source:
+                        try:
+                            value = int(source[key])
+                        except (TypeError, ValueError):
+                            continue
+                        if key == "top":
+                            top = value
+                        else:
+                            bottom = value
+        canvas_h = self.canvas_height
+        top = max(0, min(int(top), canvas_h // 4))
+        bottom = max(0, min(int(bottom), canvas_h // 2))
+        return top, bottom
 
     def _subtitle_mode(self, raw: Any) -> str:
         """Resolve ``video.subtitles`` into off/line/full (bool kept for compat).
@@ -505,6 +560,9 @@ class HyperFramesBuilder:
             subtitle_mode=self.subtitle_mode,
             canvas_width=self.canvas_width,
             canvas_height=self.canvas_height,
+            safe_top=self.safe_top,
+            safe_bottom=self.safe_bottom,
+            safe_side=self.safe_side,
             stage_in=self.STAGE_IN,
             financials=self._financials(quote, financials, technical),
             chart=self._candles(history),

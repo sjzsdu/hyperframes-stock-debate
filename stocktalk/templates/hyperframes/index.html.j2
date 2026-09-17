@@ -11,8 +11,12 @@
 {# One permanent stage.  The headline, the panel frame and the caption box never
    move; only the four content slots below change, and only when their content
    actually differs from the previous turn (see HyperFramesBuilder._merge_slot). #}
-<main id="root" class="layout-{{ layout }} captions-{{ subtitle_mode }}" data-composition-id="stock-debate" data-start="0" data-width="{{ canvas_width }}" data-height="{{ canvas_height }}" data-duration="{{ duration }}" data-stage-in="{{ stage_in }}" data-fps="30">
+<main id="root" class="layout-{{ layout }} captions-{{ subtitle_mode }}" data-composition-id="stock-debate" data-start="0" data-width="{{ canvas_width }}" data-height="{{ canvas_height }}" data-duration="{{ duration }}" data-stage-in="{{ stage_in }}" data-fps="30" style="--safe-top: {{ safe_top }}px; --safe-bottom: {{ safe_bottom }}px; --safe-side: {{ safe_side }}px;">
 {% set outro_start = duration - 0.45 %}
+  {# Safe-area guides: the bands the platform's player UI will sit on.  Hidden
+     unless the preview URL asks for them (#guides), so they can never reach a
+     rendered MP4. #}
+  <div id="safe-guides" class="safe-guides" aria-hidden="true"><i class="safe-top"></i><i class="safe-bottom"></i></div>
   <div id="ambient-orb-a" class="ambient-orb orb-a clip" data-start="0" data-duration="{{ duration }}" data-track-index="1" data-layout-ignore></div>
   <div id="ambient-orb-b" class="ambient-orb orb-b clip" data-start="0" data-duration="{{ duration }}" data-track-index="2" data-layout-ignore></div>
 

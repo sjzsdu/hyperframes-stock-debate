@@ -14,6 +14,13 @@
   // land on top of another slot's.
   const SLOT_Z = { tint: 2000, kicker: 3000, keywords: 4000, visual: 5000, caption: 6000 };
 
+  // Preview-only aid: `#guides` in the URL reveals the bands each platform's
+  // player UI will sit on, so the layout can be checked before publishing.
+  // Nothing else reads the attribute, so a render never shows them.
+  if (location.hash.includes('guides')) {
+    root.dataset.guides = '1';
+  }
+
   const intro = document.querySelector('#intro-card');
   const outro = document.querySelector('#outro-card');
 

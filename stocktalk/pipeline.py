@@ -75,7 +75,7 @@ class Pipeline:
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
     def _render_covers(self, stock_data: Mapping[str, Any], script: Mapping[str, Any],
-                       stock_code: str, tag: str, progress: Progress, task) -> dict[str, str]:
+                       stock_code: str, tag: str, progress=None, task=None) -> dict[str, str]:
         """Render the cover presets the configured platforms consume.
 
         Cover art is the one part of the run that is genuinely optional, so a
@@ -88,7 +88,8 @@ class Pipeline:
         sizes = cover_sizes_for(platforms)
         if not sizes:
             return {}
-        progress.update(task, description=f"Rendering covers ({', '.join(sizes)})")
+        if progress is not None and task is not None:
+            progress.update(task, description=f"Rendering covers ({', '.join(sizes)})")
         try:
             rendered = self.covers.generate(stock_data, script, stock_code, sizes, self.output_dir, tag)
         except Exception as exc:
@@ -98,6 +99,16 @@ class Pipeline:
         if missing:
             self.console.print(f"[yellow]封面图缺失（{', '.join(missing)}），相关平台将不带封面发布[/yellow]")
         return {size: str(path) for size, path in rendered.items()}
+
+    def render_covers(self, script: Mapping[str, Any], stock_code: str, tag: str,
+                      stock_name: str = "") -> dict[str, str]:
+        """Render cover art on its own, without a full generation run.
+
+        ``--publish-only`` / ``--republish`` may fire on a video that was
+        rendered without ever publishing, so no cover exists yet. The template
+        tolerates a bare quote, which is all we can supply this late.
+        """
+        return self._render_covers({"quote": {"name": stock_name}}, script, stock_code, tag)
 
     def _retry(self, stage: str, operation: Callable[[], T]) -> T:
         """Retry a remote LLM/TTS operation with capped exponential backoff."""

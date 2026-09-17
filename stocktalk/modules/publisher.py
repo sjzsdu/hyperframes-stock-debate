@@ -20,6 +20,7 @@ its CLI has no ``--headless`` flag and its ``--desc``/``--tid`` are required.
 
 from __future__ import annotations
 
+import json
 import queue
 import re
 import select
@@ -45,6 +46,12 @@ class StreamAbort(RuntimeError):
 # Bilibili category for 财经/商业 content (tid 207 = 财经).
 BILIBILI_FINANCE_TID = 207
 
+# Where per-platform rate-limit cooldowns are remembered between runs.  It sits
+# next to the renders on purpose: the output directory is already disposable
+# and gitignored, and a cooldown is a property of "this machine right now",
+# not of the code.
+DEFAULT_STATE_FILENAME = ".publish_state.json"
+
 # Douyin can gate the final publish click behind an SMS challenge.  sau detects
 # the popup, clicks 「获取验证码」 and then polls ``verify_code.txt`` (or stdin)
 # inside an endless ``while True`` loop, so an unattended run hangs until the
@@ -58,6 +65,16 @@ SMS_RESOLVED_MARKERS: tuple[str, ...] = ("已获取验证码", "验证码已填�
 # long, so honouring the ordinary 30s retry backoff only burns the retry budget
 # and surprises nobody: it needs a wait of its own, then another try.
 RATE_LIMIT_MARKERS: tuple[str, ...] = ("upload rate limit", "code: 601", "上传视频过快", "频率限制")
+# A 601 reads like "you're going too fast", but on an account that has never
+# published it is really 风控: new / low-level / unverified accounts get it on
+# their very first upload, and waiting does not clear it.  Only a manual web or
+# app upload (which may ask for a captcha) lifts it, so say that out loud
+# instead of sending people to wait another ten minutes.
+RATE_LIMIT_REMEDIES: dict[str, str] = {
+    "bilibili": "B站 601 多半是账号风控而非真的「传太快」（Lv0/新号/未实名尤其容易中）："
+                "先在 bilibili 网页端或 APP 手动投一个视频，弹验证码就过掉；"
+                "并确认已绑定手机 + 通过实名认证（account.bilibili.com），之后再补发",
+}
 
 # A verification code is 4-8 digits on every platform we know; anything else is
 # a typo worth re-asking rather than sending upstream.
@@ -477,7 +494,17 @@ class SauPublisher:
         self.retry_delay = float(publish.get("retry_delay_seconds", 30))
         self.verify_code_wait = float(publish.get("verify_code_wait_seconds", 150))
         # A rate limit is asking us to slow down, and it says so for minutes.
+        # It is also account-wide: every attempt made during the window resets
+        # the clock, so the wait doubles per attempt and is remembered across
+        # runs — otherwise a cron job burns one upload per run, forever.
         self.rate_limit_wait = float(publish.get("rate_limit_wait_seconds", 600))
+        self.rate_limit_max_wait = float(publish.get("rate_limit_max_wait_seconds", 3600))
+        # How long one run may sit and wait out a cooldown before it gives up
+        # and leaves the platform to `--republish`.
+        self.rate_limit_block = float(publish.get("rate_limit_block_seconds", 600))
+        output_dir = Path((self.config.get("output", {}) or {}).get("dir", "output"))
+        state_file = str(publish.get("state_file") or DEFAULT_STATE_FILENAME)
+        self.state_path = Path(state_file) if Path(state_file).is_absolute() else output_dir / state_file
         # Ask for the SMS code in the terminal when there is one; cron/CI falls
         # back to dropping it into verify_code.txt by hand.
         self.interactive_verify_code = bool(publish.get("interactive_verify_code", True))
@@ -563,15 +590,33 @@ class SauPublisher:
             if not spec:
                 outcomes[platform] = PlatformResult(platform=platform, ok=False, detail="unsupported platform")
                 continue
+            cooling = self.cooldown_left(platform)
+            if cooling > 0:
+                # Retrying now would only restart the window: skip without
+                # spending an upload, and say when to come back.
+                on_event and on_event(platform, label, f"限流冷却中（还需 {self._format_wait(cooling)}）")
+                advice = RATE_LIMIT_REMEDIES.get(platform, "")
+                outcomes[platform] = PlatformResult(
+                    platform=platform, ok=False, retryable=False,
+                    detail=f"{label}限流冷却中，还需 {self._format_wait(cooling)}。"
+                           f"冷却期内不会发起上传（发也只会被拒并重置窗口）；"
+                           + (f"{advice}；" if advice else "")
+                           + "到点后运行 `tangulunjin <股票代码> --republish` 补发。")
+                continue
             on_event and on_event(platform, label, "上传中")
             try:
-                outcome = self._publish_safely(platform, videos.get(platform, video), metadata, schedule, cover_files)
+                outcome = self._publish_safely(platform, videos.get(platform, video), metadata,
+                                               schedule, cover_files, attempt=1)
             except KeyboardInterrupt:
                 # Ctrl-C once aborts the run, but the platforms already uploaded
                 # still deserve a report — otherwise the recording of what went
                 # out is lost with the traceback.
                 interrupted = True
                 outcome = PlatformResult(platform=platform, ok=False, retryable=False, detail="被用户中断（Ctrl-C）")
+            if outcome.ok:
+                self._clear_cooldown(platform)
+            elif outcome.retry_after:
+                self._note_cooldown(platform, outcome.retry_after)
             on_event and on_event(platform, label, "完成" if outcome.ok else "失败")
             outcomes[platform] = outcome
             if interrupted:
@@ -582,8 +627,23 @@ class SauPublisher:
 
         if not interrupted:
             for attempt in range(1, self.retries + 1):
-                retry_targets = [p for p in pending if p in PLATFORM_SPECS
-                                 and p in outcomes and not outcomes[p].ok and outcomes[p].retryable]
+                retry_targets: list[str] = []
+                for p in pending:
+                    if p not in PLATFORM_SPECS or p not in outcomes:
+                        continue
+                    result = outcomes[p]
+                    if result.ok or not result.retryable:
+                        continue
+                    # A cooldown longer than this run may sit through is left to
+                    # --republish: blocking the terminal for an hour is worse
+                    # than coming back later.
+                    if result.retry_after > self.rate_limit_block:
+                        outcomes[p] = PlatformResult(
+                            platform=p, ok=False, retryable=False, attempts=result.attempts,
+                            detail=f"{result.detail}\n需冷却 {self._format_wait(result.retry_after)}，"
+                                   f"本轮不再等待；到点后运行 `tangulunjin <股票代码> --republish` 补发")
+                        continue
+                    retry_targets.append(p)
                 if not retry_targets:
                     break
                 labels = "、".join(PLATFORM_LABELS.get(p, p) for p in retry_targets)
@@ -602,8 +662,13 @@ class SauPublisher:
                 for platform in retry_targets:
                     label = PLATFORM_LABELS.get(platform, platform)
                     on_event and on_event(platform, label, "重试中")
-                    outcome = self._publish_safely(platform, videos.get(platform, video), metadata, schedule, cover_files)
+                    outcome = self._publish_safely(platform, videos.get(platform, video), metadata,
+                                                   schedule, cover_files, attempt=attempt + 1)
                     outcome.attempts = outcomes[platform].attempts + 1
+                    if outcome.ok:
+                        self._clear_cooldown(platform)
+                    elif outcome.retry_after:
+                        self._note_cooldown(platform, outcome.retry_after)
                     outcomes[platform] = outcome
                     on_event and on_event(platform, label, "完成" if outcome.ok else "失败")
 
@@ -682,17 +747,78 @@ class SauPublisher:
         minutes, rest = divmod(int(seconds), 60)
         return f"{minutes} 分 {rest:02d}s" if rest else f"{minutes} 分钟"
 
-    def _classify(self, platform: str, detail: str) -> FailureVerdict:
-        """Decide whether another try can help, and how long to wait first."""
+    def _classify(self, platform: str, detail: str, attempt: int = 1) -> FailureVerdict:
+        """Decide whether another try can help, and how long to wait first.
+
+        A 601 is account-wide, and every attempt inside the window restarts it,
+        so the wait grows per attempt instead of repeating the same ten minutes.
+        """
         text = (detail or "").lower()
         if any(marker.lower() in text for marker in RATE_LIMIT_MARKERS):
             label = PLATFORM_LABELS.get(platform, platform)
-            return FailureVerdict(
-                retryable=True, wait_seconds=self.rate_limit_wait, kind="rate_limit",
-                hint=f"{label}限流：上传过于频繁，冷却 {self._format_wait(self.rate_limit_wait)}后自动重试")
+            wait = self._rate_limit_wait(attempt)
+            remedy = RATE_LIMIT_REMEDIES.get(platform, "")
+            if wait <= 0:
+                advice = f"{label}限流：本轮不再重试"
+                if remedy:
+                    advice += f"。{remedy}"
+                return FailureVerdict(retryable=False, wait_seconds=0.0, kind="rate_limit",
+                                      hint=f"{advice}；稍后用 `tangulunjin <股票代码> --republish` 补发")
+            advice = f"{label}限流：冷却 {self._format_wait(wait)}后再试（冷却期内不会发起上传）"
+            if remedy:
+                advice += f"; {remedy}"
+            return FailureVerdict(retryable=True, wait_seconds=wait, kind="rate_limit", hint=advice)
         # Everything else is assumed transient (a browser crashed, the network
         # blipped) — retrying quickly is still the best guess.
         return FailureVerdict(retryable=True, wait_seconds=0.0)
+
+    def _rate_limit_wait(self, attempt: int) -> float:
+        """Cooldown for the Nth rate-limit hit: 10 → 20 → 40 minutes, capped."""
+        if self.rate_limit_wait <= 0:
+            return 0.0
+        return min(self.rate_limit_wait * (2 ** max(0, attempt - 1)), self.rate_limit_max_wait)
+
+    # ------------------------------------------------------------------
+    # Rate-limit cooldown, remembered between runs
+    # ------------------------------------------------------------------
+    def _read_state(self) -> dict[str, Any]:
+        try:
+            data = json.loads(self.state_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return {}
+        return data if isinstance(data, dict) else {}
+
+    def _write_state(self, state: Mapping[str, Any]) -> None:
+        try:
+            self.state_path.parent.mkdir(parents=True, exist_ok=True)
+            self.state_path.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+        except OSError:  # A cooldown we cannot record just costs one extra try.
+            pass
+
+    def cooldown_left(self, platform: str) -> float:
+        """Seconds until this platform's window reopens; 0 means free to try."""
+        until = (self._read_state().get("cooldowns") or {}).get(platform)
+        try:
+            return max(0.0, float(until) - time.time())
+        except (TypeError, ValueError):
+            return 0.0
+
+    def _note_cooldown(self, platform: str, seconds: float) -> None:
+        if seconds <= 0:
+            return
+        state = self._read_state()
+        cooldowns = dict(state.get("cooldowns") or {})
+        # Never shorten a window that is already open.
+        cooldowns[platform] = max(float(cooldowns.get(platform, 0)), time.time() + seconds)
+        state["cooldowns"] = cooldowns
+        self._write_state(state)
+
+    def _clear_cooldown(self, platform: str) -> None:
+        state = self._read_state()
+        cooldowns = dict(state.get("cooldowns") or {})
+        if cooldowns.pop(platform, None) is not None:
+            state["cooldowns"] = cooldowns
+            self._write_state(state)
 
     def _ask_for_code(self, label: str) -> bool:
         """Get a verification code from whoever is watching this terminal."""
@@ -712,7 +838,8 @@ class SauPublisher:
     # Internals
     # ------------------------------------------------------------------
     def _publish_safely(self, platform: str, video: Path, metadata: PublishMetadata,
-                        schedule: str | None, covers: Mapping[str, Path]) -> PlatformResult:
+                        schedule: str | None, covers: Mapping[str, Path],
+                        attempt: int = 1) -> PlatformResult:
         """Publish one platform, absorbing *any* failure into its own result.
 
         ``_publish_one`` already handles the failures we anticipate; this is the
@@ -720,13 +847,14 @@ class SauPublisher:
         file) from taking down the other four platforms in the same run.
         """
         try:
-            return self._publish_one(platform, video, metadata, schedule, covers)
+            return self._publish_one(platform, video, metadata, schedule, covers, attempt=attempt)
         except Exception as exc:  # pragma: no cover - defensive
             return PlatformResult(platform=platform, ok=False,
                                   detail=f"{type(exc).__name__}: {exc}")
 
     def _publish_one(self, platform: str, video: Path, metadata: PublishMetadata,
-                     schedule: str | None, covers: Mapping[str, Path] | None = None) -> PlatformResult:
+                     schedule: str | None, covers: Mapping[str, Path] | None = None,
+                     attempt: int = 1) -> PlatformResult:
         spec = PLATFORM_SPECS[platform]
         account = self.accounts.get(platform, "default")
         scoped = self.metadata_gen.for_platform(metadata, platform)
@@ -765,7 +893,7 @@ class SauPublisher:
         detail = (completed.stderr or completed.stdout or ("ok" if ok else "unknown failure")).strip()
         if ok:
             return PlatformResult(platform=platform, ok=True, command=command, detail=detail[-800:])
-        verdict = self._classify(platform, detail)
+        verdict = self._classify(platform, detail, attempt=attempt)
         shown = detail[-800:] + (f"\n{verdict.hint}" if verdict.hint else "")
         return PlatformResult(platform=platform, ok=False, command=command, detail=shown,
                               retryable=verdict.retryable, retry_after=verdict.wait_seconds)

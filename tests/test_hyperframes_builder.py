@@ -11,6 +11,43 @@ class HyperFramesBuilderTests(unittest.TestCase):
     def _config(self, directory):
         return {"video": {"output_dir": str(directory)}}
 
+    # ---- Safe area: platform players overlay their own UI on the frame -------
+
+    def test_default_safe_area_is_reserved_per_canvas(self) -> None:
+        vertical = HyperFramesBuilder({"video": {"canvas": "vertical"}})
+        horizontal = HyperFramesBuilder({"video": {"canvas": "horizontal"}})
+        self.assertEqual((vertical.safe_top, vertical.safe_bottom), (240, 460))
+        # The bottom band is the dangerous one: caption + action bar + hashtags.
+        self.assertGreaterEqual(vertical.safe_bottom, 400)
+        self.assertLess(horizontal.safe_bottom, vertical.safe_bottom)
+
+    def test_safe_area_reads_the_per_canvas_overrides(self) -> None:
+        builder = HyperFramesBuilder({"video": {"canvas": "vertical", "safe_area": {
+            "vertical": {"top": 300, "bottom": 500, "side": 120},
+            "horizontal": {"top": 10, "bottom": 20}}}})
+        self.assertEqual((builder.safe_top, builder.safe_bottom, builder.safe_side), (300, 500, 120))
+
+    def test_safe_area_is_clamped_to_the_canvas(self) -> None:
+        builder = HyperFramesBuilder({"video": {"canvas": "vertical", "safe_area": {"vertical": {"top": -40, "bottom": 99999}}}})
+        self.assertEqual(builder.safe_top, 0)
+        self.assertLessEqual(builder.safe_bottom, 1920 // 2)
+
+    def test_stage_bands_are_positioned_from_the_safe_area(self) -> None:
+        """版面必须跟随安全区变量——写死像素会在改安全区时悄悄越界。"""
+        with tempfile.TemporaryDirectory() as temp:
+            builder = HyperFramesBuilder({"video": {"output_dir": temp, "canvas": "vertical"}})
+            project = builder.build_project(
+                {"code": "600519", "quote": {"name": "贵州茅台", "price": 1500, "change_pct": 1.2}}, {},
+                {"segments": [], "total_duration": 30},
+            )
+            html = project.composition_path.read_text(encoding="utf-8")
+            css = (project.directory / "stock-debate.css").read_text(encoding="utf-8")
+            self.assertIn("--safe-top: 240px; --safe-bottom: 460px;", html)
+            self.assertIn("--safe-side: 56px", html)
+            for selector in ("#headline", ".slot-kicker", "#visual-frame", "#caption-zone"):
+                block = css.split(f"#root.layout-vertical {selector} {{")[1].split("}")[0]
+                self.assertIn("var(--safe-", block, selector)
+
     def test_builds_timed_multitrack_composition(self):
         with tempfile.TemporaryDirectory() as temp:
             audio_source = Path(temp) / "audio.wav"

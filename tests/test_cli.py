@@ -255,12 +255,18 @@ class FakeRepublishPipeline:
     def __init__(self) -> None:
         self.publisher = type("P", (), {"publish": lambda self, *a, **k: (_ for _ in ()).throw(AssertionError("not set"))})()
         self.calls: list[dict[str, Any]] = []
+        self.render_calls: list[str] = []
+        self.rendered: dict[str, str] = {}
 
     def wire(self, report: dict[str, Any]) -> None:
         def publish(video, script, **kwargs):
             self.calls.append({"video": video, "script": script, **kwargs})
             return report
         self.publisher = type("P", (), {"publish": staticmethod(publish)})()
+
+    def render_covers(self, script, stock_code, tag, stock_name="") -> dict[str, str]:
+        self.render_calls.append(stock_code)
+        return dict(self.rendered)
 
 
 def _write_run(output_dir: Path, tag: str, *, failed: list[str], covers: bool = True) -> tuple[Path, dict[str, str]]:
@@ -371,3 +377,81 @@ def test_republish_still_exits_nonzero_when_it_fails_again(tmp_path: Path) -> No
             cli.main(["601689", "--republish"])
 
     assert excinfo.value.code == 1
+
+
+# ---------------------------------------------------------------------------
+# --publish-only  只发已生成的成片
+# ---------------------------------------------------------------------------
+
+def _write_unpublished(output_dir: Path, tag: str = "000980_20260917_135737") -> Path:
+    """A run that rendered but never published: no covers, no publish report."""
+    output_dir.mkdir(parents=True, exist_ok=True)
+    video = output_dir / f"{tag}.mp4"
+    video.write_bytes(b"0")
+    (output_dir / f"{tag}.json").write_text(json.dumps({
+        "stock_code": "000980", "stock_name": "众泰汽车", "video_path": str(video),
+        "approved_script": {"title": "众泰汽车（000980）：产能与订单的博弈", "turns": [{"speaker": "bull", "line": "看点"}]},
+        "platform_videos": {"xiaohongshu": str(output_dir / f"{tag}.vertical.mp4")},
+        "covers": {}, "publish": None,
+    }, ensure_ascii=False), encoding="utf-8")
+    (output_dir / f"{tag}.vertical.mp4").write_bytes(b"0")
+    return video
+
+
+def test_publish_only_renders_covers_the_original_run_never_made(tmp_path: Path) -> None:
+    output_dir = tmp_path / "output"
+    video = _write_unpublished(output_dir)
+    cover = output_dir / "000980_20260917_135737.cover-portrait.png"
+    fake = FakeRepublishPipeline()
+    fake.rendered = {"portrait": str(cover)}
+    fake.wire({"succeeded": ["douyin"], "failed": [], "platforms": []})
+    with patch.multiple(cli, Pipeline=lambda config: fake, load_config=lambda path=None: _republish_config(output_dir)):
+        cli.main(["--publish-only", str(video)])
+
+    assert fake.render_calls == ["000980"]
+    assert fake.calls[0]["covers"] == {"portrait": str(cover)}
+    assert fake.calls[0]["stock_code"] == "000980"
+    assert fake.calls[0]["platform_videos"]["xiaohongshu"].endswith(".vertical.mp4")
+
+
+def test_publish_only_records_the_result_so_republish_can_resume(tmp_path: Path) -> None:
+    output_dir = tmp_path / "output"
+    video = _write_unpublished(output_dir)
+    cover = output_dir / "000980_20260917_135737.cover-portrait.png"
+    cover.write_bytes(b"png")
+    fake = FakeRepublishPipeline()
+    fake.rendered = {"portrait": str(cover)}
+    fake.wire({"succeeded": ["douyin"], "failed": [{"platform": "bilibili", "detail": "boom"}],
+               "platforms": [{"platform": "bilibili", "label": "B站", "ok": False, "detail": "boom",
+                              "command": [], "attempts": 1}]})
+    with patch.multiple(cli, Pipeline=lambda config: fake, load_config=lambda path=None: _republish_config(output_dir)):
+        with pytest.raises(SystemExit) as excinfo:
+            cli.main(["--publish-only", str(video)])
+
+    assert excinfo.value.code == 1
+    saved = json.loads((output_dir / "000980_20260917_135737.json").read_text(encoding="utf-8"))
+    assert [item["platform"] for item in saved["publish"]["failed"]] == ["bilibili"]
+    assert saved["covers"] == {"portrait": str(cover)}
+
+
+def test_publish_only_keeps_existing_covers(tmp_path: Path) -> None:
+    output_dir = tmp_path / "output"
+    video, covers = _write_run(output_dir, "000980_20260917_135737", failed=[])
+    fake = FakeRepublishPipeline()
+    fake.wire({"succeeded": ["douyin"], "failed": [], "platforms": []})
+    with patch.multiple(cli, Pipeline=lambda config: fake, load_config=lambda path=None: _republish_config(output_dir)):
+        cli.main(["--publish-only", str(video)])
+
+    assert fake.render_calls == []
+    assert fake.calls[0]["covers"] == covers
+
+
+def test_no_interactive_is_applied_after_the_config_loads(tmp_path: Path) -> None:
+    """--no-interactive must not blow up on a `config` that has not been read yet."""
+    output_dir = tmp_path / "output"
+    _write_run(output_dir, "601689_20260916_120000", failed=[])
+    fake = FakePipeline()
+    with patch.multiple(cli, Pipeline=lambda config: fake, load_config=lambda path=None: _republish_config(output_dir)):
+        cli.main(["601689", "--no-interactive", "--no-render"])
+
+    assert fake.calls == ["601689"]

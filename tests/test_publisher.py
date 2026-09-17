@@ -50,6 +50,16 @@ def fake_runner_factory(commands: list[list[str]]):
     return runner
 
 
+@pytest.fixture(autouse=True)
+def _isolated_cooldown_state(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Never let the machine's real cooldown file steer a test.
+
+    Without this, a bilibili cooldown written by an actual run makes every
+    test that publishes to bilibili silently "skip" instead of uploading.
+    """
+    monkeypatch.setattr(publisher_module, "DEFAULT_STATE_FILENAME", ".publish_state.test.json")
+
+
 # ---------------------------------------------------------------------------
 # Metadata generation
 # ---------------------------------------------------------------------------
@@ -531,7 +541,7 @@ def test_a_broken_platform_never_blocks_the_rest(tmp_path: Path) -> None:
     exploded: list[str] = []
     real_publish_one = publisher._publish_one
 
-    def flaky(platform, video, metadata, schedule, covers=None):
+    def flaky(platform, video, metadata, schedule, covers=None, attempt=1):
         if platform == "douyin":
             exploded.append(platform)
             raise RuntimeError("boom")
@@ -590,8 +600,10 @@ def test_rate_limited_upload_waits_out_the_cooldown_before_retrying(tmp_path: Pa
 
     slept: list[float] = []
     publisher = SauPublisher(
-        {"publish": {"platforms": ["bilibili"], "preflight": False, "retries": 1,
-                     "retry_delay_seconds": 30, "rate_limit_wait_seconds": 90}},
+        {"output": {"dir": str(tmp_path)},
+         "publish": {"platforms": ["bilibili"], "preflight": False, "retries": 1,
+                     "retry_delay_seconds": 30, "rate_limit_wait_seconds": 90,
+                     "state_file": str(tmp_path / "state.json")}},
         runner=runner, sau_bin="sau", sleep=slept.append)
 
     report = publisher.publish(_video(tmp_path), SCRIPT, "贵州茅台", "600519")
@@ -602,12 +614,101 @@ def test_rate_limited_upload_waits_out_the_cooldown_before_retrying(tmp_path: Pa
     assert max(slept) <= 30  # narrated in chunks so the wait does not look like a hang
 
 
-def test_rate_limit_hint_explains_the_silence() -> None:
-    publisher = SauPublisher({"publish": {"rate_limit_wait_seconds": 600}}, sau_bin="sau")
+def test_rate_limit_hint_explains_the_silence(tmp_path: Path) -> None:
+    publisher = SauPublisher({"output": {"dir": str(tmp_path)},
+                              "publish": {"rate_limit_wait_seconds": 600}}, sau_bin="sau")
     verdict = publisher._classify("bilibili", BILIBILI_RATE_LIMIT)
     assert verdict.kind == "rate_limit"
     assert verdict.wait_seconds == 600
     assert "限流" in verdict.hint
+
+
+def test_the_cooldown_doubles_and_then_caps(tmp_path: Path) -> None:
+    """Each hit inside the window must cost more waiting, not the same 10 min."""
+    publisher = SauPublisher({"output": {"dir": str(tmp_path)},
+                              "publish": {"rate_limit_wait_seconds": 600, "rate_limit_max_wait_seconds": 1800}},
+                             sau_bin="sau")
+    assert [publisher._rate_limit_wait(n) for n in (1, 2, 3, 4)] == [600, 1200, 1800, 1800]
+
+
+def test_a_cooling_platform_is_skipped_without_spending_an_upload(tmp_path: Path) -> None:
+    """The point of the whole mechanism: no request is made while cooling down."""
+    commands: list[list[str]] = []
+    publisher = SauPublisher({"output": {"dir": str(tmp_path)},
+                              "publish": {"platforms": ["bilibili"], "preflight": False,
+                                          "state_file": str(tmp_path / "state.json")}},
+                             runner=fake_runner_factory(commands), sau_bin="sau")
+    publisher._note_cooldown("bilibili", 600)
+
+    report = publisher.publish(_video(tmp_path), SCRIPT, "贵州茅台", "600519")
+
+    assert commands == []  # not even an upload attempt
+    assert report["succeeded"] == []
+    assert "--republish" in report["platforms"][0]["detail"]
+    assert "冷却" in report["platforms"][0]["detail"]
+
+
+def test_the_cooldown_survives_a_new_process(tmp_path: Path) -> None:
+    """A re-run minutes later must not burn another upload either."""
+    state = str(tmp_path / "state.json")
+    base = {"output": {"dir": str(tmp_path)},
+            "publish": {"platforms": ["bilibili"], "preflight": False, "retries": 0,
+                        "rate_limit_wait_seconds": 600, "state_file": state}}
+
+    first_commands: list[list[str]] = []
+    first = SauPublisher(base, runner=fake_runner_factory(first_commands), sau_bin="sau")
+    first.publish(_video(tmp_path), SCRIPT, "贵州茅台", "600519")
+    assert len(first_commands) == 1  # the very first run is never throttled by us
+    first._note_cooldown("bilibili", 600)  # stands in for a real 601
+
+    second_commands: list[list[str]] = []
+    second = SauPublisher(base, runner=fake_runner_factory(second_commands), sau_bin="sau")
+    second.publish(_video(tmp_path), SCRIPT, "贵州茅台", "600519")
+    assert second_commands == []
+
+
+def test_a_successful_upload_clears_the_cooldown(tmp_path: Path) -> None:
+    state = str(tmp_path / "state.json")
+    publisher = SauPublisher({"output": {"dir": str(tmp_path)},
+                              "publish": {"platforms": ["bilibili"], "preflight": False,
+                                          "state_file": state}},
+                             runner=fake_runner_factory([]), sau_bin="sau")
+    publisher._note_cooldown("bilibili", 0.05)
+    time.sleep(0.1)  # the window has just opened again
+    assert publisher.cooldown_left("bilibili") == 0
+
+    report = publisher.publish(_video(tmp_path), SCRIPT, "贵州茅台", "600519")
+    assert report["succeeded"] == ["bilibili"]
+    assert publisher.cooldown_left("bilibili") == 0
+
+
+def test_a_cooldown_longer_than_the_run_may_block_is_left_to_republish(tmp_path: Path) -> None:
+    """An hour of sitting in front of a countdown is worse than coming back later."""
+    commands: list[list[str]] = []
+
+    def runner(command, cwd):
+        commands.append([*command])
+        return FakeCompleted(returncode=1, stdout="", stderr=BILIBILI_RATE_LIMIT)
+
+    publisher = SauPublisher(
+        {"output": {"dir": str(tmp_path)},
+         "publish": {"platforms": ["bilibili"], "preflight": False, "retries": 1,
+                     "rate_limit_wait_seconds": 3600, "rate_limit_block_seconds": 600,
+                     "state_file": str(tmp_path / "state.json")}},
+        runner=runner, sau_bin="sau", sleep=lambda _: None)
+
+    report = publisher.publish(_video(tmp_path), SCRIPT, "贵州茅台", "600519")
+
+    assert len(commands) == 1  # retried neither in-run nor after an hour of waiting
+    assert "--republish" in report["platforms"][0]["detail"]
+    assert publisher.cooldown_left("bilibili") > 0
+
+
+def test_the_601_hint_says_account_risk_control_not_speed() -> None:
+    """601 reads as "too fast"; on a fresh account it is really 风控 — say so."""
+    publisher = SauPublisher({"publish": {"rate_limit_wait_seconds": 600}}, sau_bin="sau")
+    verdict = publisher._classify("bilibili", BILIBILI_RATE_LIMIT)
+    assert "实名" in verdict.hint and "网页端" in verdict.hint
 
 
 def test_ordinary_failures_keep_the_short_backoff() -> None:

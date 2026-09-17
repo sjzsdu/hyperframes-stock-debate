@@ -16,6 +16,12 @@
   /* Canvas size; overridden per layout below (both carry ~2.07M pixels). */
   --canvas-w: 1920px;
   --canvas-h: 1080px;
+  /* Insets the platform player will cover (author row on top, caption + action
+     bar at the bottom).  Every stage band is positioned relative to these, so
+     raising them moves the whole layout instead of clipping it. */
+  --safe-top: 0px;
+  --safe-bottom: 0px;
+  --safe-side: 0px;
 }
 @font-face { font-family:"PingFang SC"; src:local("PingFang SC"); }
 @font-face { font-family:"Microsoft YaHei"; src:local("Microsoft YaHei"); }
@@ -33,7 +39,7 @@ body { margin: 0; overflow: hidden; background: var(--bg); color: var(--text); f
    Permanent stage — these four pieces keep the same rect for the whole clip.
    Only the slots layered between them change.
    ========================================================================== */
-#headline { top: 44px; left: 70px; right: 70px; height: 132px; z-index: 7000; }
+#headline { top: var(--safe-top); left: 70px; right: 70px; height: 132px; z-index: 7000; }
 .title-row { display: flex; align-items: center; justify-content: space-between; }
 h1 { margin: 0; font-size: 56px; line-height: 1.05; letter-spacing: -1px; }
 h1 em { color: var(--accent); font-style: normal; font-size: 30px; font-weight: 600; margin-left: 14px; letter-spacing: 2px; }
@@ -41,12 +47,15 @@ h1 em { color: var(--accent); font-style: normal; font-size: 30px; font-weight: 
 #headline p.up { color: var(--up); }
 #headline p.down { color: var(--down); }
 
-#visual-frame { top: 330px; left: 350px; width: 1220px; height: 500px; z-index: 4900;
+/* The panel is inset from the safe edges on both sides: its height follows from
+   top/bottom, so a bigger safe area just makes the panel shorter. */
+#visual-frame { top: calc(var(--safe-top) + 286px); bottom: calc(var(--safe-bottom) + 170px);
+  left: 350px; width: 1220px; z-index: 4900;
   border-radius: 28px; border: 1px solid var(--line);
   background: linear-gradient(145deg, rgba(17, 38, 64, .94), var(--panel));
   box-shadow: 0 26px 80px rgba(0,0,0,.45); }
 
-#caption-zone { top: 878px; left: 350px; right: 350px; height: 122px; z-index: 6500;
+#caption-zone { bottom: var(--safe-bottom); left: 350px; right: 350px; height: 122px; z-index: 6500;
   border-radius: 26px; border: 1px solid var(--line);
   background: linear-gradient(145deg, rgba(17, 38, 64, .94), var(--panel));
   box-shadow: 0 18px 54px rgba(0,0,0,.40); overflow: hidden; }
@@ -57,12 +66,12 @@ h1 em { color: var(--accent); font-style: normal; font-size: 30px; font-weight: 
 .stage-tint.bear { background: radial-gradient(circle at 22% 16%, var(--bear-soft), transparent 46%), radial-gradient(circle at 80% 84%, rgba(255,120,188,.05), transparent 44%); }
 
 /* ---- Slot 1 / 2: topic label and talking-point chips ---- */
-.slot-kicker { top: 200px; left: 350px; right: 350px; height: 44px; line-height: 44px;
+.slot-kicker { top: calc(var(--safe-top) + 156px); left: 350px; right: 350px; height: 44px; line-height: 44px;
   font-size: 24px; font-weight: 700; color: var(--accent); letter-spacing: 3px;
   opacity: 0; visibility: hidden; }
 .slot-kicker.bull { color: var(--bull); }
 .slot-kicker.bear { color: var(--bear); }
-.slot-keywords { top: 252px; left: 350px; right: 350px; height: 60px;
+.slot-keywords { top: calc(var(--safe-top) + 208px); left: 350px; right: 350px; height: 60px;
   display: flex; flex-wrap: wrap; align-items: flex-start; gap: 14px; opacity: 0; visibility: hidden; overflow: hidden; }
 .slot-keywords span { padding: 10px 22px; border: 1px solid var(--line); border-radius: 999px;
   background: rgba(10, 24, 43, .78); font-size: 24px; font-weight: 600; letter-spacing: 1px; line-height: 1.6; }
@@ -70,7 +79,8 @@ h1 em { color: var(--accent); font-style: normal; font-size: 30px; font-weight: 
 
 /* ---- Slot 3: panel contents.  Sits exactly over the frame, so swapping it
         moves nothing around it. ---- */
-.visual-item { top: 330px; left: 350px; width: 1220px; height: 500px; padding: 24px 28px;
+.visual-item { top: calc(var(--safe-top) + 286px); bottom: calc(var(--safe-bottom) + 170px);
+  left: 350px; width: 1220px; padding: 24px 28px;
   border-radius: 28px; opacity: 0; visibility: hidden; overflow: hidden; }
 .visual-item svg { width: 100%; height: 100%; }
 .visual-market { display: flex; align-items: stretch; gap: 0; }
@@ -97,11 +107,19 @@ h1 em { color: var(--accent); font-style: normal; font-size: 30px; font-weight: 
   transform-origin: left center; transform: scaleX(0);
   background: linear-gradient(90deg, var(--bull), var(--accent), var(--bear)); }
 
+.safe-guides { position: absolute; inset: 0; z-index: 9500; pointer-events: none; display: none; }
+#root[data-guides="1"] .safe-guides { display: block; }
+.safe-guides i { position: absolute; left: 0; right: 0; display: block;
+  background: rgba(255, 113, 136, .09); }
+.safe-guides .safe-top { top: 0; height: var(--safe-top); border-bottom: 3px dashed rgba(255, 209, 102, .9); }
+.safe-guides .safe-bottom { bottom: 0; height: var(--safe-bottom); border-top: 3px dashed rgba(255, 209, 102, .9); }
+
 /* ---- Title cards ---- */
 /* The opening title card takes over the panel area only — it shares the frame's
    exact rect, so the headline and the caption row stay live underneath and the
    first spoken words are never hidden behind a full-screen cover. */
-.intro-card { top: 330px; left: 350px; width: 1220px; height: 500px; border-radius: 28px;
+.intro-card { top: calc(var(--safe-top) + 286px); bottom: calc(var(--safe-bottom) + 170px);
+  left: 350px; width: 1220px; border-radius: 28px;
   border: 1px solid var(--line);
   display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 20px;
   z-index: 8000; pointer-events: none;
@@ -162,35 +180,37 @@ h1 em { color: var(--accent); font-style: normal; font-size: 30px; font-weight: 
 #root.layout-vertical .orb-b { right: -180px; top: 300px; }
 
 /* Band 1 — stock name, code and price */
-#root.layout-vertical #headline { top: 92px; left: 56px; right: 56px; height: 200px; }
+#root.layout-vertical #headline { top: var(--safe-top); left: var(--safe-side); right: var(--safe-side); height: 180px; }
 #root.layout-vertical h1 { font-size: 78px; }
 #root.layout-vertical h1 em { font-size: 42px; margin-left: 18px; }
-#root.layout-vertical #headline p { font-size: 34px; margin-top: 18px; }
+#root.layout-vertical #headline p { font-size: 34px; margin-top: 16px; }
 
-/* Band 2 — topic label, chips, then the panel */
-#root.layout-vertical .slot-kicker { top: 322px; left: 56px; right: 56px; height: 64px; line-height: 64px; font-size: 36px; }
-#root.layout-vertical .slot-keywords { top: 398px; left: 56px; right: 56px; height: 160px; gap: 14px; }
+/* Band 2 — topic label, chips, then the panel.  The panel is inset from both
+   safe edges, so its height is whatever room the safe area leaves. */
+#root.layout-vertical .slot-kicker { top: calc(var(--safe-top) + 196px); left: var(--safe-side); right: var(--safe-side); height: 58px; line-height: 58px; font-size: 36px; }
+#root.layout-vertical .slot-keywords { top: calc(var(--safe-top) + 266px); left: var(--safe-side); right: var(--safe-side); height: 130px; gap: 14px; }
 #root.layout-vertical .slot-keywords span { font-size: 30px; padding: 12px 26px; line-height: 1.5; }
-#root.layout-vertical #visual-frame { top: 590px; left: 56px; width: 968px; height: 740px; border-radius: 36px; }
-#root.layout-vertical .visual-item { top: 590px; left: 56px; width: 968px; height: 740px; border-radius: 36px; padding: 26px 30px; }
+#root.layout-vertical #visual-frame { top: calc(var(--safe-top) + 420px); bottom: calc(var(--safe-bottom) + 160px); left: var(--safe-side); right: var(--safe-side); width: auto; border-radius: 36px; }
+#root.layout-vertical .visual-item { top: calc(var(--safe-top) + 420px); bottom: calc(var(--safe-bottom) + 160px); left: var(--safe-side); right: var(--safe-side); width: auto; border-radius: 36px; padding: 26px 30px; }
 
 /* The opening market panel: chart on top, quote grid underneath */
 #root.layout-vertical .visual-market { flex-direction: column; }
-#root.layout-vertical .market-chart { flex: 0 0 420px; height: 420px; padding: 16px 20px; }
+#root.layout-vertical .market-chart { flex: 0 0 400px; height: 400px; padding: 16px 20px; }
 #root.layout-vertical .market-finance { width: 100%; flex: 1; height: auto; padding: 12px 20px; border-left: 0; border-top: 1px solid var(--line); }
 #root.layout-vertical .metric-list { display: grid; grid-template-columns: 1fr 1fr; gap: 2px 30px; margin-top: 0; }
-#root.layout-vertical .metric { min-height: 62px; font-size: 24px; border-top: 0; border-bottom: 1px solid var(--line); }
+#root.layout-vertical .metric { min-height: 58px; font-size: 24px; border-top: 0; border-bottom: 1px solid var(--line); }
 #root.layout-vertical .metric strong { font-size: 30px; }
 
-/* Band 3 — one caption row, clear of the platform UI */
-#root.layout-vertical #caption-zone { top: 1390px; left: 56px; right: 56px; height: 150px; border-radius: 32px; }
-#root.layout-vertical .caption-line { left: 36px; right: 36px; height: 150px; line-height: 150px; font-size: 46px; }
+/* Band 3 — one caption row, sitting on the bottom safe edge so the platform's
+   own caption block can never end up underneath it. */
+#root.layout-vertical #caption-zone { bottom: var(--safe-bottom); left: var(--safe-side); right: var(--safe-side); height: 140px; border-radius: 32px; }
+#root.layout-vertical .caption-line { left: 36px; right: 36px; height: 140px; line-height: 140px; font-size: 46px; }
 #root.layout-vertical .progress-fill { height: 6px; }
 
-#root.layout-vertical .intro-card { top: 590px; left: 56px; width: 968px; height: 740px; border-radius: 36px; gap: 28px; }
+#root.layout-vertical .intro-card { top: calc(var(--safe-top) + 420px); bottom: calc(var(--safe-bottom) + 160px); left: var(--safe-side); right: var(--safe-side); width: auto; border-radius: 36px; }
 #root.layout-vertical .intro-kicker { font-size: 34px; }
 #root.layout-vertical .intro-title { font-size: 118px; }
 #root.layout-vertical .intro-title em { font-size: 62px; margin-left: 22px; }
 #root.layout-vertical .outro-kicker { font-size: 34px; }
-#root.layout-vertical .outro-title { font-size: 66px; max-width: 968px; }
+#root.layout-vertical .outro-title { font-size: 66px; max-width: calc(100% - var(--safe-side) * 2); }
 #root.layout-vertical .outro-tip { font-size: 36px; }
