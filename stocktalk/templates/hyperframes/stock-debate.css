@@ -18,10 +18,21 @@
   --canvas-h: 1080px;
   /* Insets the platform player will cover (author row on top, caption + action
      bar at the bottom).  Every stage band is positioned relative to these, so
-     raising them moves the whole layout instead of clipping it. */
+     raising them moves the whole layout instead of clipping it.  Side insets
+     resolve symmetric by default (asymmetric read lopsided, 2026-09-19);
+     config still accepts side_left / side_right for platform-specific tuning. */
   --safe-top: 0px;
   --safe-bottom: 0px;
-  --safe-side: 0px;
+  --safe-side-left: 0px;
+  --safe-side-right: 0px;
+  /* Per-symbol ambience: the same code always yields the same hue, so two runs
+     never look identical while 红涨/绿跌 stays untouched. */
+  --stock-accent: #69b7ff;
+  --stock-soft: rgba(105, 183, 255, .16);
+  /* --stage-left is defined on #root (see below), NOT here: safe-area values
+     are injected as inline overrides on #root, and custom properties are
+     substituted where they are DEFINED — on :root it would always read 0px
+     and the content column would overlap the identity rail. */
 }
 @font-face { font-family:"PingFang SC"; src:local("PingFang SC"); }
 @font-face { font-family:"Microsoft YaHei"; src:local("Microsoft YaHei"); }
@@ -31,9 +42,17 @@ html, body { width: 100%; height: 100%; }
 body { margin: 0; overflow: hidden; background: var(--bg); color: var(--text); font-family: "PingFang SC", "Microsoft YaHei", Arial, sans-serif; }
 #root { position: relative; width: var(--canvas-w); height: var(--canvas-h); overflow: hidden; isolation: isolate; background: radial-gradient(circle at 50% 30%, #123456 0, #071524 40%, var(--bg) 78%); }
 .clip { position: absolute; }
+/* One orb carries the symbol's own hue, so the ambience differs per stock
+   while the bull/bear orb keeps the speaker cue intact. */
 .ambient-orb { width: 560px; height: 560px; border-radius: 50%; filter: blur(90px); opacity: .13; z-index: 1; }
-.orb-a { left: -140px; top: 300px; background: var(--bull); }
+.orb-a { left: -140px; top: 300px; background: var(--stock-accent); opacity: .16; }
 .orb-b { right: -140px; top: 160px; background: var(--bear); }
+
+/* Left edge of the content column (kicker / chips / panel).  Horizontal
+   leaves room for the identity rail; vertical overrides it below.  Defined
+   on #root — not :root — because safe-area values are injected as inline
+   overrides on #root and custom properties resolve where they are defined. */
+#root { --stage-left: calc(var(--safe-side-left) + 330px); }
 
 /* ==========================================================================
    Permanent stage — these four pieces keep the same rect for the whole clip.
@@ -41,6 +60,16 @@ body { margin: 0; overflow: hidden; background: var(--bg); color: var(--text); f
    ========================================================================== */
 #headline { top: var(--safe-top); left: 70px; right: 70px; height: 132px; z-index: 7000; }
 .title-row { display: flex; align-items: center; justify-content: space-between; }
+/* Right side of the headline: 总市值 / 换手率 from stockinfo.  Fills the dead
+   band right of the stock name with real unit-verified numbers instead of
+   empty background. */
+.headline-stats { display: flex; gap: 44px; padding-right: 8px; }
+.headline-stat { display: flex; flex-direction: column; align-items: flex-end; gap: 4px; }
+.headline-stat span { color: var(--muted); font-size: 17px; letter-spacing: 1px; }
+.headline-stat strong { color: var(--text); font-size: 30px; font-weight: 700; font-variant-numeric: tabular-nums; }
+/* Vertical headline has no spare width (市值数字会换行把价格行压到 identity 条上) —
+   the stats block is a horizontal-stage fixture only. */
+#root.layout-vertical .headline-stats { display: none; }
 h1 { margin: 0; font-size: 56px; line-height: 1.05; letter-spacing: -1px; }
 h1 em { color: var(--accent); font-style: normal; font-size: 30px; font-weight: 600; margin-left: 14px; letter-spacing: 2px; }
 #headline p { color: var(--text); font-size: 24px; margin: 12px 0 0; font-variant-numeric: tabular-nums; }
@@ -48,39 +77,69 @@ h1 em { color: var(--accent); font-style: normal; font-size: 30px; font-weight: 
 #headline p.down { color: var(--down); }
 
 /* The panel is inset from the safe edges on both sides: its height follows from
-   top/bottom, so a bigger safe area just makes the panel shorter. */
+   top/bottom, so a bigger safe area just makes the panel shorter.  The content
+   column starts after the identity rail, so it is wider than the old centred
+   1220px while the rail keeps its own lane. */
 #visual-frame { top: calc(var(--safe-top) + 286px); bottom: calc(var(--safe-bottom) + 170px);
-  left: 350px; width: 1220px; z-index: 4900;
+  left: var(--stage-left); right: var(--safe-side-right); z-index: 4900;
   border-radius: 28px; border: 1px solid var(--line);
   background: linear-gradient(145deg, rgba(17, 38, 64, .94), var(--panel));
   box-shadow: 0 26px 80px rgba(0,0,0,.45); }
 
-#caption-zone { bottom: var(--safe-bottom); left: 350px; right: 350px; height: 122px; z-index: 6500;
+#caption-zone { bottom: var(--safe-bottom); left: var(--safe-side-left); right: var(--safe-side-right); height: 122px; z-index: 6500;
   border-radius: 26px; border: 1px solid var(--line);
   background: linear-gradient(145deg, rgba(17, 38, 64, .94), var(--panel));
   box-shadow: 0 18px 54px rgba(0,0,0,.40); overflow: hidden; }
+
+/* ---- Per-stock identity: board badge + measured temperament tags ----
+   Horizontal turns #identity into a side rail beside the panel; vertical turns
+   it into a strip under the headline.  Markup is shared, arrangement is not. */
+#identity { z-index: 5000; display: flex; pointer-events: none; }
+.board-badge { display: inline-flex; align-items: center; justify-content: center;
+  padding: 8px 18px; border-radius: 999px; flex: none;
+  border: 1px solid var(--stock-accent); color: var(--stock-accent);
+  background: var(--stock-soft);
+  font-size: 22px; font-weight: 700; letter-spacing: 2px; }
+.identity-tags { list-style: none; margin: 0; padding: 0; display: flex; min-width: 0; }
+.identity-tag { display: flex; align-items: baseline; justify-content: space-between; gap: 10px;
+  padding: 10px 16px; border-radius: 16px; min-width: 0;
+  border: 1px solid var(--line); background: rgba(10, 24, 43, .74); }
+.identity-tag span { color: var(--muted); font-size: 18px; white-space: nowrap; }
+.identity-tag strong { color: var(--text); font-size: 22px; font-weight: 700;
+  font-variant-numeric: tabular-nums; white-space: nowrap; }
+.identity-tag strong.up { color: var(--up); }
+.identity-tag strong.down { color: var(--down); }
 
 /* ---- Slot 0: speaker ambience.  Only re-renders when the speaker changes. -- */
 .stage-tint { position: absolute; inset: 0; opacity: 0; visibility: hidden; }
 .stage-tint.bull { background: radial-gradient(circle at 22% 16%, var(--bull-soft), transparent 46%), radial-gradient(circle at 80% 84%, rgba(105,183,255,.06), transparent 44%); }
 .stage-tint.bear { background: radial-gradient(circle at 22% 16%, var(--bear-soft), transparent 46%), radial-gradient(circle at 80% 84%, rgba(255,120,188,.05), transparent 44%); }
 
+/* ---- Horizontal: the identity rail runs down the left of the stage, aligned
+        with the kicker row above and the panel bottom below.  The tags list
+        stretches over the remaining rail height so the rail doesn't die out
+        halfway and leave a dead block above the panel bottom. ---- */
+#identity { top: calc(var(--safe-top) + 148px); bottom: calc(var(--safe-bottom) + 170px);
+  left: var(--safe-side-left); width: 300px; flex-direction: column; gap: 14px; }
+#identity .identity-tags { flex-direction: column; gap: 12px; flex: 1; justify-content: space-evenly; }
+
 /* ---- Slot 1 / 2: topic label and talking-point chips ---- */
-.slot-kicker { top: calc(var(--safe-top) + 156px); left: 350px; right: 350px; height: 44px; line-height: 44px;
+.slot-kicker { top: calc(var(--safe-top) + 156px); left: var(--stage-left); right: var(--safe-side-right); height: 44px; line-height: 44px;
   font-size: 24px; font-weight: 700; color: var(--accent); letter-spacing: 3px;
   opacity: 0; visibility: hidden; }
 .slot-kicker.bull { color: var(--bull); }
 .slot-kicker.bear { color: var(--bear); }
-.slot-keywords { top: calc(var(--safe-top) + 208px); left: 350px; right: 350px; height: 60px;
+.slot-keywords { top: calc(var(--safe-top) + 208px); left: var(--stage-left); right: var(--safe-side-right); height: 60px;
   display: flex; flex-wrap: wrap; align-items: flex-start; gap: 14px; opacity: 0; visibility: hidden; overflow: hidden; }
 .slot-keywords span { padding: 10px 22px; border: 1px solid var(--line); border-radius: 999px;
-  background: rgba(10, 24, 43, .78); font-size: 24px; font-weight: 600; letter-spacing: 1px; line-height: 1.6; }
+  background: rgba(10, 24, 43, .78); font-size: 24px; font-weight: 600; letter-spacing: 1px; line-height: 1.6;
+  flex: none; }
 .slot-keywords span:first-child { color: var(--gold); border-color: rgba(255, 209, 102, .45); }
 
 /* ---- Slot 3: panel contents.  Sits exactly over the frame, so swapping it
         moves nothing around it. ---- */
 .visual-item { top: calc(var(--safe-top) + 286px); bottom: calc(var(--safe-bottom) + 170px);
-  left: 350px; width: 1220px; padding: 24px 28px;
+  left: var(--stage-left); right: var(--safe-side-right); padding: 24px 28px;
   border-radius: 28px; opacity: 0; visibility: hidden; overflow: hidden; }
 .visual-item svg { width: 100%; height: 100%; }
 .visual-market { display: flex; align-items: stretch; gap: 0; }
@@ -119,13 +178,14 @@ h1 em { color: var(--accent); font-style: normal; font-size: 30px; font-weight: 
    exact rect, so the headline and the caption row stay live underneath and the
    first spoken words are never hidden behind a full-screen cover. */
 .intro-card { top: calc(var(--safe-top) + 286px); bottom: calc(var(--safe-bottom) + 170px);
-  left: 350px; width: 1220px; border-radius: 28px;
+  left: var(--stage-left); right: var(--safe-side-right); border-radius: 28px;
   border: 1px solid var(--line);
   display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 20px;
   z-index: 8000; pointer-events: none;
   background: linear-gradient(145deg, rgba(17, 38, 64, .96), rgba(8, 20, 37, .97));
   box-shadow: 0 26px 80px rgba(0,0,0,.45); }
-.intro-kicker { font-size: 26px; font-weight: 700; color: var(--gold); letter-spacing: 10px; padding-left: 10px; }
+.intro-kicker { font-size: 26px; font-weight: 700; color: var(--gold); letter-spacing: 4px; padding-left: 4px;
+  max-width: 100%; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
 .intro-title { font-size: 84px; font-weight: 800; letter-spacing: 2px; text-shadow: 0 12px 44px rgba(0,0,0,.6); }
 .intro-title em { color: var(--accent); font-style: normal; font-size: 44px; font-weight: 700; margin-left: 18px; letter-spacing: 3px; }
 .outro-card { position: absolute; inset: 0; display: flex; flex-direction: column;
@@ -174,28 +234,47 @@ h1 em { color: var(--accent); font-style: normal; font-size: 30px; font-weight: 
    Same permanent stage, re-laid out into three bands with a bottom safe area
    (≈1630px) so the platform's own UI never covers the caption row.
    ========================================================================== */
-#root.layout-vertical { --canvas-w: 1080px; --canvas-h: 1920px; }
+#root.layout-vertical { --canvas-w: 1080px; --canvas-h: 1920px; --stage-left: var(--safe-side-left); }
 
 #root.layout-vertical .orb-a { left: -180px; top: 520px; }
 #root.layout-vertical .orb-b { right: -180px; top: 300px; }
 
 /* Band 1 — stock name, code and price */
-#root.layout-vertical #headline { top: var(--safe-top); left: var(--safe-side); right: var(--safe-side); height: 180px; }
+#root.layout-vertical #headline { top: var(--safe-top); left: var(--safe-side-left); right: var(--safe-side-right); height: 180px; }
 #root.layout-vertical h1 { font-size: 78px; }
 #root.layout-vertical h1 em { font-size: 42px; margin-left: 18px; }
 #root.layout-vertical #headline p { font-size: 34px; margin-top: 16px; }
 
+/* Band 1.5 — identity strip.  Vertical has no room for a side rail, so the
+   badge and tags sit on one row under the headline.  nowrap + overflow keeps a
+   long tag set from pushing the panel down (the band below is fixed). */
+#root.layout-vertical #identity { top: calc(var(--safe-top) + 190px); bottom: auto;
+  left: var(--safe-side-left); right: var(--safe-side-right); width: auto; height: 56px;
+  flex-direction: row; align-items: center; gap: 12px; }
+#root.layout-vertical .identity-tags { flex-direction: row; flex-wrap: nowrap; overflow: hidden; gap: 10px;
+  flex: none; justify-content: flex-start; }
+#root.layout-vertical .identity-tag { padding: 6px 14px; border-radius: 14px; }
+#root.layout-vertical .identity-tag span { font-size: 17px; }
+#root.layout-vertical .identity-tag strong { font-size: 20px; }
+
 /* Band 2 — topic label, chips, then the panel.  The panel is inset from both
    safe edges, so its height is whatever room the safe area leaves. */
-#root.layout-vertical .slot-kicker { top: calc(var(--safe-top) + 196px); left: var(--safe-side); right: var(--safe-side); height: 58px; line-height: 58px; font-size: 36px; }
-#root.layout-vertical .slot-keywords { top: calc(var(--safe-top) + 266px); left: var(--safe-side); right: var(--safe-side); height: 130px; gap: 14px; }
-#root.layout-vertical .slot-keywords span { font-size: 30px; padding: 12px 26px; line-height: 1.5; }
-#root.layout-vertical #visual-frame { top: calc(var(--safe-top) + 420px); bottom: calc(var(--safe-bottom) + 160px); left: var(--safe-side); right: var(--safe-side); width: auto; border-radius: 36px; }
-#root.layout-vertical .visual-item { top: calc(var(--safe-top) + 420px); bottom: calc(var(--safe-bottom) + 160px); left: var(--safe-side); right: var(--safe-side); width: auto; border-radius: 36px; padding: 26px 30px; }
+/* Band 2 — topic label, then ONE row of chips.  The old two-row keyword area
+   (130px) needed ~152px for two chip rows, so the second row was always cut in
+   half — the "bottom tag half visible" bug.  One nowrap row frees the rest of
+   the band for the panel, which is the element that actually carries content. */
+#root.layout-vertical .slot-kicker { top: calc(var(--safe-top) + 270px); left: var(--stage-left); right: var(--safe-side-right); height: 58px; line-height: 58px; font-size: 36px; }
+#root.layout-vertical .slot-keywords { top: calc(var(--safe-top) + 338px); left: var(--stage-left); right: var(--safe-side-right); height: 74px; flex-wrap: nowrap; align-items: center; gap: 14px; }
+/* flex:0 1 auto + ellipsis: 长关键词行收缩省略，而不是裁半截或溢出画幅。 */
+#root.layout-vertical .slot-keywords span { font-size: 28px; padding: 10px 20px; line-height: 1.5; white-space: nowrap; flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+#root.layout-vertical #visual-frame { top: calc(var(--safe-top) + 432px); bottom: calc(var(--safe-bottom) + 160px); left: var(--stage-left); right: var(--safe-side-right); width: auto; border-radius: 36px; }
+#root.layout-vertical .visual-item { top: calc(var(--safe-top) + 432px); bottom: calc(var(--safe-bottom) + 160px); left: var(--stage-left); right: var(--safe-side-right); width: auto; border-radius: 36px; padding: 26px 30px; }
 
-/* The opening market panel: chart on top, quote grid underneath */
+/* The opening market panel: chart on top, quote grid underneath.  The chart
+   gives back 20px so the finance grid fits three metric rows instead of two —
+   with the old split the third row was cropped mid-number. */
 #root.layout-vertical .visual-market { flex-direction: column; }
-#root.layout-vertical .market-chart { flex: 0 0 400px; height: 400px; padding: 16px 20px; }
+#root.layout-vertical .market-chart { flex: 0 0 380px; height: 380px; padding: 16px 20px; }
 #root.layout-vertical .market-finance { width: 100%; flex: 1; height: auto; padding: 12px 20px; border-left: 0; border-top: 1px solid var(--line); }
 #root.layout-vertical .metric-list { display: grid; grid-template-columns: 1fr 1fr; gap: 2px 30px; margin-top: 0; }
 #root.layout-vertical .metric { min-height: 58px; font-size: 24px; border-top: 0; border-bottom: 1px solid var(--line); }
@@ -203,14 +282,14 @@ h1 em { color: var(--accent); font-style: normal; font-size: 30px; font-weight: 
 
 /* Band 3 — one caption row, sitting on the bottom safe edge so the platform's
    own caption block can never end up underneath it. */
-#root.layout-vertical #caption-zone { bottom: var(--safe-bottom); left: var(--safe-side); right: var(--safe-side); height: 140px; border-radius: 32px; }
-#root.layout-vertical .caption-line { left: 36px; right: 36px; height: 140px; line-height: 140px; font-size: 46px; }
+#root.layout-vertical #caption-zone { bottom: var(--safe-bottom); left: var(--safe-side-left); right: var(--safe-side-right); height: 140px; border-radius: 32px; }
+#root.layout-vertical .caption-line { left: 36px; right: 36px; height: 140px; line-height: 140px; font-size: 44px; }
 #root.layout-vertical .progress-fill { height: 6px; }
 
-#root.layout-vertical .intro-card { top: calc(var(--safe-top) + 420px); bottom: calc(var(--safe-bottom) + 160px); left: var(--safe-side); right: var(--safe-side); width: auto; border-radius: 36px; }
+#root.layout-vertical .intro-card { top: calc(var(--safe-top) + 432px); bottom: calc(var(--safe-bottom) + 160px); left: var(--stage-left); right: var(--safe-side-right); width: auto; border-radius: 36px; }
 #root.layout-vertical .intro-kicker { font-size: 34px; }
-#root.layout-vertical .intro-title { font-size: 118px; }
-#root.layout-vertical .intro-title em { font-size: 62px; margin-left: 22px; }
+#root.layout-vertical .intro-title { font-size: 84px; }
+#root.layout-vertical .intro-title em { font-size: 46px; margin-left: 20px; }
 #root.layout-vertical .outro-kicker { font-size: 34px; }
-#root.layout-vertical .outro-title { font-size: 66px; max-width: calc(100% - var(--safe-side) * 2); }
+#root.layout-vertical .outro-title { font-size: 66px; max-width: calc(100% - var(--safe-side-left) - var(--safe-side-right)); }
 #root.layout-vertical .outro-tip { font-size: 36px; }

@@ -77,8 +77,17 @@ class DialogueGenerator:
             "不编造数字、新闻或事实，不预测涨跌，不给出买卖或仓位建议，不承诺收益。\n"
             f"看多角色：{bull['name']}，人设：{bull['persona']}。\n看空角色：{bear['name']}，人设：{bear['persona']}。\n"
             "\n内容要求（重要）：\n"
-            "1. 以“讲懂这家公司”为主线：公司的主业是什么、靠什么赚钱、产品或服务面对什么样的客户和需求，"
-            "在所处行业里处于什么位置、竞争格局如何、行业的天花板与政策环境怎样。\n"
+            "1. 以“讲懂这家公司”为主线：先说清它到底卖什么、靠什么赚钱、客户是谁、这门生意怎么运转；"
+            "再说它在所处行业里的位置、竞争格局、行业天花板与政策环境。\n"
+            "   数据里的「公司档案」来自交易所 F10 原文，是讲这门生意的第一手依据，必须据此展开：\n"
+            "   · 主营业务、主营构成（各产品/地区/销售模式的收入占比与毛利率）就是这门生意的骨架——"
+            "哪块业务撑起收入、哪块最赚钱、直销和经销各占多少，都要讲到具体数字；\n"
+            "   · 所属行业、行业地位（研究行业与同行家数）用来定位它在行业里的位置和同行对比；\n"
+            "   · 管理层只提档案里写了姓名和职务的人，不评价能力、不推测想法、不编造言论；\n"
+            "   · 经营评述是公司自述，可以复述但要说明这是公司的说法。\n"
+            "   board（行业/概念板块）是交易所对这家公司的分类，作为补充：含“白酒概念”就围绕白酒这门生意讲，"
+            "分类只到行业层面时就只讲行业层面的事实。"
+            "档案和 board 里都没有的产品、客户、产能、管理层姓名与言论一律不得编造，宁可说“公开信息只到这一层”。\n"
             "2. 财务与行情数据只用来佐证业务判断：把营收、利润、毛利率、ROE、价格和成交等数字翻译成生意层面的含义"
             "（例如意味着什么生意变化），不要罗列指标，不要停留在K线、MACD等技术信号本身。\n"
             "3. 聊听众关心的实际问题：这家公司凭什么在行业里站稳、增长从哪里来、钱从哪里赚、和同行比强在哪、"
@@ -123,6 +132,8 @@ class DialogueGenerator:
             "不要编号、不要 Round、不要强制一来一回；"
             "允许一方连续追问、另一方长答后短驳，长短句交错，不要每轮等长。"
             "至少一半的篇幅围绕公司业务和行业本身（生意模式、行业格局、竞争与需求），技术信号最多作为一句带过的佐证。"
+            "开头几轮就把“这家公司靠什么赚钱”讲明白，让观众听完能多懂一门生意，而不是听了一段行情点评。"
+            "涉及管理层时只能用公司档案里给出的姓名与职务，不评价个人能力、不推测动机；公司动作只说新闻里写了的，并带上出处和时间。"
             "内容要充分展开：覆盖业务模式、行业格局、盈利来源、财务印证、风险与不确定性等多个层面，"
             "避免车轱辘话和重复观点，每一轮都提供新的信息或新的角度。"
             "收尾要自然：对这次聊到的生意做一个小结式收束，不要戛然而止。"
@@ -213,7 +224,7 @@ class DialogueGenerator:
     @classmethod
     def _compact_data(cls, data: Mapping[str, Any]) -> dict[str, Any]:
         result: dict[str, Any] = {}
-        for key in ("code", "quote", "technical", "financials", "f10", "news", "unavailable"):
+        for key in ("code", "quote", "technical", "financials", "f10", "board", "stockinfo", "news", "unavailable"):
             if key not in data: continue
             value = data[key]
             if key == "technical" and isinstance(value, Mapping):
@@ -221,8 +232,22 @@ class DialogueGenerator:
                 value = {n: value[n] for n in ("summary", "count") if n in value}
                 if recent: value["近段行情"] = recent
             elif key == "f10" and isinstance(value, Mapping):
-                sections = value.get("sections", {})
-                value = {"sections": {str(k): str(v)[:600] for k, v in sections.items()} if isinstance(sections, Mapping) else {}}
+                # Send the parsed 公司档案, not the raw F10 tables: the tables are
+                # tens of thousands of box-drawing characters that would crowd
+                # out everything else while burying the few facts that matter.
+                profile = value.get("profile")
+                if not isinstance(profile, Mapping) or not profile: continue
+                value = dict(profile)
+            elif key == "stockinfo" and isinstance(value, Mapping):
+                metrics = value.get("metrics")
+                if not isinstance(metrics, Mapping) or not metrics: continue
+                value = dict(metrics)
+            elif key == "board" and isinstance(value, Mapping):
+                # 行业与概念是 tongstock 真实给出的分类（block show），是「这公司到底
+                # 做什么」最直接的素材——比行情数字更能撑起内容。
+                value = {n: [str(x) for x in value[n]][:8] for n in ("industry", "concepts")
+                         if isinstance(value.get(n), list) and value[n]}
+                if not value: continue
             elif key == "news" and isinstance(value, Mapping):
                 digest = cls._news_digest(value)
                 if digest: value = {"items": digest}

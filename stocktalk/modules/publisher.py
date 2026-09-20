@@ -111,6 +111,14 @@ PLATFORM_SPECS: dict[str, dict[str, Any]] = {
     "tencent":     {"label": "视频号", "title": 30, "tags": 6,  "desc": 120, "runtime_flags": True,  "tid": None,
                     "ai_statement_cli": False,
                     "covers": (("--thumbnail-portrait", "portrait"), ("--thumbnail-landscape", "landscape"))},
+    # 百家号上传器强制要求横版封面（缺失直接 ValueError），标题上限 30 字。
+    # headed=True：百度滑块风控在 headless 下必弹且无法人工通过（2026-09-20
+    # 两次发布死于「百度安全验证」），所以无视 publish.headless 强制有头，
+    # 弹滑块时等用户在浏览器窗口里拖一下。
+    "baijiahao":   {"label": "百家号", "title": 30, "tags": 5,  "desc": 200, "runtime_flags": True,  "tid": None,
+                    "headed": True,
+                    "ai_statement_cli": False,
+                    "covers": (("--thumbnail", "wide"),)},
 }
 
 # Backwards-compatible views over PLATFORM_SPECS.
@@ -878,7 +886,9 @@ class SauPublisher:
             command += ["--ai-content-label", label]
         if spec.get("runtime_flags"):
             # bilibili delegates to the biliup binary, whose CLI rejects these.
-            command.append("--headless" if self.headless else "--headed")
+            # baijiahao overrides to headed regardless of publish.headless.
+            headed = bool(spec.get("headed")) or not self.headless
+            command.append("--headed" if headed else "--headless")
         try:
             completed = self._runner(command, self.workdir)
         except StreamAbort as exc:

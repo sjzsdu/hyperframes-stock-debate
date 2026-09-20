@@ -1,0 +1,143 @@
+diff --git a/uploader/baijiahao_uploader/main.py b/uploader/baijiahao_uploader/main.py
+index 2d679bd..5c5bc83 100644
+--- a/uploader/baijiahao_uploader/main.py
++++ b/uploader/baijiahao_uploader/main.py
+@@ -64,6 +64,39 @@ def _build_launch_kwargs(headless: bool) -> dict:
+     return launch_kwargs
+ 
+ 
++# 百家号后台是 SPA：进入发布页、选完视频文件都会触发整页导航（如跳到带
++# productId 的新编辑页 URL）。导航瞬间 Playwright 的执行上下文被销毁，
++# 任何 locator().count()/wait_for 都会抛 "Execution context was destroyed"
++# （2026-09-19 实测两次发布均死于该竞态）。下面两个助手统一兜底：
++CONTEXT_DESTROYED = "Execution context was destroyed"
++
++
++async def _wait_nav_settled(page: Page, timeout: int = 30000) -> None:
++    """等 load 态 + URL 连续两次采样一致，再继续操作页面元素。"""
++    try:
++        await page.wait_for_load_state("load", timeout=timeout)
++    except PWTimeoutError:
++        pass
++    last = page.url
++    for _ in range(10):
++        await page.wait_for_timeout(1000)
++        if page.url == last:
++            return
++        last = page.url
++
++
++async def _nav_retry(page: Page, step, attempts: int = 4):
++    """执行一个零参异步调用，命中导航竞态就等导航稳定后重试。"""
++    for attempt in range(1, attempts + 1):
++        try:
++            return await step()
++        except Exception as exc:
++            if CONTEXT_DESTROYED not in str(exc) or attempt == attempts:
++                raise
++            baijiahao_logger.warning(_msg("⚠️", f"页面导航打断操作（第{attempt}次），等稳定后重试"))
++            await _wait_nav_settled(page)
++
++
+ def _resolve_account_file(account_file: str | Path) -> str:
+     path = Path(account_file).expanduser()
+     if path.is_absolute():
+@@ -278,42 +311,53 @@ class BaiJiaHaoVideo(BaseVideoUploader):
+         try:
+             page = await context.new_page()
+             await page.goto(BAIJIAHAO_PUBLISH_URL, timeout=120000, wait_until="domcontentloaded")
++            await _wait_nav_settled(page)
+             baijiahao_logger.info(_msg("🏃", f"开始上传视频: {self.title}"))
+ 
+-            # 等待发布页加载
+-            await page.wait_for_timeout(3000)
+-
+-            # 1) 上传视频文件
+-            file_input = page.locator('input[type="file"][accept*="video"], input[type="file"][accept*="mp4"]').first
+-            if not await file_input.count():
+-                file_input = page.locator("div[class^='video-main-container'] input[type='file']").first
+-            if not await file_input.count():
+-                file_input = page.locator('input[type="file"]').first
+-            await file_input.wait_for(state="attached", timeout=30000)
++            # 1) 上传视频文件（选完文件 SPA 会再次整页导航，见 _wait_nav_settled 注释）
++            def _pick_file_input():
++                async def _inner():
++                    file_input = page.locator('input[type="file"][accept*="video"], input[type="file"][accept*="mp4"]').first
++                    if not await file_input.count():
++                        file_input = page.locator("div[class^='video-main-container'] input[type='file']").first
++                    if not await file_input.count():
++                        file_input = page.locator('input[type="file"]').first
++                    await file_input.wait_for(state="attached", timeout=30000)
++                    return file_input
++                return _inner
++
++            file_input = await _nav_retry(page, _pick_file_input())
+             await file_input.set_input_files(self.file_path)
+             baijiahao_logger.info(_msg("🏃", f"已选择视频文件: {self.file_path}"))
++            await _wait_nav_settled(page)
+ 
+             # 2) 等待进入表单页面（contenteditable 标题区出现即表单渲染完毕）
+-            title_editor = page.locator('div[class*="contentEditable"]').first
+-            await title_editor.wait_for(state="visible", timeout=180000)
++            def _pick_title_editor():
++                async def _inner():
++                    editor = page.locator('div[class*="contentEditable"]').first
++                    await editor.wait_for(state="visible", timeout=180000)
++                    return editor
++                return _inner
++
++            await _nav_retry(page, _pick_title_editor())
+             await page.wait_for_timeout(1000)
+ 
+             # 3) 填写标题
+-            await self._fill_title(page)
++            await _nav_retry(page, lambda: self._fill_title(page))
+ 
+             # 4) 等待视频上传完成
+-            await self._wait_upload_complete(page)
++            await _nav_retry(page, lambda: self._wait_upload_complete(page))
+ 
+             # 5) 上传横版封面（必填）
+-            await self._upload_thumbnail(page)
++            await _nav_retry(page, lambda: self._upload_thumbnail(page))
+ 
+             # 6) 勾选「含AI生成内容」
+-            await self._check_ai_declaration(page)
++            await _nav_retry(page, lambda: self._check_ai_declaration(page))
+ 
+             # 7) 选择合集（如有配置）
+-            await self._apply_collection(page)
++            await _nav_retry(page, lambda: self._apply_collection(page))
+ 
+-            # 8) 点击发布
++            # 8) 点击发布（发布成功后页面会跳转，_submit_publish 内部自带竞态容忍）
+             await self._submit_publish(page)
+ 
+             # 保存 cookie
+@@ -576,14 +620,18 @@ class BaiJiaHaoVideo(BaseVideoUploader):
+             if BAIJIAHAO_SUCCESS_URL_PREFIX in url or "/rc/content" in url or "/rc/home" in url:
+                 baijiahao_logger.success(_msg("🥳", "视频发布成功"))
+                 return
+-            # 检查是否出现百度安全验证
+-            if await page.locator('text="百度安全验证"').count():
+-                raise RuntimeError("出现百度安全验证，需人工处理")
+-            # 检查是否有错误提示阻止发布
+-            error_toast = page.locator('.cheetah-message-error, .cheetah-message-warning').first
+-            if await error_toast.count() and await error_toast.is_visible():
+-                err_text = await error_toast.inner_text()
+-                baijiahao_logger.warning(_msg("⚠️", f"发布提示: {err_text}"))
++            # 检查是否出现百度安全验证 / 错误提示。点击发布后页面随时可能整页
++            # 跳转，探测性 count() 命中导航竞态时跳过本轮即可，不能当作失败。
++            try:
++                if await page.locator('text="百度安全验证"').count():
++                    raise RuntimeError("出现百度安全验证，需人工处理")
++                error_toast = page.locator('.cheetah-message-error, .cheetah-message-warning').first
++                if await error_toast.count() and await error_toast.is_visible():
++                    err_text = await error_toast.inner_text()
++                    baijiahao_logger.warning(_msg("⚠️", f"发布提示: {err_text}"))
++            except Exception as exc:
++                if CONTEXT_DESTROYED not in str(exc):
++                    raise
+             await page.wait_for_timeout(1000)
+ 
+         # 超时后再检查一次

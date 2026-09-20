@@ -133,6 +133,24 @@ def test_publish_builds_sau_commands_for_all_platforms(tmp_path: Path) -> None:
     assert bili[bili.index("--tid") + 1] == str(BILIBILI_FINANCE_TID)
 
 
+def test_baijiahao_is_always_headed_even_in_headless_mode(tmp_path: Path) -> None:
+    """百度滑块风控在 headless 下必弹且无法人工通过（2026-09-20 实测），
+    百家号无视 publish.headless 强制 --headed。"""
+    commands: list[list[str]] = []
+    video = tmp_path / "video.mp4"
+    video.write_bytes(b"\x00\x00\x00\x18ftypmp42")
+    publisher = SauPublisher(
+        {"publish": {"platforms": ["baijiahao"], "headless": True,
+                     "preflight": False, "sau_dir": str(tmp_path / "nonexistent")}},
+        runner=fake_runner_factory(commands), sau_bin="sau",
+    )
+    report = publisher.publish(video, SCRIPT, "冰轮环境", "000811")
+
+    bj = commands[0]
+    assert "--headed" in bj and "--headless" not in bj
+    assert report["succeeded"] == ["baijiahao"]
+
+
 def test_ai_content_label_only_goes_to_platforms_that_need_it(tmp_path: Path) -> None:
     """快手/小红书靠 CLI 传选项文案；抖音、视频号自己勾选，B站写进简介。"""
     commands: list[list[str]] = []
@@ -295,7 +313,8 @@ def test_preflight_bilibili_command_has_no_headless_flag(tmp_path: Path) -> None
 
 
 def test_all_supported_platforms_have_labels_and_limits() -> None:
-    assert set(PLATFORM_LABELS) == {"douyin", "bilibili", "kuaishou", "xiaohongshu", "tencent"}
+    # 小红书 2026-09-18 停发但 spec 保留（能力在，默认配置不发）。
+    assert set(PLATFORM_LABELS) == {"douyin", "bilibili", "kuaishou", "xiaohongshu", "tencent", "baijiahao"}
 
 
 # ---------------------------------------------------------------------------

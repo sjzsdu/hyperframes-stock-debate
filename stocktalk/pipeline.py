@@ -21,7 +21,7 @@ from stocktalk.modules.cover import CoverGenerator
 from stocktalk.modules.dialogue_generator import DialogueGenerator
 from stocktalk.modules.hyperframes_builder import HyperFramesBuilder
 from stocktalk.modules.publisher import PLATFORM_LABELS, SauPublisher, cover_sizes_for
-from stocktalk.modules.stock_data import StockDataClient, StockDataConfig
+from stocktalk.modules.stock_data import StockDataClient, StockDataConfig, StockDataIncompleteError
 from stocktalk.modules.tts_agent import TTSAgent
 
 
@@ -64,6 +64,7 @@ class Pipeline:
             timeout_seconds=self.config.get("stock_data", {}).get("timeout_seconds", 60.0),
             news_limit=int(self.config.get("stock_data", {}).get("news_limit", 12)),
             news_days=int(self.config.get("stock_data", {}).get("news_days", 0)),
+            require_company_data=bool(self.config.get("stock_data", {}).get("require_company_data", True)),
         ))
         self.dialogue_gen = DialogueGenerator(self.config)
         self.compliance = ComplianceAgent(self.config)
@@ -105,10 +106,26 @@ class Pipeline:
         """Render cover art on its own, without a full generation run.
 
         ``--publish-only`` / ``--republish`` may fire on a video that was
-        rendered without ever publishing, so no cover exists yet. The template
-        tolerates a bare quote, which is all we can supply this late.
+        rendered without ever publishing, so no cover exists yet.  A cover
+        with an empty chart and no price row shipped to douyin/kuaishou looks
+        broken (2026-09-19 user report), so re-fetch the live quote/kline —
+        all the template needs and cheap compared to a full run — and only
+        fall back to a bare name if tongstock is unreachable.
         """
-        return self._render_covers({"quote": {"name": stock_name}}, script, stock_code, tag)
+        quote: dict[str, Any] = {"name": stock_name}
+        technical: dict[str, Any] = {}
+        try:
+            fetched = dict(self.stock_client.get_quote(stock_code) or {})
+            quote = {key: value for key, value in fetched.items() if value not in (None, "")}
+            # 走势曲线与最高/最低取自指标历史（cover.py `_bars`），不是 kline。
+            technical = self.stock_client.get_indicators(stock_code, count=60)
+            # 盘前/盘后 quote 常缺 change_pct，从指标历史补（与全量生成同源）。
+            self.stock_client._enrich_quote(quote, technical)
+        except Exception as exc:
+            self.console.print(f"[yellow]封面行情补抓失败（{exc}），封面将缺价格与走势图[/yellow]")
+        quote.setdefault("name", stock_name)
+        stock_data = {"quote": quote, "technical": technical}
+        return self._render_covers(stock_data, script, stock_code, tag)
 
     def _retry(self, stage: str, operation: Callable[[], T]) -> T:
         """Retry a remote LLM/TTS operation with capped exponential backoff."""
@@ -208,8 +225,12 @@ class Pipeline:
                 stock_data = self.stock_client.get_stock_data(stock_code)
                 if stock_name:
                     stock_data.setdefault("quote", {})["name"] = stock_name
+            except StockDataIncompleteError as exc:
+                # Already explains itself and what to do about it — pass it
+                # through verbatim instead of wrapping it in generic wording.
+                raise PipelineError(str(exc)) from exc
             except Exception as exc:
-                raise PipelineError(f"Stock data retrieval failed: {exc}") from exc
+                raise PipelineError(f"个股数据获取失败：{exc}") from exc
             progress.advance(task)
 
             progress.update(task, description="Generating debate script (may take ~1 min)")

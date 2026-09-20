@@ -21,9 +21,11 @@ class HyperFramesBuildError(RuntimeError):
 Runner = Callable[[Sequence[str], Path], subprocess.CompletedProcess[str]]
 
 # One-line captions: the spoken line is split at punctuation so every caption
-# fits a single row of the 968px caption strip at 46px (~19 CJK chars).  18
-# leaves a safety margin for punctuation and latin runs.
-CAPTION_MAX_CHARS = 18
+# fits a single row.  Horizontal: 22 chars at ~40px in a 1220px strip.
+# Vertical: 14 chars at 46px (~644px + 72px inner padding) fits whatever side
+# inset is in force — the strip has been 720px (180×2), 880px (100×2) and
+# 1030px (25×2) wide across the 2026-09 layout rounds (2026-09-18/19).
+CAPTION_MAX_CHARS = 14
 CAPTION_BREAKS = "，。；！？、：,.!?;:"
 # Punctuation that ends a sentence — never merge a chunk across one of these.
 CAPTION_SENTENCE_ENDS = "。；！？.!?;"
@@ -32,11 +34,16 @@ CAPTION_SENTENCE_ENDS = "。；！？.!?;"
 # the author row on top and the caption / action bar at the bottom, so content
 # laid out to the very edge gets covered once it is live.  Values are pixels on
 # the 1080×1920 vertical and 1920×1080 horizontal canvases.
-DEFAULT_SAFE_AREA: dict[str, tuple[int, int]] = {"vertical": (240, 460), "horizontal": (60, 100)}
-# Side inset.  小红书 keeps its controls on the bottom bar, but 抖音 stacks
-# like / comment / share down the right edge, so a vertical cut meant for 抖音
-# wants ~120 here.
-DEFAULT_SAFE_SIDE: dict[str, int] = {"vertical": 56, "horizontal": 70}
+DEFAULT_SAFE_AREA: dict[str, tuple[int, int]] = {"vertical": (240, 460), "horizontal": (120, 100)}
+# Side inset (left, right).  抖音/快手 stack like / comment / share down the
+# RIGHT edge of a vertical cut, so small insets risk sitting under that overlay
+# (56 was covered, 2026-09-18 user feedback) — but 100×2 read as huge empty
+# bands on screen (2026-09-19), and the user chose width over overlay margin:
+# 25 both sides (a quarter of 100) keeps a 1030px content column.  If a live
+# publish shows the right-edge chart labels under the action bar, raise the
+# right side via config `video.safe_area.vertical.side_right`.  Horizontal
+# cuts only clear the progress bar, so 70 both sides is enough.
+DEFAULT_SAFE_SIDE: dict[str, tuple[int, int]] = {"vertical": (25, 25), "horizontal": (70, 70)}
 
 # Discussion topics, detected from the dialogue text itself. The first matching
 # entry wins, so specific topics precede generic ones.
@@ -52,12 +59,59 @@ TOPICS: dict[str, tuple[str, tuple[str, ...]]] = {
     "outlook": ("后市关注", ("接下来", "未来", "后续", "观察", "验证", "催化剂", "展望", "预期差", "跟踪")),
 }
 
+# Board membership is derived from the symbol prefix, which is the only
+# classification available without an F10 feed (that endpoint is not installed
+# in every tongstock release).  Order matters: longer prefixes first.
+BOARD_RULES: tuple[tuple[tuple[str, ...], str, str], ...] = (
+    (("688", "689"), "科创板", "科创"),
+    (("300", "301", "302"), "创业板", "创业"),
+    (("600", "601", "603", "605"), "沪市主板", "沪主板"),
+    (("000", "001", "002", "003"), "深市主板", "深主板"),
+    (("43", "83", "87", "88", "920"), "北交所", "北交所"),
+)
+
+# How many days each "性格" tag looks back over.  Kept short so a 60-day K-line
+# (the default fetch) always covers them.
+IDENTITY_WINDOWS: tuple[tuple[int, str], ...] = ((5, "近5日"), (20, "近20日"))
+
 
 @dataclass(frozen=True)
 class HyperFramesProject:
     directory: Path
     composition_path: Path
     duration: float
+
+
+@dataclass(frozen=True)
+class StockIdentity:
+    """The per-stock fingerprint that keeps two runs from looking identical.
+
+    Everything here is derived from data the provider actually returned: the
+    symbol prefix decides the board, and the K-line decides the temperament
+    tags.  When the K-line is missing the tags list is simply empty and the
+    template falls back to the plain board badge, so a thin data day degrades
+    to a plainer card instead of inventing numbers.
+    """
+
+    board: str
+    board_short: str
+    tags: tuple[dict[str, str], ...]
+    hook: str
+    hue: int
+
+    @property
+    def accent(self) -> str:
+        """Ambient accent for this symbol — hue-shifted, never a signal colour.
+
+        Red/green stay reserved for 涨/跌 semantics, so this only ever tints the
+        backdrop: two symbols look different, but a viewer can still read the
+        candles and the quote panel the same way.
+        """
+        return f"hsl({self.hue} 72% 62%)"
+
+    @property
+    def accent_soft(self) -> str:
+        return f"hsl({self.hue} 72% 62% / .16)"
 
 
 def split_caption_lines(line: str, max_chars: int = CAPTION_MAX_CHARS) -> list[str]:
@@ -135,26 +189,42 @@ class HyperFramesBuilder:
         self.subtitle_mode = self._subtitle_mode(self.video_config.get("subtitles"))
         self.subtitles = self.subtitle_mode != "off"
         # A one-line caption strip has to fit the stage width: the vertical
-        # column is 968px at 46px/char, the horizontal one 1220px at 34px.
-        self.caption_max_chars = 22 if self.layout == "horizontal" else 18
+        # strip is 1030px at 25×2 insets (CAPTION_MAX_CHARS=14 uses ~716px of
+        # it), the horizontal one 1220px at 34px.
+        self.caption_max_chars = 22 if self.layout == "horizontal" else CAPTION_MAX_CHARS
         # Insets the platform's own player UI will cover: a vertical feed puts
         # the author row on top and the caption + action bar at the bottom.
         self.safe_top, self.safe_bottom = self._safe_area(self.video_config.get("safe_area"))
-        self.safe_side = self._safe_side(self.video_config.get("safe_area"))
+        self.safe_side_left, self.safe_side_right = self._safe_sides(self.video_config.get("safe_area"))
         self._runner = runner or self._run_subprocess
 
-    def _safe_side(self, raw: Any) -> int:
-        """Resolve the left/right inset kept clear of the platform UI."""
-        side = DEFAULT_SAFE_SIDE.get(self.layout, 0)
+    def _safe_sides(self, raw: Any) -> tuple[int, int]:
+        """Resolve the left/right insets kept clear of the platform UI.
+
+        Vertical platform overlays (like/comment/share) hug the right edge
+        only, so the two sides resolve independently.  Config accepts a
+        symmetric ``side`` or separate ``side_left`` / ``side_right``.
+        """
+        left, right = DEFAULT_SAFE_SIDE.get(self.layout, (0, 0))
         if isinstance(raw, Mapping):
             per_canvas = raw.get(self.layout)
             source = per_canvas if isinstance(per_canvas, Mapping) else raw
-            if isinstance(source, Mapping) and "side" in source:
-                try:
-                    side = int(source["side"])
-                except (TypeError, ValueError):
-                    pass
-        return max(0, min(int(side), self.canvas_width // 6))
+            if isinstance(source, Mapping):
+                symmetric = source.get("side")
+                if isinstance(symmetric, (int, float)):
+                    left = right = int(symmetric)
+                for key, current in (("side_left", left), ("side_right", right)):
+                    if key in source:
+                        try:
+                            value = int(source[key])
+                        except (TypeError, ValueError):
+                            continue
+                        if key == "side_left":
+                            left = value
+                        else:
+                            right = value
+        limit = self.canvas_width // 4
+        return max(0, min(int(left), limit)), max(0, min(int(right), limit))
 
     def _safe_area(self, raw: Any) -> tuple[int, int]:
         """Resolve per-canvas insets (top, bottom) reserved for platform UI.
@@ -527,6 +597,122 @@ class HyperFramesBuilder:
         for name in ("stock-debate.css", "stock-debate.js", "gsap.min.js"):
             shutil.copyfile(self._asset_dir / name, directory / name)
 
+    @staticmethod
+    def _board(code: str) -> tuple[str, str]:
+        """Map a symbol to its board from the prefix alone."""
+        symbol = str(code or "").strip()
+        for prefixes, full, short in BOARD_RULES:
+            if symbol.startswith(prefixes):
+                return full, short
+        return "A股", "A股"
+
+    def _identity(self, code: str, bars: Sequence[Any], quote: Mapping[str, Any]) -> StockIdentity:
+        """Derive the per-stock fingerprint from real quote and K-line data.
+
+        Every tag is a measured number (interval change, range, streak, volume
+        ratio) — none of them are opinions, and none of them touch the
+        compliance red lines, so the card stays informative without reading as
+        a recommendation.  A missing or too-short K-line yields no tags at all.
+        """
+        board, board_short = self._board(code)
+        closes = [self._float(bar.get("close"), float("nan"))
+                  for bar in bars if isinstance(bar, Mapping)]
+        closes = [value for value in closes if math.isfinite(value) and value > 0]
+        tags: list[dict[str, str]] = []
+        if len(closes) >= 6:
+            last = closes[-1]
+            for window, label in IDENTITY_WINDOWS:
+                if len(closes) <= window:
+                    continue
+                base = closes[-1 - window]
+                if base <= 0:
+                    continue
+                change = (last / base - 1) * 100
+                tags.append({"label": label, "value": f"{change:+.1f}%",
+                             "tone": "up" if change > 0 else ("down" if change < 0 else "")})
+                break  # the shortest window present is the freshest read
+            window_values = closes[-60:]
+            floor, top = min(window_values), max(window_values)
+            if floor > 0:
+                swing = (top / floor - 1) * 100
+                tags.append({"label": f"{len(window_values)}日振幅", "value": f"{swing:.0f}%", "tone": ""})
+            streak = self._close_streak(closes)
+            if streak:
+                direction, length = streak
+                tags.append({"label": "连阳" if direction > 0 else "连阴",
+                             "value": f"{length}天", "tone": "up" if direction > 0 else "down"})
+            ratio = self._volume_ratio(bars)
+            if ratio is not None:
+                tags.append({"label": "量能", "value": f"{ratio:.1f}×",
+                             "tone": "up" if ratio >= 1 else "down"})
+        hook = self._identity_hook(board, tags, quote)
+        return StockIdentity(board=board, board_short=board_short,
+                             tags=tuple(tags[:4]), hook=hook, hue=self._hue(code))
+
+    @staticmethod
+    def _close_streak(closes: list[float]) -> tuple[int, int] | None:
+        """Count the run of consecutive up (or down) closes ending today."""
+        if len(closes) < 3:
+            return None
+        direction = 0
+        length = 0
+        # Take the tail first, then pair neighbours: slicing both sides with
+        # negative offsets (closes[-12:-1] vs closes[-11:]) clamps to the same
+        # start on a short series, which silently compares each close to itself.
+        window = closes[-12:]
+        for previous, current in zip(window[:-1], window[1:]):
+            step = 1 if current > previous else (-1 if current < previous else 0)
+            if step == 0:
+                continue
+            if step != direction:
+                direction, length = step, 1
+            else:
+                length += 1
+        if direction == 0 or length < 2:
+            return None
+        return direction, length
+
+    @classmethod
+    def _volume_ratio(cls, bars: Sequence[Any]) -> float | None:
+        """Recent volume versus the earlier baseline, when volume is present."""
+        values = [cls._float(bar.get("volume"), float("nan"))
+                  for bar in bars if isinstance(bar, Mapping)]
+        values = [value for value in values if math.isfinite(value) and value > 0]
+        if len(values) < 12:
+            return None
+        recent = values[-5:]
+        baseline = values[-25:-5] or values[:-5]
+        if not baseline:
+            return None
+        mean_recent = sum(recent) / len(recent)
+        mean_base = sum(baseline) / len(baseline)
+        if mean_base <= 0:
+            return None
+        return mean_recent / mean_base
+
+    def _identity_hook(self, board: str, tags: Sequence[Mapping[str, str]], quote: Mapping[str, Any]) -> str:
+        """One opening line built from whatever the provider actually returned."""
+        change = self._float(quote.get("change_pct"), float("nan"))
+        if math.isfinite(change) and change != 0:
+            direction = "涨" if change > 0 else "跌"
+            return f"{board} · 今日{direction} {abs(change):.2f}%"
+        if tags:
+            return f"{board} · {tags[0]['label']} {tags[0]['value']}"
+        return f"{board} · 一起看看这门生意"
+
+    @staticmethod
+    def _hue(code: str) -> int:
+        """A stable hue per symbol, so each run has its own ambient colour.
+
+        Deterministic (same symbol = same hue, every run and every machine) and
+        nudged off the red/green band so the ambience never competes with the
+        涨/跌 semantics.
+        """
+        digest = 0
+        for char in str(code or ""):
+            digest = (digest * 31 + ord(char)) & 0xFFFFFFFF
+        return 190 + (digest % 130)  # 190–319: cyan → blue → violet
+
     def _html(self, stock: Mapping[str, Any], segments: list[Mapping[str, Any]], duration: float) -> str:
         quote = stock.get("quote", {}) if isinstance(stock.get("quote"), Mapping) else {}
         financials = stock.get("financials", {}) if isinstance(stock.get("financials"), Mapping) else {}
@@ -539,17 +725,26 @@ class HyperFramesBuilder:
         if not history:
             history = self._real_close_bars(technical)
         visuals = self._visuals(quote, financials, history, f10, technical, news)
-        rendered_segments = [dict(segment,
-                                  visual=self._turn_board_svg(segment, quote, history, technical, news))
-                             for segment in segments]
+        # One shared "already shown" set: within a single video the chart
+        # library rotates, so the five turns don't all draw the same candles.
+        used_charts: set[str] = set()
+        chart_history: list[str] = []
+        rendered_segments = [
+            dict(segment,
+                 visual=self._turn_board_svg(segment, quote, history, technical, news,
+                                             financials, f10, used_charts, chart_history))
+            for segment in segments]
         slots = self._slots(rendered_segments, duration)
         stock_name = str(quote.get("name") or stock.get("name") or stock.get("code") or "股票")
+        identity = self._identity(stock.get("code") or quote.get("code") or "", history, quote)
         env = Environment(loader=FileSystemLoader(self._asset_dir), autoescape=select_autoescape(("html", "xml")))
         return env.get_template("index.html.j2").render(
             name=self._text(stock_name),
             code=self._text(stock.get("code") or quote.get("code") or ""),
             price_line=self._quote_line(quote),
             price_tone=self._price_tone(quote),
+            headline_stats=self._headline_stats(stock.get("stockinfo")),
+            identity=identity,
             outro_title=self._text(f"以上就是{stock_name}的生意观察"),
             outro_tip="行情会变，生意逻辑才是主线——下次再一起跟踪验证",
             outro_svg=visuals["outro"],
@@ -562,7 +757,8 @@ class HyperFramesBuilder:
             canvas_height=self.canvas_height,
             safe_top=self.safe_top,
             safe_bottom=self.safe_bottom,
-            safe_side=self.safe_side,
+            safe_side_left=self.safe_side_left,
+            safe_side_right=self.safe_side_right,
             stage_in=self.STAGE_IN,
             financials=self._financials(quote, financials, technical),
             chart=self._candles(history),
@@ -603,6 +799,23 @@ class HyperFramesBuilder:
         if math.isfinite(change):
             parts.append(f"涨跌幅 {change:+.2f}%")
         return "　".join(parts)
+
+    @staticmethod
+    def _headline_stats(stockinfo: Any) -> list[tuple[str, str]]:
+        """总市值 / 换手率 for the headline's right side — fills the dead band
+        right of the stock name with real, unit-verified stockinfo metrics.
+        Missing stockinfo simply renders nothing (never a placeholder)."""
+        metrics = stockinfo.get("metrics") if isinstance(stockinfo, Mapping) and isinstance(stockinfo.get("metrics"), Mapping) else {}
+        stats: list[tuple[str, str]] = []
+        for label in ("总市值(亿元)", "市值(亿元)"):
+            value = HyperFramesBuilder._float(metrics.get(label), float("nan"))
+            if math.isfinite(value) and value > 0:
+                stats.append((label.replace("(亿元)", ""), f"{value:,.2f}亿"))
+                break
+        turnover = HyperFramesBuilder._float(metrics.get("换手率(%)"), float("nan"))
+        if math.isfinite(turnover) and turnover > 0:
+            stats.append(("换手率", f"{turnover:.2f}%"))
+        return stats
 
     @staticmethod
     def _price_tone(quote: Mapping[str, Any]) -> str:
@@ -661,12 +874,18 @@ class HyperFramesBuilder:
         drawn; otherwise the real close-price line is drawn instead — never a
         synthetic candle shape.
         """
+        # Opening panels are wider than tall on both canvases (horizontal
+        # ≈3.3:1, vertical ≈2.6:1 after the 2026-09-19 asymmetric side insets);
+        # a 760-wide SVG floats between dead margins.  Stretch per canvas and
+        # let the candles spread.
+        W = 1340 if self.layout == "horizontal" else 900
+        left, right = 30.0, float(W - 30)
         data = [x for x in bars if isinstance(x, Mapping)][-60:] if isinstance(bars, list) else []
         if len(data) < 2:
-            return self._empty_svg(760, 410, "价格走势")
+            return self._empty_svg(W, 410, "价格走势")
         close_values = [self._float(x.get("close"), float("nan")) for x in data]
         if not all(math.isfinite(value) for value in close_values):
-            return self._empty_svg(760, 410, "价格走势")
+            return self._empty_svg(W, 410, "价格走势")
         # Candles only when every bar carries genuine OHLC; otherwise a close
         # line, so the chart never invents open/high/low or volume shapes.
         has_ohlc = all(
@@ -680,18 +899,18 @@ class HyperFramesBuilder:
         floor, top = min(lows), max(highs)
         spread = max(top - floor, max(abs(top) * .03, .01))
         y = lambda v: 340 - ((v - floor) / spread) * 300
-        step = 700 / len(data)
-        out = ['<path class="axis draw-line" d="M30 20H730M30 180H730M30 340H730"/>']
+        step = (right - left) / len(data)
+        out = [f'<path class="axis draw-line" d="M{left:g} 20H{right:g}M{left:g} 180H{right:g}M{left:g} 340H{right:g}"/>']
         closes: list[str] = []
         dates = [str(x.get("date") or x.get("timestamp") or "") for x in data]
         max_volume = max((self._float(x.get("volume"), 0) for x in data), default=0) or 0
         has_volume = max_volume > 0
         highlight_from = len(data) - max(4, len(data) // 4)
         if highlight_last:
-            out.append(f'<rect class="discussion-range" x="{30 + highlight_from * step:.1f}" y="20" width="{(len(data) - highlight_from) * step:.1f}" height="320"/>')
+            out.append(f'<rect class="discussion-range" x="{left + highlight_from * step:.1f}" y="20" width="{(len(data) - highlight_from) * step:.1f}" height="320"/>')
         for i, x in enumerate(data):
             cl = close_values[i]
-            px = 30 + (i + .5) * step
+            px = left + (i + .5) * step
             closes.append(f"{px:.1f},{y(cl):.1f}")
             if not has_ohlc:
                 continue
@@ -706,59 +925,102 @@ class HyperFramesBuilder:
         for index in {0, len(dates) // 2, len(dates) - 1}:
             if dates[index]:
                 label = dates[index][5:] if len(dates[index]) >= 10 else dates[index]
-                out.append(f'<text class="svg-axis" x="{30 + (index + .5) * step:.1f}" y="366" text-anchor="middle">{html.escape(label)}</text>')
+                out.append(f'<text class="svg-axis" x="{left + (index + .5) * step:.1f}" y="366" text-anchor="middle">{html.escape(label)}</text>')
         # A股配色：无 OHLC 时的收盘折线按区间涨跌着色（红涨绿跌）。
         direction = "up" if close_values[-1] >= close_values[0] else "down"
         line_class = "ma draw-line" if has_ohlc else f"close-line draw-line {direction}"
-        return '<svg viewBox="0 0 760 410" role="img" aria-label="价格走势（真实行情数据）">' + ''.join(out) + f'<polyline class="{line_class}" points="{" ".join(closes)}"/></svg>'
+        return f'<svg viewBox="0 0 {W} 410" role="img" aria-label="价格走势（真实行情数据）">' + ''.join(out) + f'<polyline class="{line_class}" points="{" ".join(closes)}"/></svg>'
 
     # ------------------------------------------------------------------
     # Per-turn talking-point board
     # ------------------------------------------------------------------
     def _turn_board_svg(self, segment: Mapping[str, Any], quote: Mapping[str, Any],
-                        bars: list[Any], technical: Mapping[str, Any], news: Mapping[str, Any] | None) -> str:
+                        bars: list[Any], technical: Mapping[str, Any], news: Mapping[str, Any] | None,
+                        financials: Mapping[str, Any] | None = None, f10: Mapping[str, Any] | None = None,
+                        used_charts: set[str] | None = None,
+                        chart_history: list[str] | None = None) -> str:
         """A visual unique to the spoken turn: the real facts the line mentions
-        (left) plus an annotated real mini K-line (right).
+        plus a topic-matched chart.
 
-        Replaces the old one-SVG-per-topic card, which repeated the same graphic
-        for every turn classified to the same topic.
+        The chart rotates through the chart library — business mindmap,
+        revenue-composition bars, profit waterfall, news timeline, mini K-line —
+        so consecutive turns don't all look like the same candlestick chart.
+        Horizontal boards are wide, so facts sit in a left column beside the
+        chart; vertical panels are taller than wide, so the board STACKS — a
+        facts strip across the top, the chart below at full width (2026-09-19
+        user feedback: the side-by-side split crushed the chart into a narrow
+        right column).
         """
         line = str(segment.get("line") or "")
         topic = str(segment.get("topic") or "industry")
         topic_title = html.escape(str(segment.get("topic_title") or "公司与行业"))
         facts = self._turn_facts(line, quote, bars, technical)
-        W, H = 1160, 500
+        # Horizontal panels are height-bound (inner ≈1394×356, aspect 3.9): a
+        # 1160-wide board floats between dead margins.  Stretch the board to
+        # match the panel aspect so charts spread out instead.  Vertical panels
+        # are ≈820×576 (aspect 1.4), so the stacked board is 1160×800.
+        stacked = self.layout != "horizontal"
+        W, H = (1160, 800) if stacked else (1956, 500)
+        _, zone_right = self._chart_zone()
         parts = [f'<svg viewBox="0 0 {W} {H}" role="img" aria-label="{topic_title}·真实数据">']
-        # divider between fact zone and chart zone
-        parts.append('<line x1="392" y1="24" x2="392" y2="476" stroke="rgba(101,151,196,.22)" stroke-width="1"/>')
         # header kicker
         parts.append('<circle cx="36" cy="42" r="5" fill="#ffd166"/>')
         parts.append(f'<text x="52" y="50" class="snap-label" style="font-size:20px;letter-spacing:2px">{topic_title}</text>')
-        # fact blocks
-        y = 104
-        for fact in facts[:3]:
-            parts.append(f'<text x="34" y="{y}" class="snap-label" style="font-size:19px">{html.escape(fact["label"])}</text>')
-            value = html.escape(fact["value"])
-            parts.append(f'<text x="34" y="{y + 56}" class="snap-value {fact.get("tone","")}" style="font-size:44px">{value}</text>')
-            if fact.get("sub"):
-                parts.append(f'<text x="34" y="{y + 88}" class="snap-label" style="font-size:16px">{html.escape(fact["sub"])}</text>')
-            y += 132
-        if not facts:
-            parts.append('<text x="34" y="170" class="snap-label" style="font-size:20px">真实行情数据</text>')
-        # right body
         keywords = [str(k).strip() for k in (segment.get("keywords") or []) if str(k).strip()]
-        if topic == "news":
-            parts.append(self._turn_news_body(news or {}))
-        else:
-            parts.append(self._mini_chart_body(bars, topic, quote, keywords))
+        ctx = {"bars": bars, "quote": quote, "keywords": keywords,
+               "f10": f10 if isinstance(f10, Mapping) else {},
+               "financials": financials if isinstance(financials, Mapping) else {},
+               "news": news if isinstance(news, Mapping) else {}}
+        chart = self._turn_chart(topic, used_charts if used_charts is not None else set(),
+                                 ctx, chart_history if chart_history is not None else [])
         # Speech-tied focus caption: guarantees each turn's card is distinct and
         # visibly tied to exactly what is being said (keywords are LLM labels,
         # never fabricated numbers).
+        focus_row = ""
         if topic != "news" and keywords:
             focus = " · ".join(keywords[:2])[:30]
-            parts.append(f'<text x="442" y="478" fill="#ffd166" font-size="18" font-weight="700">◆ 讨论点</text>')
-            parts.append(f'<text x="536" y="478" fill="#dbe7f5" font-size="18">{html.escape(focus)}</text>')
-        parts.append('<text x="1130" y="492" text-anchor="end" class="snap-label" style="font-size:14px">数据来源：通达信实时行情</text>')
+            focus_row = ('<text x="34" y="{y}" fill="#ffd166" font-size="18" font-weight="700">◆ 讨论点</text>'
+                         '<text x="128" y="{y}" fill="#dbe7f5" font-size="18">{focus}</text>').format(
+                             y=786 if stacked else 478, focus=html.escape(focus))
+        if stacked:
+            # facts as a horizontal strip: up to three label/value columns
+            col_x = 34
+            for fact in facts[:3]:
+                parts.append(f'<text x="{col_x}" y="106" class="snap-label" style="font-size:19px">{html.escape(fact["label"])}</text>')
+                value = html.escape(fact["value"])
+                parts.append(f'<text x="{col_x}" y="164" class="snap-value {fact.get("tone","")}" style="font-size:44px">{value}</text>')
+                if fact.get("sub"):
+                    parts.append(f'<text x="{col_x}" y="198" class="snap-label" style="font-size:16px">{html.escape(fact["sub"])}</text>')
+                col_x += 330
+            if not facts:
+                parts.append('<text x="34" y="134" class="snap-label" style="font-size:20px">真实行情数据</text>')
+            # divider under the facts strip, chart below at full width.
+            parts.append('<line x1="24" y1="226" x2="1136" y2="226" stroke="rgba(101,151,196,.22)" stroke-width="1"/>')
+            # Charts draw in their own 0-500 local space; a NESTED <svg y=...>
+            # shifts it under the strip.  Deliberately NOT <g transform>:
+            # transform is a presentation attribute, so any CSS like
+            # `.clip * { transform: none }` (animation-neutralising in
+            # screenshot verification) would silently flatten the offset.
+            parts.append(f'<svg x="0" y="246" width="{W}" height="500" overflow="visible">{chart}</svg>')
+            parts.append(focus_row)
+            parts.append(f'<text x="{W - 34}" y="786" text-anchor="end" class="snap-label" style="font-size:14px">数据来源：通达信实时行情</text>')
+        else:
+            # divider between fact zone and chart zone
+            parts.append('<line x1="392" y1="24" x2="392" y2="476" stroke="rgba(101,151,196,.22)" stroke-width="1"/>')
+            # fact blocks
+            y = 104
+            for fact in facts[:3]:
+                parts.append(f'<text x="34" y="{y}" class="snap-label" style="font-size:19px">{html.escape(fact["label"])}</text>')
+                value = html.escape(fact["value"])
+                parts.append(f'<text x="34" y="{y + 56}" class="snap-value {fact.get("tone","")}" style="font-size:44px">{value}</text>')
+                if fact.get("sub"):
+                    parts.append(f'<text x="34" y="{y + 88}" class="snap-label" style="font-size:16px">{html.escape(fact["sub"])}</text>')
+                y += 132
+            if not facts:
+                parts.append('<text x="34" y="170" class="snap-label" style="font-size:20px">真实行情数据</text>')
+            parts.append(chart)
+            parts.append(focus_row)
+            parts.append(f'<text x="{W - 34}" y="492" text-anchor="end" class="snap-label" style="font-size:14px">数据来源：通达信实时行情</text>')
         parts.append('</svg>')
         return ''.join(parts)
 
@@ -831,12 +1093,14 @@ class HyperFramesBuilder:
     def _mini_chart_body(self, bars: list[Any], topic: str, quote: Mapping[str, Any],
                          keywords: list[str] | None = None) -> str:
         """Real last-40-bar candle/close chart with a topic-driven annotation."""
-        X0, X1, TOP, BOT = 438, 1130, 78, 392
+        zone_left, zone_right = self._chart_zone()
+        X0, X1, TOP, BOT = zone_left - 4, zone_right + 4, 78, 392
         data = [b for b in bars if isinstance(b, Mapping)][-40:] if isinstance(bars, list) else []
         closes = [self._float(b.get("close"), float("nan")) for b in data]
         closes = [c for c in closes if math.isfinite(c)]
         if not data or not closes:
-            return ('<text x="784" y="250" text-anchor="middle" class="snap-label" style="font-size:22px">'
+            cx = (zone_left + zone_right) / 2
+            return (f'<text x="{cx:g}" y="250" text-anchor="middle" class="snap-label" style="font-size:22px">'
                     '暂无K线数据</text>')
         has_ohlc = all(math.isfinite(self._float(b.get("open"), float("nan")))
                        and math.isfinite(self._float(b.get("high"), float("nan")))
@@ -848,10 +1112,10 @@ class HyperFramesBuilder:
         def y(v: float) -> float: return BOT - ((v - floor) / spread) * (BOT - TOP)
         n = len(data)
         step = (X1 - X0) / n
-        out = ['<line x1="438" y1="392" x2="1130" y2="392" stroke="rgba(101,151,196,.28)"/>']
+        out = [f'<line x1="{X0:g}" y1="392" x2="{X1:g}" y2="392" stroke="rgba(101,151,196,.28)"/>']
         for g in (0.25, 0.5, 0.75):
             gy = TOP + (BOT - TOP) * g
-            out.append(f'<line x1="438" y1="{gy:.0f}" x2="1130" y2="{gy:.0f}" stroke="rgba(101,151,196,.10)"/>')
+            out.append(f'<line x1="{X0:g}" y1="{gy:.0f}" x2="{X1:g}" y2="{gy:.0f}" stroke="rgba(101,151,196,.10)"/>')
         volumes = [self._float(b.get("volume"), 0) for b in data]
         max_vol = max(volumes, default=0) or 0
         for i, b in enumerate(data):
@@ -876,8 +1140,8 @@ class HyperFramesBuilder:
         # latest-price marker
         last_px = X0 + (n - .5) * step
         last_y = y(closes[-1])
-        out.append(f'<line x1="438" y1="{last_y:.1f}" x2="1122" y2="{last_y:.1f}" stroke="#ffd166" stroke-dasharray="4 4" opacity=".7"/>')
-        out.append(f'<text x="1126" y="{last_y + 5:.1f}" text-anchor="end" fill="#ffd166" font-size="17" font-weight="700">{closes[-1]:,.2f}</text>')
+        out.append(f'<line x1="{X0:g}" y1="{last_y:.1f}" x2="{X1 - 8:g}" y2="{last_y:.1f}" stroke="#ffd166" stroke-dasharray="4 4" opacity=".7"/>')
+        out.append(f'<text x="{zone_right:g}" y="{last_y + 5:.1f}" text-anchor="end" fill="#ffd166" font-size="17" font-weight="700">{closes[-1]:,.2f}</text>')
         # topic-specific highlight
         if topic == "risk":
             trough_i = min(range(n), key=lambda i: closes[i])
@@ -902,14 +1166,359 @@ class HyperFramesBuilder:
         # header readout
         interval = (closes[-1] / closes[0] - 1) * 100 if closes[0] else 0.0
         itone = "#ff7188" if interval >= 0 else "#5ee0a7"
-        out.append(f'<text x="442" y="52" fill="#91a8bf" font-size="17">近{n}个交易日 · 真实日K</text>')
-        out.append(f'<text x="1126" y="52" text-anchor="end" fill="{itone}" font-size="20" font-weight="800">{interval:+.2f}%</text>')
+        out.append(f'<text x="{zone_left:g}" y="52" fill="#91a8bf" font-size="17">近{n}个交易日 · 真实日K</text>')
+        out.append(f'<text x="{zone_right:g}" y="52" text-anchor="end" fill="{itone}" font-size="20" font-weight="800">{interval:+.2f}%</text>')
         # date labels
         dates = [str(b.get("date") or "") for b in data]
         for i in (0, n // 2, n - 1):
             if dates[i]:
                 label = dates[i][5:10] if len(dates[i]) >= 10 else dates[i]
                 out.append(f'<text x="{X0 + (i + .5) * step:.1f}" y="424" text-anchor="middle" fill="#91a8bf" font-size="15">{html.escape(label)}</text>')
+        return ''.join(out)
+
+    # ------------------------------------------------------------------
+    # Chart library — the right half of a turn board is no longer always a
+    # mini K-line.  Each topic has a candidate rotation; within one video a
+    # chart that was already shown is skipped while alternatives exist, so a
+    # finished video is a *mix* of charts instead of five identical candles.
+    # Every chart renders strictly from fetched data; a chart whose data is
+    # missing returns None and the next candidate takes over — nothing is
+    # ever invented to fill a slot.
+    # ------------------------------------------------------------------
+    CHART_ROTATION: dict[str, tuple[str, ...]] = {
+        "financial": ("mindmap", "composition", "waterfall", "working_capital"),
+        "sentiment": ("waterfall", "composition", "mindmap"),
+        "industry": ("ranking", "mindmap", "composition"),
+        "valuation": ("waterfall", "ranking", "composition"),
+        "money": ("kline",),
+        "technical": ("kline",),
+        "risk": ("working_capital", "waterfall", "composition", "kline"),
+        "outlook": ("kline", "waterfall"),
+        "news": ("timeline",),
+    }
+
+    # When a topic's own candidates are exhausted or data-less, borrow any chart
+    # the video has not shown yet before repeating the K-line.  Order = variety
+    # first.  timeline is excluded: for non-news turns it degrades to a
+    # "近期没有相关资讯" placeholder, which is worse than a repeated chart.
+    CHART_BORROW_ORDER: tuple[str, ...] = ("waterfall", "composition", "mindmap",
+                                           "working_capital", "ranking")
+
+    def _turn_chart(self, topic: str, used: set[str], ctx: Mapping[str, Any],
+                    chart_history: list[str] | None = None) -> str:
+        """Render the best available chart for this turn's topic.
+
+        Selection order: (1) an unused candidate of this topic whose data
+        exists; (2) any chart the video has not shown yet (borrow, keeps long
+        videos from collapsing back into wall-to-wall K-lines); (3) a used
+        candidate (repeat); (4) least-recently-used rotation — once every
+        chart type has appeared, cycle them again starting from whichever has
+        been off screen the longest, so a 12-turn video rotates instead of
+        spamming K-lines; (5) the real K-line whenever any bar data exists.
+        """
+        history = chart_history if chart_history is not None else []
+        candidates = list(self.CHART_ROTATION.get(topic) or ("kline",))
+        renderers = {
+            "kline": lambda: self._mini_chart_body(ctx["bars"], topic, ctx["quote"], ctx.get("keywords")),
+            "mindmap": lambda: self._business_mindmap_body(ctx["quote"], ctx["f10"]),
+            "composition": lambda: self._composition_bars_body(ctx["f10"]),
+            "waterfall": lambda: self._profit_waterfall_body(ctx["financials"]),
+            "timeline": lambda: self._news_timeline_body(ctx["news"]),
+            "working_capital": lambda: self._working_capital_body(ctx["financials"]),
+            "ranking": lambda: self._industry_rank_body(ctx["f10"]),
+        }
+
+        def attempt(name: str) -> str | None:
+            renderer = renderers.get(name)
+            body = renderer() if renderer else None
+            if body:
+                used.add(name)
+                # LRU bookkeeping: a re-use moves the chart to the back, so
+                # "oldest first" really means least recently shown.
+                if name in history:
+                    history.remove(name)
+                history.append(name)
+            return body
+
+        for name in candidates:
+            if name not in used:
+                body = attempt(name)
+                if body:
+                    return body
+        for name in self.CHART_BORROW_ORDER:
+            if name not in used and name not in candidates:
+                body = attempt(name)
+                if body:
+                    return body
+        for name in dict.fromkeys(history):
+            body = attempt(name)
+            if body:
+                return body
+        for name in candidates:
+            body = attempt(name)
+            if body:
+                return body
+        return self._mini_chart_body(ctx["bars"], topic, ctx["quote"], ctx.get("keywords"))
+
+    def _chart_zone(self) -> tuple[float, float]:
+        """X extent of the chart area inside the turn-board viewBox.
+
+        Vertical canvases are width-bound (board 1160 wide fills the panel);
+        horizontal canvases stretch the board to 1956, so the chart zone runs
+        to 1922 and every renderer spreads out instead of clustering left.
+        """
+        return (442.0, 1922.0) if self.layout == "horizontal" else (44.0, 1126.0)
+
+    def _svg_header(self, title: str, note: str = "", note_tone: str = "#91a8bf") -> str:
+        zone_left, zone_right = self._chart_zone()
+        out = [f'<text x="{zone_left:g}" y="54" fill="#91a8bf" font-size="24">{html.escape(title)}</text>']
+        if note:
+            out.append(f'<text x="{zone_right:g}" y="54" text-anchor="end" fill="{note_tone}" font-size="22">{html.escape(note)}</text>')
+        return ''.join(out)
+
+    @staticmethod
+    def _f10_profile(f10: Mapping[str, Any]) -> dict[str, Any]:
+        profile = f10.get("profile") if isinstance(f10.get("profile"), Mapping) else {}
+        return profile if isinstance(profile, Mapping) else {}
+
+    def _business_mindmap_body(self, quote: Mapping[str, Any], f10: Mapping[str, Any]) -> str | None:
+        """业务脑图：中心是公司，分支是主营构成里真实的业务块（含毛利率）。
+
+        主营构成不足两项时退而用 F10 概念标签当分支；两者都没有则返回 None
+        让下一个候选图表顶上。
+        """
+        profile = self._f10_profile(f10)
+        composition = profile.get("主营构成") if isinstance(profile.get("主营构成"), Mapping) else {}
+        rows = [dict(row) for row in composition.get("明细", []) if isinstance(row, Mapping)][:4]
+        from_composition = len(rows) >= 2
+        if not from_composition:
+            concepts = [str(c) for c in (profile.get("题材标签") or {}).get("概念", []) if str(c)][:4]
+            rows = [{"项目": name, "收入": "", "收入占比(%)": "", "毛利率(%)": ""} for name in concepts]
+        if len(rows) < 2:
+            return None
+        name = str(quote.get("name") or "该公司")
+        period = str(composition.get("报告期") or "")
+        header_note = f"主营构成 · {period}" if from_composition else "题材标签"
+        out = [self._svg_header(f"{name}业务拆解", header_note)]
+        zone_left, zone_right = self._chart_zone()
+        cx, cy = (zone_left + zone_right) / 2, 252
+        half = (zone_right - zone_left) / 2 - 214
+        spots = [(cx - half, 122), (cx - half, 386), (cx + half, 122), (cx + half, 386)]
+        # edges first so node boxes cover their endpoints
+        for nx, ny in spots:
+            out.append(f'<line x1="{cx}" y1="{cy}" x2="{nx}" y2="{ny}" stroke="rgba(105,183,255,.35)" stroke-width="1.6"/>')
+        out.append(f'<rect x="{cx - 128}" y="{cy - 44}" width="256" height="88" rx="24" fill="rgba(12,30,52,.95)" stroke="#ffd166" stroke-width="2"/>')
+        out.append(f'<text x="{cx}" y="{cy + 11}" text-anchor="middle" fill="#ffd166" font-size="32" font-weight="700">{html.escape(name[:8])}</text>')
+        for (nx, ny), row in zip(spots, rows):
+            label = str(row.get("项目") or "").replace("(产品)", "").replace("(地区)", "").replace("(销售模式)", "").strip()
+            share, margin = str(row.get("收入占比(%)") or ""), str(row.get("毛利率(%)") or "")
+            sub = " · ".join(part for part in (
+                f"收入占比 {share}%" if share not in ("", "0") else "",
+                f"毛利率 {margin}%" if margin else "") if part)
+            out.append(f'<rect x="{nx - 152}" y="{ny - 40}" width="304" height="80" rx="18" fill="rgba(12,30,52,.94)" stroke="rgba(105,183,255,.55)" stroke-width="1.6"/>')
+            out.append(f'<text x="{nx}" y="{ny - 2}" text-anchor="middle" fill="#dbe7f5" font-size="27" font-weight="700">{html.escape(label[:9])}</text>')
+            if sub:
+                out.append(f'<text x="{nx}" y="{ny + 28}" text-anchor="middle" fill="#91a8bf" font-size="19">{html.escape(sub[:24])}</text>')
+        return ''.join(out)
+
+    def _composition_bars_body(self, f10: Mapping[str, Any]) -> str | None:
+        """主营构成条形图：每行一根真实占比条，右端带收入额与毛利率。"""
+        composition = self._f10_profile(f10).get("主营构成")
+        composition = composition if isinstance(composition, Mapping) else {}
+        rows = [row for row in composition.get("明细", []) if isinstance(row, Mapping)]
+        parsed: list[tuple[str, float, str, str]] = []
+        for row in rows:
+            try:
+                share = float(str(row.get("收入占比(%)") or "").replace("%", ""))
+            except ValueError:
+                continue
+            if share <= 0:
+                continue
+            parsed.append((str(row.get("项目") or ""), share,
+                           str(row.get("收入") or ""), str(row.get("毛利率(%)") or "")))
+            if len(parsed) == 5:
+                break
+        if len(parsed) < 2:
+            return None
+        period = str(composition.get("报告期") or "")
+        out = [self._svg_header("钱从哪来 · 收入构成", f"报告期 {period}")]
+        zone_left, zone_right = self._chart_zone()
+        bar_x, row_h, y0 = 712, 76, 116
+        bar_max_w = max(300.0, zone_right - bar_x - 280.0)
+        revenue_right = zone_right - 130  # 毛利列右对齐于 zone_right、宽约 110px，金额最晚必须在这里收笔
+        top_share = max(share for _, share, _, _ in parsed)
+        tones = {"(产品)": "#6ab7ff", "(地区)": "#ffd166", "(销售模式)": "#5ee0a7"}
+
+        def text_w(value: str) -> float:
+            return sum(19.0 if ord(ch) > 0x2E7F else 10.5 for ch in value)
+
+        for index, (label, share, revenue, margin) in enumerate(parsed):
+            y = y0 + index * row_h
+            tone = next((color for suffix, color in tones.items() if label.endswith(suffix)), "#6ab7ff")
+            width = max(8.0, share / top_share * bar_max_w)
+            out.append(f'<text x="700" y="{y + 24}" text-anchor="end" fill="#dbe7f5" font-size="24">{html.escape(label[:11])}</text>')
+            out.append(f'<rect x="{bar_x}" y="{y}" width="{width:.1f}" height="34" rx="9" fill="{tone}" opacity=".82"/>')
+            if revenue:
+                shown = revenue[:8]
+                if bar_x + width + 12 + text_w(shown) <= revenue_right:
+                    out.append(f'<text x="{bar_x + width + 12:.1f}" y="{y + 24}" fill="#91a8bf" font-size="19">{html.escape(shown)}</text>')
+                else:
+                    # 条子太长时金额画进条内右端，绝不越过毛利列
+                    out.append(f'<text x="{bar_x + width - 10:.1f}" y="{y + 24}" text-anchor="end" fill="#0b1220" font-size="19" font-weight="600">{html.escape(shown)}</text>')
+            if margin:
+                # Right-aligned column: revenue text after the bar varies in
+                # width, and a running tail would clip at the SVG edge.
+                out.append(f'<text x="{zone_right:g}" y="{y + 24}" text-anchor="end" fill="#91a8bf" font-size="19">毛利 {html.escape(margin[:5])}%</text>')
+            out.append(f'<text x="{bar_x + width / 2:.1f}" y="{y + 58}" text-anchor="middle" fill="#dbe7f5" font-size="17">{share:.1f}%</text>')
+        return ''.join(out)
+
+    def _profit_waterfall_body(self, financials: Mapping[str, Any]) -> str | None:
+        """利润漏斗：营收 → 营业利润 → 利润总额 → 净利润。
+
+        Column count adapts to whichever of these finance fields exist (3–4).
+        主营利润(ZhuYingLiRun) is deliberately excluded: its 口径 disagrees with
+        the F10 主营构成 by an order of magnitude, and a funnel bar that claims
+        75% of revenue "evaporated" between two steps would be a lie on screen.
+        """
+        def metric(label: str) -> float | None:
+            value = financials.get(label)
+            try:
+                value = float(value)
+            except (TypeError, ValueError):
+                return None
+            return value if value > 0 else None
+
+        revenue = metric("营业收入(亿元)")
+        steps = [(label, metric(label)) for label in
+                 ("营业收入(亿元)", "营业利润(亿元)", "利润总额(亿元)", "净利润(亿元)")]
+        columns_spec = [(label.replace("(亿元)", ""), value) for label, value in steps if value]
+        if not revenue or len(columns_spec) < 3:
+            return None
+        period = str(financials.get("报告期") or "")
+        net = columns_spec[-1][1]
+        out = [self._svg_header("钱怎么落袋 · 利润阶梯", f"报告期 {period}", "#91a8bf")]
+        base_y, chart_h = 396, 268
+        zone_left, zone_right = self._chart_zone()
+        left, right = zone_left + 58.0, zone_right - 6.0
+        step_w = (right - left) / len(columns_spec)
+        bar_w = min(150.0, step_w * 0.62)
+        tones = ("#6ab7ff", "#ffd166", "#8fd3ff", "#ff7188")
+        tops: list[float] = []
+        for index, (label, value) in enumerate(columns_spec):
+            cx = left + (index + 0.5) * step_w
+            height = max(6.0, value / revenue * chart_h)
+            top = base_y - height
+            tops.append(top)
+            tone = tones[index % len(tones)] if index < len(columns_spec) - 1 else "#ff7188"
+            out.append(f'<rect x="{cx - bar_w / 2:.1f}" y="{top:.1f}" width="{bar_w:.1f}" height="{height:.1f}" rx="10" fill="{tone}" opacity=".85"/>')
+            out.append(f'<text x="{cx:.1f}" y="{top - 16:.1f}" text-anchor="middle" fill="#dbe7f5" font-size="30" font-weight="700">{value:,.2f}亿</text>')
+            out.append(f'<text x="{cx:.1f}" y="{base_y + 36}" text-anchor="middle" fill="#91a8bf" font-size="23">{label}</text>')
+        for start in range(len(columns_spec) - 1):
+            out.append(f'<line x1="{left + (start + 0.5) * step_w + bar_w / 2:.1f}" y1="{tops[start]:.1f}"'
+                       f' x2="{left + (start + 1.5) * step_w - bar_w / 2:.1f}" y2="{tops[start + 1]:.1f}"'
+                       ' stroke="rgba(101,151,196,.5)" stroke-dasharray="5 4"/>')
+        out.append(f'<text x="442" y="456" fill="#ffd166" font-size="21">每 100 元收入落下 {net / revenue * 100:.1f} 元净利</text>')
+        return ''.join(out)
+
+    def _working_capital_body(self, financials: Mapping[str, Any]) -> str | None:
+        """营运占用条：存货 / 应收账款各相当于多少收入，讲“钱压在哪”。
+
+        Pure balance-sheet fact, no judgement — fits 风险 turns without touching
+        the 画面红线 (no 买卖点位/收益暗示 anywhere on screen).
+        """
+        def metric(label: str) -> float | None:
+            value = financials.get(label)
+            try:
+                value = float(value)
+            except (TypeError, ValueError):
+                return None
+            return value if value > 0 else None
+
+        revenue = metric("营业收入(亿元)")
+        rows = [(label, metric(label)) for label in ("存货(亿元)", "应收账款(亿元)")]
+        rows = [(label.replace("(亿元)", ""), value) for label, value in rows if value]
+        if not revenue or not rows:
+            return None
+        period = str(financials.get("报告期") or "")
+        out = [self._svg_header("钱压在哪 · 营运占用", f"报告期 {period}", "#91a8bf")]
+        _, zone_right = self._chart_zone()
+        bar_x, row_h, y0 = 712, 96, 150
+        bar_max_w = max(330.0, zone_right - bar_x - 200.0)
+        ratios = [(label, value, value / revenue * 100) for label, value in rows]
+        top_ratio = max(r for _, _, r in ratios)
+        tones = ("#ffd166", "#6ab7ff")
+        for index, (label, value, ratio) in enumerate(ratios):
+            y = y0 + index * row_h
+            width = max(8.0, ratio / top_ratio * bar_max_w)
+            out.append(f'<text x="700" y="{y + 24}" text-anchor="end" fill="#dbe7f5" font-size="24">{html.escape(label[:11])}</text>')
+            out.append(f'<rect x="{bar_x}" y="{y}" width="{width:.1f}" height="34" rx="9" fill="{tones[index % 2]}" opacity=".82"/>')
+            out.append(f'<text x="{bar_x + width + 12:.1f}" y="{y + 24}" fill="#dbe7f5" font-size="22">{value:,.2f}亿</text>')
+            out.append(f'<text x="{bar_x + width + 12:.1f}" y="{y + 56}" fill="#91a8bf" font-size="19">占收入 {ratio:.0f}%</text>')
+        parts = "、".join(f"{r:.0f} 元压在{label}" for label, _, r in ratios)
+        out.append(f'<text x="442" y="456" fill="#ffd166" font-size="21">每 100 元年收入，{parts}</text>')
+        return ''.join(out)
+
+    def _industry_rank_body(self, f10: Mapping[str, Any]) -> str | None:
+        """行业排名标尺：一根刻度尺一个维度，标出本股在同行里的真实位置。
+
+        Data comes verbatim from F10 行业分析 ranking tables (top-30 rows naming
+        this stock).  A dimension the stock is not listed in simply gets no
+        ruler — nothing is inferred.
+        """
+        profile = self._f10_profile(f10)
+        ranking = profile.get("行业地位")
+        ranking = ranking if isinstance(ranking, Mapping) else {}
+        peers = ranking.get("同行家数")
+        try:
+            peers = int(peers)
+        except (TypeError, ValueError):
+            return None
+        dims = [(label, entry.get("排名")) for label, entry in ranking.items()
+                if isinstance(entry, Mapping) and isinstance(entry.get("排名"), int)]
+        dims = dims[:4]
+        if not dims:
+            return None
+        industry = str(ranking.get("研究行业") or "")
+        out = [self._svg_header("行业里站哪 · 排名", f"{industry} 同行 {peers} 家", "#91a8bf")]
+        zone_right = self._chart_zone()[1]
+        track_left, track_right, row_h, y0 = 620, zone_right - 50, 96, 140
+        for index, (label, rank) in enumerate(dims):
+            y = y0 + index * row_h
+            ratio = min(1.0, max(0.0, (rank - 1) / max(1, peers - 1)))
+            cx = track_left + ratio * (track_right - track_left)
+            tone = "#ffd166" if rank <= 3 else "#6ab7ff"
+            out.append(f'<text x="700" y="{y - 18}" fill="#dbe7f5" font-size="24">{html.escape(label)}</text>')
+            out.append(f'<text x="{zone_right:g}" y="{y - 18}" text-anchor="end" fill="{tone}" font-size="24" font-weight="700">第 {rank} 名</text>')
+            out.append(f'<line x1="{track_left}" y1="{y + 12}" x2="{track_right}" y2="{y + 12}" stroke="rgba(101,151,196,.35)" stroke-width="3" stroke-linecap="round"/>')
+            out.append(f'<line x1="{track_left}" y1="{y + 2}" x2="{track_left}" y2="{y + 22}" stroke="rgba(101,151,196,.5)" stroke-width="2"/>')
+            out.append(f'<line x1="{track_right}" y1="{y + 2}" x2="{track_right}" y2="{y + 22}" stroke="rgba(101,151,196,.5)" stroke-width="2"/>')
+            out.append(f'<circle cx="{cx:.1f}" cy="{y + 12}" r="11" fill="{tone}" stroke="#04121d" stroke-width="2"/>')
+            out.append(f'<text x="{track_left}" y="{y + 46}" fill="#91a8bf" font-size="18">第 1 名</text>')
+            out.append(f'<text x="{track_right}" y="{y + 46}" text-anchor="end" fill="#91a8bf" font-size="18">第 {peers} 名</text>')
+        return ''.join(out)
+
+    def _news_timeline_body(self, news: Mapping[str, Any]) -> str:
+        """新闻时间线：竖轴 + 日期节点，比旧列表更像「事情在发生」。"""
+        items = [x for x in (news.get("items") if isinstance(news.get("items"), list) else [])
+                 if isinstance(x, Mapping) and str(x.get("title") or "").strip()][:4]
+        zone_left, zone_right = self._chart_zone()
+        if not items:
+            cx = (zone_left + zone_right) / 2
+            return (f'<text x="{cx:g}" y="250" text-anchor="middle" class="snap-label" style="font-size:22px">'
+                    '近期没有相关资讯，保持跟踪</text>')
+        out = [self._svg_header("最近发生的事")]
+        axis_x, y0, step = zone_left + 28, 124, 92
+        title_cap = 22 if zone_right < 1500 else 44
+        out.append(f'<line x1="{axis_x}" y1="{y0 - 14}" x2="{axis_x}" y2="{y0 + (len(items) - 1) * step + 14}" stroke="rgba(101,151,196,.35)" stroke-width="2"/>')
+        for index, item in enumerate(items):
+            y = y0 + index * step
+            date = str(item.get("publish_time") or "")
+            date_label = date[5:10] if len(date) >= 10 else ""
+            kind = str(item.get("type") or "资讯")
+            out.append(f'<circle cx="{axis_x}" cy="{y}" r="7" fill="#ffd166" stroke="#04121d" stroke-width="2"/>')
+            if date_label:
+                out.append(f'<text x="{axis_x + 26}" y="{y - 10}" fill="#91a8bf" font-size="19">{html.escape(date_label)} · {html.escape(kind)}</text>')
+            out.append(f'<text x="{axis_x + 26}" y="{y + 24}" fill="#dbe7f5" font-size="25" font-weight="600">{html.escape(str(item.get("title"))[:title_cap])}</text>')
         return ''.join(out)
 
     def _turn_news_body(self, news: Mapping[str, Any]) -> str:

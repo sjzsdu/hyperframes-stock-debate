@@ -57,11 +57,72 @@ async def _emit_qrcode_callback(qrcode_callback, payload: dict):
         await callback_result
 
 
+def _find_system_chrome() -> str:
+    """百家号发布页的富文本编辑器（FeEditorApp-*）在 Playwright 内置
+    Chromium（headless）下根本不渲染——表单的 contentEditable 永远不出现，
+    2026-09-20 实测等 180s 超时；同一页面换系统 Chrome 立即正常。所以优先
+    探测系统 Chrome，找不到再回退内置 Chromium。"""
+    import sys
+
+    if sys.platform == "darwin":
+        candidates = ["/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"]
+    elif sys.platform == "win32":
+        candidates = [
+            r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+            r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
+        ]
+    else:
+        candidates = [
+            "/usr/bin/google-chrome",
+            "/usr/bin/google-chrome-stable",
+            "/usr/bin/chromium-browser",
+            "/usr/bin/chromium",
+        ]
+    for path in candidates:
+        if os.path.exists(path):
+            return path
+    return ""
+
+
 def _build_launch_kwargs(headless: bool) -> dict:
     launch_kwargs = {"headless": headless}
-    if LOCAL_CHROME_PATH:
-        launch_kwargs["executable_path"] = LOCAL_CHROME_PATH
+    executable_path = LOCAL_CHROME_PATH or _find_system_chrome()
+    if executable_path:
+        launch_kwargs["executable_path"] = executable_path
     return launch_kwargs
+
+
+# 百家号后台是 SPA：进入发布页、选完视频文件都会触发整页导航（如跳到带
+# productId 的新编辑页 URL）。导航瞬间 Playwright 的执行上下文被销毁，
+# 任何 locator().count()/wait_for 都会抛 "Execution context was destroyed"
+# （2026-09-19 实测两次发布均死于该竞态）。下面两个助手统一兜底：
+CONTEXT_DESTROYED = "Execution context was destroyed"
+
+
+async def _wait_nav_settled(page: Page, timeout: int = 30000) -> None:
+    """等 load 态 + URL 连续两次采样一致，再继续操作页面元素。"""
+    try:
+        await page.wait_for_load_state("load", timeout=timeout)
+    except PWTimeoutError:
+        pass
+    last = page.url
+    for _ in range(10):
+        await page.wait_for_timeout(1000)
+        if page.url == last:
+            return
+        last = page.url
+
+
+async def _nav_retry(page: Page, step, attempts: int = 4):
+    """执行一个零参异步调用，命中导航竞态就等导航稳定后重试。"""
+    for attempt in range(1, attempts + 1):
+        try:
+            return await step()
+        except Exception as exc:
+            if CONTEXT_DESTROYED not in str(exc) or attempt == attempts:
+                raise
+            baijiahao_logger.warning(_msg("⚠️", f"页面导航打断操作（第{attempt}次），等稳定后重试"))
+            await _wait_nav_settled(page)
 
 
 def _resolve_account_file(account_file: str | Path) -> str:
@@ -278,42 +339,56 @@ class BaiJiaHaoVideo(BaseVideoUploader):
         try:
             page = await context.new_page()
             await page.goto(BAIJIAHAO_PUBLISH_URL, timeout=120000, wait_until="domcontentloaded")
+            await _wait_nav_settled(page)
             baijiahao_logger.info(_msg("🏃", f"开始上传视频: {self.title}"))
 
-            # 等待发布页加载
-            await page.wait_for_timeout(3000)
+            # 1) 上传视频文件（选完文件 SPA 会再次整页导航，见 _wait_nav_settled 注释）
+            def _pick_file_input():
+                async def _inner():
+                    file_input = page.locator('input[type="file"][accept*="video"], input[type="file"][accept*="mp4"]').first
+                    if not await file_input.count():
+                        file_input = page.locator("div[class^='video-main-container'] input[type='file']").first
+                    if not await file_input.count():
+                        file_input = page.locator('input[type="file"]').first
+                    await file_input.wait_for(state="attached", timeout=30000)
+                    return file_input
+                return _inner
 
-            # 1) 上传视频文件
-            file_input = page.locator('input[type="file"][accept*="video"], input[type="file"][accept*="mp4"]').first
-            if not await file_input.count():
-                file_input = page.locator("div[class^='video-main-container'] input[type='file']").first
-            if not await file_input.count():
-                file_input = page.locator('input[type="file"]').first
-            await file_input.wait_for(state="attached", timeout=30000)
+            file_input = await _nav_retry(page, _pick_file_input())
             await file_input.set_input_files(self.file_path)
             baijiahao_logger.info(_msg("🏃", f"已选择视频文件: {self.file_path}"))
+            await _wait_nav_settled(page)
 
             # 2) 等待进入表单页面（contenteditable 标题区出现即表单渲染完毕）
-            title_editor = page.locator('div[class*="contentEditable"]').first
-            await title_editor.wait_for(state="visible", timeout=180000)
+            def _pick_title_editor():
+                async def _inner():
+                    editor = page.locator('div[class*="contentEditable"]').first
+                    await editor.wait_for(state="visible", timeout=180000)
+                    return editor
+                return _inner
+
+            await _nav_retry(page, _pick_title_editor())
             await page.wait_for_timeout(1000)
 
             # 3) 填写标题
-            await self._fill_title(page)
+            await _nav_retry(page, lambda: self._fill_title(page))
 
             # 4) 等待视频上传完成
-            await self._wait_upload_complete(page)
+            await _nav_retry(page, lambda: self._wait_upload_complete(page))
+
+            # 4.5) 标题板（尽力而为：入口 disabled/缺失时用文件名兜底）
+            await self._set_title_via_panel(page)
 
             # 5) 上传横版封面（必填）
-            await self._upload_thumbnail(page)
+            await _nav_retry(page, lambda: self._upload_thumbnail(page))
 
             # 6) 勾选「含AI生成内容」
-            await self._check_ai_declaration(page)
+            await _nav_retry(page, lambda: self._check_ai_declaration(page))
 
             # 7) 选择合集（如有配置）
-            await self._apply_collection(page)
+            await _nav_retry(page, lambda: self._apply_collection(page))
 
-            # 8) 点击发布
+            # 8) 点击发布（发布成功后页面会跳转，_submit_publish 内部自带竞态容忍）
             await self._submit_publish(page)
 
             # 保存 cookie
@@ -337,6 +412,59 @@ class BaiJiaHaoVideo(BaseVideoUploader):
         await page.keyboard.press("Backspace")
         await title_field.fill(title)
         baijiahao_logger.info(_msg("🏷️", f"标题已填写: {title}"))
+
+    async def _set_title_via_panel(self, page: Page) -> None:
+        """新版发布页把标题挪进了右下角「封面/标题板」弹层，主表单只有作品描述。
+
+        弹层入口的 enabled 状态不稳定（实测同一会话时有时无），整段按尽力而为
+        处理：任何一步失败只记 warning——百家号会预填视频文件名当标题，发布
+        不因此阻塞（与 AI 声明步骤同一容错原则）。
+        """
+        try:
+            btn = page.locator('button:has-text("封面/标题板")').first
+            if not await btn.count():
+                baijiahao_logger.warning(_msg("⚠️", "未找到「封面/标题板」入口，标题将用文件名兜底"))
+                return
+            deadline = time.monotonic() + 45
+            enabled = False
+            while time.monotonic() < deadline:
+                if await btn.is_enabled():
+                    enabled = True
+                    break
+                await page.wait_for_timeout(3000)
+            if not enabled:
+                baijiahao_logger.warning(_msg("⚠️", "「封面/标题板」长时间不可点，标题将用文件名兜底"))
+                return
+            await btn.click()
+            await page.wait_for_timeout(3000)
+
+            modal = page.locator('.cheetah-modal, [class*="modal"], [class*="dialog"]').first
+            scope = modal if await modal.count() else page
+            field = scope.locator('input[type="text"]').first
+            if not await field.count():
+                field = scope.locator('[contenteditable="true"]').first
+            if not await field.count():
+                baijiahao_logger.warning(_msg("⚠️", "标题弹层里没找到输入框，标题将用文件名兜底"))
+                return
+            title = self.title[: self.max_title_length]
+            # fill() 对 input 与 contenteditable 都生效，且整体替换不清空失败
+            await field.fill(title)
+            baijiahao_logger.info(_msg("🏷️", f"标题板已填写: {title}"))
+
+            # 关闭弹层，别挡住后续步骤
+            for sel in (
+                '[class*="modal"] [class*="close"]',
+                'button:has-text("确 定")',
+                'button:has-text("确定")',
+            ):
+                try:
+                    await page.locator(sel).first.click(timeout=2000)
+                    break
+                except Exception:
+                    continue
+            await page.wait_for_timeout(1000)
+        except Exception as exc:
+            baijiahao_logger.warning(_msg("⚠️", f"设置标题板失败（{type(exc).__name__}），标题将用文件名兜底"))
 
     async def _wait_upload_complete(self, page: Page, timeout: int = 600) -> None:
         """等待视频真正上传完成。
@@ -568,22 +696,35 @@ class BaiJiaHaoVideo(BaseVideoUploader):
         await publish_btn.click(force=True)
         baijiahao_logger.info(_msg("🏃", "已点击发布按钮"))
 
-        # 等待跳转或成功提示（最多30s）
+        # 等待跳转或成功提示（默认30s）。点发布后可能弹出「百度安全验证」滑块
+        # （百度风控，2026-09-20 两次发布均触发）：有头模式等人工拖滑块，等待
+        # 窗口延长到 5 分钟；headless 无法人工处理，立即失败。
+        wait_s = 30
+        security_prompted = False
         start = time.monotonic()
-        while time.monotonic() - start < 30:
+        while time.monotonic() - start < wait_s:
             url = page.url
             # 发布成功跳转
             if BAIJIAHAO_SUCCESS_URL_PREFIX in url or "/rc/content" in url or "/rc/home" in url:
                 baijiahao_logger.success(_msg("🥳", "视频发布成功"))
                 return
-            # 检查是否出现百度安全验证
-            if await page.locator('text="百度安全验证"').count():
-                raise RuntimeError("出现百度安全验证，需人工处理")
-            # 检查是否有错误提示阻止发布
-            error_toast = page.locator('.cheetah-message-error, .cheetah-message-warning').first
-            if await error_toast.count() and await error_toast.is_visible():
-                err_text = await error_toast.inner_text()
-                baijiahao_logger.warning(_msg("⚠️", f"发布提示: {err_text}"))
+            # 检查是否出现百度安全验证 / 错误提示。点击发布后页面随时可能整页
+            # 跳转，探测性 count() 命中导航竞态时跳过本轮即可，不能当作失败。
+            try:
+                if await page.locator('text="百度安全验证"').count():
+                    if self.headless:
+                        raise RuntimeError("出现百度安全验证，需人工处理")
+                    if not security_prompted:
+                        security_prompted = True
+                        wait_s = 30 + 300
+                        baijiahao_logger.warning(_msg("🚨", "出现百度安全验证，请在浏览器窗口中完成滑块验证（最多再等5分钟）"))
+                error_toast = page.locator('.cheetah-message-error, .cheetah-message-warning').first
+                if await error_toast.count() and await error_toast.is_visible():
+                    err_text = await error_toast.inner_text()
+                    baijiahao_logger.warning(_msg("⚠️", f"发布提示: {err_text}"))
+            except Exception as exc:
+                if CONTEXT_DESTROYED not in str(exc):
+                    raise
             await page.wait_for_timeout(1000)
 
         # 超时后再检查一次

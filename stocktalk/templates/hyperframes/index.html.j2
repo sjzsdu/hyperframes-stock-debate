@@ -11,7 +11,7 @@
 {# One permanent stage.  The headline, the panel frame and the caption box never
    move; only the four content slots below change, and only when their content
    actually differs from the previous turn (see HyperFramesBuilder._merge_slot). #}
-<main id="root" class="layout-{{ layout }} captions-{{ subtitle_mode }}" data-composition-id="stock-debate" data-start="0" data-width="{{ canvas_width }}" data-height="{{ canvas_height }}" data-duration="{{ duration }}" data-stage-in="{{ stage_in }}" data-fps="30" style="--safe-top: {{ safe_top }}px; --safe-bottom: {{ safe_bottom }}px; --safe-side: {{ safe_side }}px;">
+<main id="root" class="layout-{{ layout }} captions-{{ subtitle_mode }}" data-composition-id="stock-debate" data-start="0" data-width="{{ canvas_width }}" data-height="{{ canvas_height }}" data-duration="{{ duration }}" data-stage-in="{{ stage_in }}" data-fps="30" style="--safe-top: {{ safe_top }}px; --safe-bottom: {{ safe_bottom }}px; --safe-side-left: {{ safe_side_left }}px; --safe-side-right: {{ safe_side_right }}px; --stock-accent: {{ identity.accent }}; --stock-soft: {{ identity.accent_soft }};">
 {% set outro_start = duration - 0.45 %}
   {# Safe-area guides: the bands the platform's player UI will sit on.  Hidden
      unless the preview URL asks for them (#guides), so they can never reach a
@@ -28,9 +28,22 @@
 
   {# Permanent: stock name, code and the real quote #}
   <header id="headline" class="clip" data-start="0" data-duration="{{ outro_start }}" data-track-index="3" data-layout-ignore>
-    <div class="title-row"><h1>{{ name }} <em>{{ code }}</em></h1></div>
+    <div class="title-row">
+      <h1>{{ name }} <em>{{ code }}</em></h1>
+      {% if headline_stats %}<div class="headline-stats">{% for label, value in headline_stats %}<div class="headline-stat"><span>{{ label }}</span><strong>{{ value }}</strong></div>{% endfor %}</div>{% endif %}
+    </div>
     <p class="{{ price_tone }}">{{ price_line }}</p>
   </header>
+
+  {# The per-stock fingerprint: board badge + temperament tags measured from the
+     real K-line.  Horizontal lays it out as a side rail beside the panel,
+     vertical as a strip under the headline — same markup, two arrangements. #}
+  <aside id="identity" class="clip" data-start="0" data-duration="{{ outro_start }}" data-track-index="6" data-layout-ignore>
+    <span class="board-badge">{{ identity.board_short }}</span>
+    <ul class="identity-tags">{% for tag in identity.tags %}
+      <li class="identity-tag"><span>{{ tag.label }}</span><strong class="{{ tag.tone }}">{{ tag.value }}</strong></li>
+    {% endfor %}</ul>
+  </aside>
 
   {# Slot 1 — topic label #}
   {% for item in slots.kicker %}
@@ -71,7 +84,7 @@
   {# Natural opening: the title card takes over the panel area, then dissolves
      to reveal the real market data that was already standing behind it. #}
   <section id="intro-card" class="intro-card clip" data-start="0" data-duration="{{ stage_in + 1.5 }}" data-track-index="40" data-layout-ignore>
-    <div class="intro-kicker">聊公司</div>
+    <div class="intro-kicker">{{ identity.hook }}</div>
     <div class="intro-title">{{ name }} <em>{{ code }}</em></div>
   </section>
 

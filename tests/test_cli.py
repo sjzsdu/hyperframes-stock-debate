@@ -149,7 +149,8 @@ def _patch_pipeline(fake: FakePipeline, config: dict[str, Any] | None = None):
 
 def test_main_runs_every_code_and_exits_zero_on_success(capsys: pytest.CaptureFixture[str]) -> None:
     fake = FakePipeline()
-    with _patch_pipeline(fake), patch.object(cli.sys, "stdin", None, create=True):
+    with _patch_pipeline(fake), patch.object(cli.sys, "stdin", None, create=True), \
+         patch.object(cli, "SauPublisher", lambda config: _ok_publisher()):
         cli.main(["601689", "600519", "--publish"])
 
     assert fake.calls == ["601689", "600519"]
@@ -168,7 +169,8 @@ def test_main_exits_nonzero_when_a_stock_fails(capsys: pytest.CaptureFixture[str
 
 def test_main_exits_nonzero_when_publishing_fails() -> None:
     fake = FakePipeline({"601689": _result("601689", _publish_report(["douyin", "kuaishou"]))})
-    with _patch_pipeline(fake):
+    with _patch_pipeline(fake), patch.object(cli.sys, "stdin", None, create=True), \
+         patch.object(cli, "SauPublisher", lambda config: _ok_publisher()):
         with pytest.raises(SystemExit) as excinfo:
             cli.main(["601689", "--publish"])
 
@@ -194,11 +196,20 @@ def test_main_rejects_an_unknown_platform() -> None:
 # ---------------------------------------------------------------------------
 
 class FakeCheckPublisher:
-    def __init__(self, results: dict[str, dict[str, Any]]) -> None:
-        self.results = results
+    def __init__(self, results: dict[str, dict[str, Any]] | None = None) -> None:
+        self.results = results or {}
+        self.probed: list[list[str]] = []
 
     def check_platforms(self, platforms: list[str]) -> dict[str, dict[str, Any]]:
-        return {p: self.results[p] for p in platforms}
+        self.probed.append(list(platforms))
+        return {p: self.results.get(p, {"ok": True, "detail": "ok"}) for p in platforms}
+
+
+def _ok_publisher() -> FakeCheckPublisher:
+    return FakeCheckPublisher({"p": {"ok": True, "detail": "ok"} for p in PLATFORM_ALL})
+
+
+PLATFORM_ALL = ("douyin", "bilibili", "kuaishou", "tencent", "baijiahao")
 
 
 def _env(ok: bool = True) -> list[dict[str, Any]]:
@@ -245,6 +256,70 @@ def test_check_fails_when_a_required_tool_is_missing(capsys: pytest.CaptureFixtu
 
     assert excinfo.value.code == 1
     assert "必需工具缺失" in capsys.readouterr().out
+
+
+# ---------------------------------------------------------------------------
+# 发布前探活（--publish 开跑前的登录态门禁）
+# ---------------------------------------------------------------------------
+
+_GATE_CONFIG = {"publish": {"platforms": ["douyin", "tencent"], "accounts": {"tencent": "default"}}}
+
+
+def test_publish_gate_blocks_and_prints_the_remedy_when_a_cookie_is_dead(capsys: pytest.CaptureFixture[str]) -> None:
+    fake = FakePipeline()
+    fake_pub = FakeCheckPublisher({"douyin": {"ok": True, "detail": "ok"},
+                                   "tencent": {"ok": False, "detail": "cookie 已失效"}})
+    with _patch_pipeline(fake, _GATE_CONFIG), \
+         patch.object(cli, "SauPublisher", lambda config: fake_pub), \
+         patch.object(cli.sys, "stdin", None, create=True):
+        with pytest.raises(SystemExit) as excinfo:
+            cli.main(["601689", "--publish"])
+
+    assert excinfo.value.code == 1
+    out = capsys.readouterr().out
+    assert "发布预检" in out and "视频号(tencent)" in out
+    assert "uv run sau tencent login --account default" in out
+    # 门禁在渲染前：不该烧掉一次生成
+    assert fake.calls == []
+
+
+def test_publish_gate_continues_with_healthy_platforms_on_yes(capsys: pytest.CaptureFixture[str]) -> None:
+    fake_pub = FakeCheckPublisher({"douyin": {"ok": True, "detail": "ok"},
+                                   "tencent": {"ok": False, "detail": "cookie 已失效"}})
+    fake = FakePipeline()
+
+    class Stdin:
+        def isatty(self) -> bool:
+            return True
+
+    with _patch_pipeline(fake, _GATE_CONFIG), \
+         patch.object(cli, "SauPublisher", lambda config: fake_pub), \
+         patch.object(cli.sys, "stdin", Stdin(), create=True), \
+         patch("builtins.input", return_value="y"):
+        cli.main(["601689", "--publish"])
+
+    assert fake.calls == ["601689"]
+    assert fake_pub.probed == [["douyin", "tencent"]]
+
+
+def test_publish_gate_passes_silently_when_all_alive(capsys: pytest.CaptureFixture[str]) -> None:
+    fake_pub = _ok_publisher()
+    with _patch_pipeline(FakePipeline(), _GATE_CONFIG), \
+         patch.object(cli, "SauPublisher", lambda config: fake_pub), \
+         patch.object(cli.sys, "stdin", None, create=True):
+        cli.main(["601689", "--publish"])
+
+    assert "登录态均有效" in capsys.readouterr().out
+
+
+def test_no_preflight_skips_the_probe() -> None:
+    def _boom(config):
+        raise AssertionError("--no-preflight 不应实例化 SauPublisher")
+
+    with _patch_pipeline(FakePipeline(), _GATE_CONFIG), \
+         patch.object(cli, "SauPublisher", _boom), \
+         patch.object(cli.sys, "stdin", None, create=True):
+        cli.main(["601689", "--publish", "--no-preflight"])
 
 
 # ---------------------------------------------------------------------------

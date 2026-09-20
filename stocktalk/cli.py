@@ -51,6 +51,8 @@ def main(argv: list[str] | None = None) -> None:
                         help="补发：自动找该代码最近一次的成片（无需抄路径），默认只补发上次失败的平台")
     parser.add_argument("--check", action="store_true", dest="check_only",
                         help="发布预检：检查 sau CLI / Node / Chrome 与各平台登录态，全部通过才退出码 0")
+    parser.add_argument("--no-preflight", action="store_true",
+                        help="带 --publish 时跳过开跑前的平台登录态探测（默认探测，失效即提醒）")
     parser.add_argument("--platforms", default=None, metavar="LIST",
                         help=f"只发布这些平台，逗号分隔，可选项: {', '.join(PLATFORM_SPECS)}")
     parser.add_argument("--watchlist", default=None, metavar="FILE",
@@ -97,6 +99,10 @@ def main(argv: list[str] | None = None) -> None:
         if args.publish_only:
             _publish_only(pipeline, args, config, parser)
             return
+
+        if args.publish:
+            # 探活必须在渲染前：一次 15 分钟的生成不该烧在一张已失效的 cookie 上。
+            _gate_publish(config, args, parser)
 
         targets = _collect_targets(args, parser)
         failures = _run_all(pipeline, targets, args)
@@ -150,6 +156,40 @@ def _check(config: dict) -> int:
         for item in blocked:
             print(f"  必需工具缺失: {item['label']} — {item['detail']}")
     return 1 if (failed or blocked) else 0
+
+
+def _gate_publish(config: dict, args: argparse.Namespace, parser: argparse.ArgumentParser) -> None:
+    """Probe every configured platform's login before any expensive work starts.
+
+    A full run costs ~15 minutes of generation plus render; finding a dead
+    cookie at publish time throws all of it away (视频号隔天失效是常态，
+    2026-09-19/20 实测).  Probe up front: on failure print the login remedy
+    and let the operator either quit to re-login or explicitly continue with
+    the healthy platforms only.
+    """
+    if getattr(args, "no_preflight", False):
+        return
+    platforms = [p for p in config.get("publish", {}).get("platforms", ()) if p in PLATFORM_SPECS]
+    if not platforms:
+        return
+    checks = SauPublisher(config).check_platforms(platforms)
+    failed = [p for p in platforms if not checks.get(p, {}).get("ok")]
+    if not failed:
+        print("发布预检: " + "、".join(f"{PLATFORM_SPECS[p]['label']}" for p in platforms) + " 登录态均有效")
+        return
+    labels = "、".join(f"{PLATFORM_SPECS[p]['label']}({p})" for p in failed)
+    print(f"\n⚠ 发布预检：{labels} 登录态失效，直接发布会跳过它们：")
+    account = config.get("publish", {}).get("accounts", {}) or {}
+    for platform in failed:
+        print(f"    uv run sau {platform} login --account {account.get(platform, 'default')}")
+    if args.no_interactive or not (sys.stdin and sys.stdin.isatty()):
+        parser.exit(1, "\n已退出。请先重新登录再重跑本命令，或用 --platforms 只发布健康平台。\n")
+    try:
+        answer = input("继续发布到其余平台？[y=继续 / N=退出，先去登录] ").strip().lower()
+    except EOFError:
+        answer = ""
+    if answer not in ("y", "yes"):
+        parser.exit(1, "已退出。重新登录后重跑即可；已生成的片子随时可用 --publish-only 补发。\n")
 
 
 def _republish(pipeline: Pipeline, args: argparse.Namespace, config: dict, parser: argparse.ArgumentParser) -> None:

@@ -1,0 +1,145 @@
+diff --git a/uploader/baijiahao_uploader/main.py b/uploader/baijiahao_uploader/main.py
+index 5c5bc83..f21f317 100644
+--- a/uploader/baijiahao_uploader/main.py
++++ b/uploader/baijiahao_uploader/main.py
+@@ -57,10 +57,38 @@ async def _emit_qrcode_callback(qrcode_callback, payload: dict):
+         await callback_result
+ 
+ 
++def _find_system_chrome() -> str:
++    """百家号发布页的富文本编辑器（FeEditorApp-*）在 Playwright 内置
++    Chromium（headless）下根本不渲染——表单的 contentEditable 永远不出现，
++    2026-09-20 实测等 180s 超时；同一页面换系统 Chrome 立即正常。所以优先
++    探测系统 Chrome，找不到再回退内置 Chromium。"""
++    import sys
++
++    if sys.platform == "darwin":
++        candidates = ["/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"]
++    elif sys.platform == "win32":
++        candidates = [
++            r"C:\Program Files\Google\Chrome\Application\chrome.exe",
++            r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
++        ]
++    else:
++        candidates = [
++            "/usr/bin/google-chrome",
++            "/usr/bin/google-chrome-stable",
++            "/usr/bin/chromium-browser",
++            "/usr/bin/chromium",
++        ]
++    for path in candidates:
++        if os.path.exists(path):
++            return path
++    return ""
++
++
+ def _build_launch_kwargs(headless: bool) -> dict:
+     launch_kwargs = {"headless": headless}
+-    if LOCAL_CHROME_PATH:
+-        launch_kwargs["executable_path"] = LOCAL_CHROME_PATH
++    executable_path = LOCAL_CHROME_PATH or _find_system_chrome()
++    if executable_path:
++        launch_kwargs["executable_path"] = executable_path
+     return launch_kwargs
+ 
+ 
+@@ -348,6 +376,9 @@ class BaiJiaHaoVideo(BaseVideoUploader):
+             # 4) 等待视频上传完成
+             await _nav_retry(page, lambda: self._wait_upload_complete(page))
+ 
++            # 4.5) 标题板（尽力而为：入口 disabled/缺失时用文件名兜底）
++            await self._set_title_via_panel(page)
++
+             # 5) 上传横版封面（必填）
+             await _nav_retry(page, lambda: self._upload_thumbnail(page))
+ 
+@@ -382,6 +413,59 @@ class BaiJiaHaoVideo(BaseVideoUploader):
+         await title_field.fill(title)
+         baijiahao_logger.info(_msg("🏷️", f"标题已填写: {title}"))
+ 
++    async def _set_title_via_panel(self, page: Page) -> None:
++        """新版发布页把标题挪进了右下角「封面/标题板」弹层，主表单只有作品描述。
++
++        弹层入口的 enabled 状态不稳定（实测同一会话时有时无），整段按尽力而为
++        处理：任何一步失败只记 warning——百家号会预填视频文件名当标题，发布
++        不因此阻塞（与 AI 声明步骤同一容错原则）。
++        """
++        try:
++            btn = page.locator('button:has-text("封面/标题板")').first
++            if not await btn.count():
++                baijiahao_logger.warning(_msg("⚠️", "未找到「封面/标题板」入口，标题将用文件名兜底"))
++                return
++            deadline = time.monotonic() + 45
++            enabled = False
++            while time.monotonic() < deadline:
++                if await btn.is_enabled():
++                    enabled = True
++                    break
++                await page.wait_for_timeout(3000)
++            if not enabled:
++                baijiahao_logger.warning(_msg("⚠️", "「封面/标题板」长时间不可点，标题将用文件名兜底"))
++                return
++            await btn.click()
++            await page.wait_for_timeout(3000)
++
++            modal = page.locator('.cheetah-modal, [class*="modal"], [class*="dialog"]').first
++            scope = modal if await modal.count() else page
++            field = scope.locator('input[type="text"]').first
++            if not await field.count():
++                field = scope.locator('[contenteditable="true"]').first
++            if not await field.count():
++                baijiahao_logger.warning(_msg("⚠️", "标题弹层里没找到输入框，标题将用文件名兜底"))
++                return
++            title = self.title[: self.max_title_length]
++            # fill() 对 input 与 contenteditable 都生效，且整体替换不清空失败
++            await field.fill(title)
++            baijiahao_logger.info(_msg("🏷️", f"标题板已填写: {title}"))
++
++            # 关闭弹层，别挡住后续步骤
++            for sel in (
++                '[class*="modal"] [class*="close"]',
++                'button:has-text("确 定")',
++                'button:has-text("确定")',
++            ):
++                try:
++                    await page.locator(sel).first.click(timeout=2000)
++                    break
++                except Exception:
++                    continue
++            await page.wait_for_timeout(1000)
++        except Exception as exc:
++            baijiahao_logger.warning(_msg("⚠️", f"设置标题板失败（{type(exc).__name__}），标题将用文件名兜底"))
++
+     async def _wait_upload_complete(self, page: Page, timeout: int = 600) -> None:
+         """等待视频真正上传完成。
+ 
+@@ -612,9 +696,13 @@ class BaiJiaHaoVideo(BaseVideoUploader):
+         await publish_btn.click(force=True)
+         baijiahao_logger.info(_msg("🏃", "已点击发布按钮"))
+ 
+-        # 等待跳转或成功提示（最多30s）
++        # 等待跳转或成功提示（默认30s）。点发布后可能弹出「百度安全验证」滑块
++        # （百度风控，2026-09-20 两次发布均触发）：有头模式等人工拖滑块，等待
++        # 窗口延长到 5 分钟；headless 无法人工处理，立即失败。
++        wait_s = 30
++        security_prompted = False
+         start = time.monotonic()
+-        while time.monotonic() - start < 30:
++        while time.monotonic() - start < wait_s:
+             url = page.url
+             # 发布成功跳转
+             if BAIJIAHAO_SUCCESS_URL_PREFIX in url or "/rc/content" in url or "/rc/home" in url:
+@@ -624,7 +712,12 @@ class BaiJiaHaoVideo(BaseVideoUploader):
+             # 跳转，探测性 count() 命中导航竞态时跳过本轮即可，不能当作失败。
+             try:
+                 if await page.locator('text="百度安全验证"').count():
+-                    raise RuntimeError("出现百度安全验证，需人工处理")
++                    if self.headless:
++                        raise RuntimeError("出现百度安全验证，需人工处理")
++                    if not security_prompted:
++                        security_prompted = True
++                        wait_s = 30 + 300
++                        baijiahao_logger.warning(_msg("🚨", "出现百度安全验证，请在浏览器窗口中完成滑块验证（最多再等5分钟）"))
+                 error_toast = page.locator('.cheetah-message-error, .cheetah-message-warning').first
+                 if await error_toast.count() and await error_toast.is_visible():
+                     err_text = await error_toast.inner_text()

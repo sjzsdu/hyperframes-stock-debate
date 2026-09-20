@@ -28,6 +28,10 @@ stock_data:
   # 与「近期资讯」画面的数据源。news_limit 为拉取条数；news_days 为 0 表示不限时间。
   news_limit: 12
   news_days: 0
+  # 公司基本面（f10/financials/board）是讲清「这家公司靠什么赚钱」的必需素材。
+  # 拿不到就中断并报错——缺口该由 tongstock 补，不在本项目里静默降级成行情点评。
+  # 设为 false 只是应急放行（脚本会退化成缺行业锚点的内容），不推荐。
+  require_company_data: true
 
 characters:
   bull:
@@ -72,9 +76,9 @@ video:
   output_dir: output
   quality: high
   # 画幅。horizontal = 1920×1080（默认）；vertical = 1080×1920。
-  # 默认横版的原因：抖音/视频号/快手的播放分成都要求「原创横屏 ≥1 分钟」，
-  # 竖版主片等于把这三家的分成通道关掉（见 publish.platform_canvas 与变现说明）。
-  # 想改回竖版主发：这里改 vertical，并把 platform_canvas 换成 douyin/tencent/kuaishou: horizontal。
+  # 默认横版的原因：抖音/视频号的播放分成硬性要求「原创横屏 ≥1 分钟」，
+  # 竖版主片等于把这两家的分成通道关掉（见 publish.platform_canvas 与变现说明）。
+  # 想改回竖版主发：这里改 vertical，并把 platform_canvas 换成 douyin/tencent: horizontal。
   canvas: horizontal
   # 画面字幕模式：
   #   line — 一行轮播（默认）。整句按标点切成片段，按字数分配时间逐条显示，
@@ -87,13 +91,19 @@ video:
   # 抖音右侧还有一排竖排按钮），内容只排进安全区才不会被压住。数值是该画幅下的像素。
   #   竖版 240/460：顶部留 240（作者栏），底部留 460（标题+正文+话题+互动栏，
   #                 取各平台公开安全区数据的保守值，Shorts 底部更狠，按需上调）。
-  #   横版 60/100：只需避开进度条与标题条。
-  #   side — 左右留边。小红书的按钮在底部横排，56 就够；抖音是右侧竖排
-  #         点赞/评论/分享，竖版要发抖音时把 vertical.side 调到 120。
+  #   横版 120/100：顶部 120 是给 B站的——网页/App 播放器左上角有 logo 与标题，
+  #                 60 会和 #headline 重叠（2026-09-18 实测反馈）；其余平台顶上
+  #                 没这么宽的遮挡，多留一点只是标题整体下移，无副作用。
+  #   side — 左右留边，可拆成 side_left / side_right。竖版 25 对称（100×2 的
+  #         1/4，2026-09-19 用户反馈两侧留白仍太大）：内容列 1030px；代价是
+  #         抖音/快手右缘的点赞/评论/分享竖排可能压住图表右端文字（56 曾实测
+  #         被遮，2026-09-18）——真机验证若被遮，用 side_right 单独抬高右缘。
+  #         180×2 只剩 720px 太窄、60/140 非对称看着歪（2026-09-19 反馈）。
+  #         横版 70 够。
   # 想看这几条带子在哪：预览时给 URL 加 #guides（只在预览显示，不会进成片）。
   safe_area:
-    vertical: {top: 240, bottom: 460, side: 56}
-    horizontal: {top: 60, bottom: 100, side: 70}
+    vertical: {top: 240, bottom: 460, side: 25}
+    horizontal: {top: 120, bottom: 100, side: 70}
   # MP4 渲染实测常超过 15 分钟（3-8 分钟正片 + 高质量逐帧渲染）。
   # npx 还可能先下载 hyperframes 包，首次更慢；超时大幅放宽并可在用户配置覆盖。
   render_timeout_seconds: 3600
@@ -107,39 +117,42 @@ video:
 # accounts 里每个平台对应一个账号名；headless=true 时上传在后台浏览器执行。
 publish:
   # 已开通的发布渠道。未登录或 cookie 失效的平台会在发布前预检时被跳过并提示。
-  platforms: [douyin, bilibili, kuaishou, xiaohongshu, tencent]
+  # 小红书 2026-09-18 停发：本机生成的封面只有背景图（Chrome 截图在该模板上不稳定），
+  # 用户决定移除；PLATFORM_SPECS 里的能力保留，想恢复加回列表 + `sau xiaohongshu login` 即可。
+  platforms: [douyin, bilibili, kuaishou, tencent, baijiahao]
   # 各平台账号名（对应 sau login --account 时的命名）。
   accounts:
     douyin: default
     bilibili: default
     kuaishou: default
-    xiaohongshu: default
     tencent: default
+    baijiahao: default
   headless: true
-  # AI 生成声明。财经内容不标注 AI 会被限流甚至取消变现资格（小红书《社区金融生态
-  # 公约》明确要求）。快手/小红书的选项文案由这里传给上传器，文案若随站点改版变化，
-  # 改这里即可，不用动代码；抖音（内容由AI生成）和视频号（含AI生成内容）由上传器
-  # 自行勾选，B站走 biliup 无此字段，声明写在简介里。
+  # AI 生成声明。财经内容不标注 AI 会被限流甚至取消变现资格。快手（现唯一走
+  # --ai-content-label 通道的平台；小红书已停发）的选项文案由这里传给上传器，
+  # 文案若随站点改版变化，改这里即可，不用动代码；抖音（内容由AI生成）和
+  # 视频号（含AI生成内容）由上传器自行勾选，B站/百家号无此字段，声明写在简介里。
   ai_content_label:
     kuaishou: 内容由AI生成
-    xiaohongshu: AI生成
   # 发布前用 `sau <platform> check` 预检登录态（每个平台约 10-30 秒）。
   # 渲染一条正片要 8 分钟，先花一分钟拦下 cookie 失效比渲染完再失败划算。
   preflight: true
   check_timeout_seconds: 120
   # 每个平台想发哪一版画幅。与主画幅不同的平台会额外渲染一次（多一份渲染耗时），
   # 所以这里同时决定了「要渲几版」：列出几个画幅就渲几版。
-  # 选版依据：
-  #   horizontal（桌面版 1920×1080）——抖音/视频号/快手/B站。这三家的播放分成
-  #     只认原创横屏 ≥1 分钟，B站本身也是横屏生态，发竖版等于自断收益。
-  #   vertical（手机版 1080×1920）——小红书。它是 9:16 社区，竖版完播和互动更好，
-  #     而且目前没有播放分成，画幅不影响收益。
+  # 选版依据（2026-09-18 复核）：
+  #   horizontal（桌面版 1920×1080）——抖音/视频号/百家号。前两家的播放分成硬性要求
+  #     原创横屏 ≥1 分钟（抖音中视频伙伴计划 0 粉可开；视频号创作者分成 100 粉即可），
+  #     发竖版等于自断收益；百家号横版才有播放分成，且上传器强制横版封面。B站横屏生态。
+  #   vertical（手机版 1080×1920）——快手。其创作者激励不强制横屏（实名即可开、
+  #     发视频就有收益），而流量收益集中在竖屏 9:16（横版点击率明显低）。
+  #     若快手后续把分成与横屏挂钩，把这里改回 horizontal 即可。
   platform_canvas:
     douyin: horizontal
     bilibili: horizontal
-    kuaishou: horizontal
-    xiaohongshu: vertical
+    kuaishou: vertical
     tencent: horizontal
+    baijiahao: horizontal
   # 每个平台上传的超时；浏览器上传 2-8 分钟视频通常 1-3 分钟完成。
   timeout_seconds: 900
   # 上传失败后在同一轮内自动重试的次数。只重试「上传失败」的平台，

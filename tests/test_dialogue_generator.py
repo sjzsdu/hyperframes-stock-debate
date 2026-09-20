@@ -30,9 +30,16 @@ class DialogueGeneratorTests(unittest.TestCase):
         generator = DialogueGenerator(runner=lambda argv, timeout: self._response())
         system = generator._system_prompt()
         message = generator._user_prompt({"code": "1"})
-        self.assertIn("主业", system)
+        self.assertIn("靠什么赚钱", system)
         self.assertIn("行业", system)
         self.assertIn("生意", system)
+        # 公司档案（F10 解析出的主营/主营构成/管理层）是讲生意的第一手依据
+        self.assertIn("公司档案", system)
+        self.assertIn("主营构成", system)
+        self.assertIn("管理层", system)
+        self.assertIn("board", system)
+        # 数据里没有的产品/客户/管理层一律不得脑补
+        self.assertIn("不得编造", system)
         self.assertIn("至少一半的篇幅围绕公司业务和行业本身", message)
         self.assertIn("技术信号最多作为一句带过的佐证", message)
 
@@ -76,6 +83,30 @@ class DialogueGeneratorTests(unittest.TestCase):
         self.assertIn("2026-09-10", message)
         self.assertIn("golden_cross", message)
         self.assertNotIn("\"history\"", message)
+
+    def test_company_profile_replaces_raw_f10_tables_in_the_prompt(self):
+        """F10 原文是几万字的制表框，进去只会挤掉别的内容；进 prompt 的是解析后的档案。"""
+        generator = DialogueGenerator(runner=lambda argv, timeout: self._response())
+        payload = generator._compact_data({"code": "600519", "f10": {
+            "sections": {"公司概况": "│" * 40 + " 几万字的表格 "},
+            "profile": {"主营业务": "茅台酒及系列酒的生产与销售", "所属行业": "食品饮料-酿酒",
+                        "主营构成": {"报告期": "2026-06-30", "明细": [
+                            {"项目": "茅台酒(产品)", "收入": "777.24亿", "收入占比(%)": "84.23", "毛利率(%)": "92.28"}]},
+                        "管理层": [{"姓名": "陈华", "职务": "董事长"}]}}})
+        self.assertEqual(payload["f10"]["主营业务"], "茅台酒及系列酒的生产与销售")
+        self.assertEqual(payload["f10"]["主营构成"]["明细"][0]["毛利率(%)"], "92.28")
+        self.assertNotIn("sections", payload["f10"])
+        self.assertNotIn("几万字的表格", json.dumps(payload, ensure_ascii=False))
+
+    def test_empty_company_profile_is_dropped_from_the_prompt(self):
+        generator = DialogueGenerator(runner=lambda argv, timeout: self._response())
+        self.assertNotIn("f10", generator._compact_data({"code": "600519", "f10": {"sections": {}, "profile": {}}}))
+
+    def test_market_metrics_go_into_prompt_with_explicit_units(self):
+        generator = DialogueGenerator(runner=lambda argv, timeout: self._response())
+        payload = generator._compact_data({"code": "600519", "stockinfo": {
+            "code": "600519", "name": "贵州茅台", "metrics": {"市值(亿元)": 16168.55, "换手率(%)": 0.09}}})
+        self.assertEqual(payload["stockinfo"], {"市值(亿元)": 16168.55, "换手率(%)": 0.09})
 
     def test_news_digest_goes_into_prompt_and_empties_are_dropped(self):
         generator = DialogueGenerator(runner=lambda argv, timeout: self._response())
