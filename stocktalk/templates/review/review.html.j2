@@ -1,0 +1,125 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>成片审查 · {{ stock_name }}（{{ stock_code }}）</title>
+<style>
+  /* 发布前的人工审查页：把成片、各画幅封面、发布元数据放到同一屏。
+     自包含、无外部资源，和成片放在同一个 output/ 目录下双击即开；
+     视频与封面都用相对文件名引用，所以整包挪动目录后依然可用。 */
+  :root {
+    --bg: #0a1523;
+    --panel: #101f33;
+    --line: rgba(120, 170, 215, .22);
+    --text: #eaf2fb;
+    --muted: #8ea9c4;
+    --accent: #69b7ff;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--bg); color: var(--text); padding: 34px 28px 60px;
+    font-family: "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", Arial, sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  .wrap { max-width: 1320px; margin: 0 auto; }
+  h1 { font-size: 26px; font-weight: 700; letter-spacing: .01em; }
+  h1 span { color: var(--accent); font-size: 17px; font-weight: 600; letter-spacing: .1em; margin-left: 10px; }
+  .meta { margin-top: 10px; color: var(--muted); font-size: 13px; line-height: 1.9; }
+  .meta code { color: var(--text); background: rgba(105, 183, 255, .10); border-radius: 5px; padding: 1px 7px; }
+  h2 {
+    margin: 34px 0 14px; font-size: 14px; font-weight: 600;
+    letter-spacing: .18em; color: var(--accent);
+  }
+  .grid { display: grid; gap: 18px; align-items: start; }
+  .videos { grid-template-columns: repeat(auto-fit, minmax(360px, 1fr)); }
+  .covers { grid-template-columns: repeat(auto-fit, minmax(268px, 1fr)); }
+  figure { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 12px; }
+  video, img { width: 100%; border-radius: 8px; display: block; background: #000; }
+  figcaption { margin-top: 10px; font-size: 13px; line-height: 1.75; color: var(--muted); word-break: break-all; }
+  figcaption b { display: block; color: var(--text); font-weight: 600; margin-bottom: 2px; }
+  figcaption .tagline { color: var(--accent); }
+  .kv {
+    background: var(--panel); border: 1px solid var(--line); border-radius: 12px;
+    padding: 16px 18px; font-size: 14px; line-height: 1.95;
+  }
+  .kv .k { color: var(--muted); display: inline-block; min-width: 62px; }
+  .kv ul { margin: 4px 0 0 76px; padding-left: 18px; }
+  .kv li { margin: 2px 0; }
+  table { border-collapse: collapse; font-size: 13px; }
+  th, td { border: 1px solid var(--line); padding: 6px 14px; text-align: left; }
+  th { color: var(--muted); font-weight: 500; }
+  td.ratio { color: var(--accent); }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header>
+    <h1>{{ stock_name }}<span>{{ stock_code }}</span></h1>
+    <div class="meta">
+      生成 {{ created_at }} · 辩论 {{ turns }} 轮 · 预计时长 {{ duration }} 秒 · 标签 <code>{{ tag }}</code><br>
+      本页由生成流程自动产出，用于发布前审查画面、封面与文案；确认无误后再 <code>tangulunjin --publish-only {{ video_tag }}.mp4</code> 发布。
+    </div>
+  </header>
+
+  <h2>成片</h2>
+  <div class="grid videos">
+  {% for video in videos %}
+    <figure>
+      <video controls preload="metadata" src="{{ video.file }}"></video>
+      <figcaption>
+        <b>{{ video.label }}</b>
+        {{ video.file }}{% if video.platforms %}<br><span class="tagline">用于 {{ video.platforms }}</span>{% endif %}
+      </figcaption>
+    </figure>
+  {% endfor %}
+  </div>
+
+  {% if covers %}
+  <h2>封面图（信息流缩略图）</h2>
+  <div class="grid covers">
+  {% for cover in covers %}
+    <figure>
+      <img src="{{ cover.file }}" alt="{{ cover.label }}">
+      <figcaption>
+        <b>{{ cover.label }} · {{ cover.size }}</b>
+        {{ cover.file }}{% if cover.platforms %}<br><span class="tagline">用于 {{ cover.platforms }}</span>{% endif %}
+      </figcaption>
+    </figure>
+  {% endfor %}
+  </div>
+  {% endif %}
+
+  {% if canvas_rows %}
+  <h2>平台画幅对应</h2>
+  <table>
+    <tr><th>平台</th><th>投放画幅</th></tr>
+    {% for row in canvas_rows %}
+    <tr><td>{{ row.label }}</td><td class="ratio">{{ row.canvas }}</td></tr>
+    {% endfor %}
+  </table>
+  {% endif %}
+
+  <h2>发布文案</h2>
+  <div class="kv">
+    <div><span class="k">标题</span>{{ title }}</div>
+    <div><span class="k">简介</span>{{ description }}</div>
+    <div><span class="k">话题</span>{{ tags }}</div>
+  </div>
+
+  {% if issues or disclaimers %}
+  <h2>合规自检</h2>
+  <div class="kv">
+    {% if issues %}
+    <div><span class="k">已拦截</span>共 {{ issues|length }} 条，改写后入片：</div>
+    <ul>{% for issue in issues %}<li>{{ issue }}</li>{% endfor %}</ul>
+    {% else %}
+    <div><span class="k">已拦截</span>无</div>
+    {% endif %}
+    {% if disclaimers %}<div><span class="k">风险提示</span>{{ disclaimers }}</div>{% endif %}
+  </div>
+  {% endif %}
+
+</div>
+</body>
+</html>

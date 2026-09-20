@@ -17,6 +17,7 @@ from collections.abc import Mapping
 from typing import Any
 
 from stocktalk.modules.publisher import PLATFORM_SPECS, SauPublisher, check_environment
+from stocktalk.modules.review import COVER_LABELS, video_inventory
 from stocktalk.pipeline import Pipeline, PipelineError, load_config
 
 
@@ -337,50 +338,17 @@ def _run_all(pipeline: Pipeline, targets: list[tuple[str, str | None]], args: ar
     return failures
 
 
-# Every canvas cut is rendered next to the master (``<tag>.<canvas>.mp4``), so
-# the summary has to name them all — otherwise the mobile cut looks missing.
-CANVAS_LABELS = {"horizontal": "桌面版（横屏）", "vertical": "手机版（竖屏）"}
-
-
-def _canvas_of(path: str, default: str) -> str:
-    """Read the canvas back out of ``<tag>.<canvas>.mp4``; master has none."""
-    suffixes = Path(path).suffixes
-    if len(suffixes) >= 2 and suffixes[-2].lstrip(".") in CANVAS_LABELS:
-        return suffixes[-2].lstrip(".")
-    return default
-
-
 def _video_lines(result: dict) -> list[str]:
-    """One line per rendered canvas, naming the platforms each one feeds."""
-    canvas_map = {p: str(c) for p, c in (result.get("platform_canvas") or {}).items()}
-    cuts = result.get("platform_videos") or {}
-    master = str(result["video_path"])
-    main_canvas = str(result.get("canvas") or "") or _canvas_of(master, "")
-    order: list[str] = []
-    info: dict[str, dict[str, Any]] = {}
+    """One line per rendered canvas, naming the platforms each one feeds.
 
-    def add(path: str, canvas: str) -> None:
-        if path not in info:
-            info[path] = {"canvas": canvas, "platforms": []}
-            order.append(path)
-
-    add(master, main_canvas)
-    for platform, path in cuts.items():
-        add(str(path), canvas_map.get(platform) or _canvas_of(str(path), main_canvas))
-    for platform, canvas in canvas_map.items():
-        label = PLATFORM_SPECS.get(platform, {}).get("label", platform)
-        cut_path = cuts.get(platform)
-        if cut_path is not None:
-            info[str(cut_path)]["platforms"].append(label)
-        elif canvas in (main_canvas, ""):
-            info[master]["platforms"].append(label)
+    The inventory itself lives in ``modules.review`` so the summary and the
+    review page can never disagree about which cut goes where.
+    """
     lines = []
-    for path in order:
-        bucket = info[path]
-        targets = "、".join(bucket["platforms"])
-        suffix = f"   → 用于 {targets}" if targets else ""
-        label = CANVAS_LABELS.get(bucket["canvas"], bucket["canvas"] or "主片")
-        lines.append(f"{label}: {path}{suffix}")
+    for entry in video_inventory(result["video_path"], result.get("platform_videos") or {},
+                                 result.get("platform_canvas") or {}, result.get("canvas") or ""):
+        targets = f"   → 用于 {entry['platforms']}" if entry["platforms"] else ""
+        lines.append(f"{entry['label']}: {entry['path']}{targets}")
     return lines
 
 
@@ -394,8 +362,10 @@ def _print_run_result(result: dict) -> None:
             print(f"  视频: {line}")
     else:
         print("  MP4 渲染已跳过")
-    if result.get("covers"):
-        print(f"  封面: {', '.join(result['covers'].values())}")
+    for preset, path in (result.get("covers") or {}).items():
+        print(f"  封面: {COVER_LABELS.get(preset, preset)}: {path}")
+    if result.get("review_path"):
+        print(f"  审查: {result['review_path']}（浏览器打开可同屏看成片与封面）")
 
 
 def _print_batch_summary(targets: list[tuple[str, str | None]], failures: list[tuple[str, str]]) -> None:

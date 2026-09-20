@@ -206,3 +206,54 @@ def test_platform_cuts_follow_each_platforms_preferred_canvas(tmp_path: Path, mo
     # 只补渲了与主画幅不同的小红书竖版。
     assert set(cuts) == {"xiaohongshu"}
     assert cuts["xiaohongshu"].endswith(".vertical.mp4")
+
+
+def test_covers_and_review_page_ship_with_the_video(tmp_path: Path) -> None:
+    """封面与审查页跟着成片一起出，不必等到发布（2026-09-20 用户要求）。
+
+    不发布的人同样要能审查信息流里的样子，所以封面不能再挂在 ``publish``
+    分支上；审查页失败也只降级，不影响成片。
+    """
+    pipeline = Pipeline({
+        "output": {"dir": str(tmp_path / "out")},
+        "video": {"canvas": "horizontal"},
+        "publish": {"platforms": ["douyin"], "platform_canvas": {"douyin": "horizontal"}},
+    })
+    pipeline.stock_client.get_stock_data = MagicMock(return_value=FAKE_STOCK_DATA)
+    pipeline.dialogue_gen.generate = MagicMock(return_value=FAKE_SCRIPT)
+    pipeline.compliance.review = MagicMock(return_value=FAKE_SCRIPT)
+    pipeline.tts.synthesize = MagicMock(return_value=FAKE_AUDIO)
+    pipeline.builder.build = MagicMock(return_value={})
+    pipeline.builder.render_mp4 = MagicMock(return_value=tmp_path / "out" / "video.mp4")
+    cover = str(tmp_path / "out" / "video.cover-portrait.png")
+    pipeline._render_covers = MagicMock(return_value={"portrait": cover})
+    pipeline.publisher.publish = MagicMock()
+
+    result = pipeline.run("000001", stock_name="平安银行")
+
+    pipeline._render_covers.assert_called_once()
+    pipeline.publisher.publish.assert_not_called()
+    assert result["covers"] == {"portrait": cover}
+    review = Path(result["review_path"])
+    assert review.is_file() and review.name.endswith(".review.html")
+    assert "video.mp4" in review.read_text(encoding="utf-8")
+
+
+def test_review_failure_never_breaks_the_run(tmp_path: Path) -> None:
+    """审查页只是审查辅助：写崩了也只记一行，成片照旧返回。"""
+    pipeline = Pipeline({"output": {"dir": str(tmp_path / "out")}})
+    pipeline.stock_client.get_stock_data = MagicMock(return_value=FAKE_STOCK_DATA)
+    pipeline.dialogue_gen.generate = MagicMock(return_value=FAKE_SCRIPT)
+    pipeline.compliance.review = MagicMock(return_value=FAKE_SCRIPT)
+    pipeline.tts.synthesize = MagicMock(return_value=FAKE_AUDIO)
+    pipeline.builder.build = MagicMock(return_value={})
+    pipeline.builder.render_mp4 = MagicMock(return_value=tmp_path / "out" / "video.mp4")
+    pipeline._render_covers = MagicMock(return_value={})
+
+    monkeypatch_target = "stocktalk.pipeline.write_review_page"
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(monkeypatch_target, MagicMock(side_effect=OSError("disk full")))
+        result = pipeline.run("000001")
+
+    assert result["rendered"] is True
+    assert result["review_path"] is None

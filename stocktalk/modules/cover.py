@@ -49,7 +49,7 @@ CHROME_CANDIDATES: tuple[str, ...] = (
 )
 
 # Chart panel title per canvas family.
-CHART_TITLES = {"portrait": "价格走势", "landscape": "价格走势", "wide": "价格走势"}
+CHART_TITLES = {"portrait": "近30日价格走势", "landscape": "近30日价格走势", "wide": "近30日价格走势"}
 
 Screenshotter = Callable[[str, Path, Path, tuple[int, int], float], bool]
 
@@ -182,6 +182,7 @@ class CoverGenerator:
         bars = self._bars(technical)
         clamps = [self._number(bar.get("close")) for bar in bars]
         clamps = [value for value in clamps if value is not None]
+        sparkline, spark_end_y = self._sparkline(bars, tone)
         template = self._env.get_template("cover.html.j2")
         return template.render(
             name=stock_name or stock_code,
@@ -191,18 +192,22 @@ class CoverGenerator:
             tone=tone,
             price_text=self._price_text(quote),
             change_text=self._change_text(quote),
-            meta_items=self._meta_items(quote, technical),
-            chart_title=CHART_TITLES.get(size, "价格走势"),
+            chart_title=CHART_TITLES.get(size, "近30日价格走势"),
             chart_min=f"{min(clamps):,.2f}" if clamps else "",
             chart_max=f"{max(clamps):,.2f}" if clamps else "",
-            sparkline=self._sparkline(bars, tone),
+            sparkline=sparkline,
+            spark_end_y=spark_end_y,
             hook=self._hook(script, stock_name, stock_code),
             tags=self._tags(script),
         )
 
     @staticmethod
-    def _sparkline(bars: Sequence[Mapping[str, Any]], tone: str) -> str:
+    def _sparkline(bars: Sequence[Mapping[str, Any]], tone: str) -> tuple[str, float | None]:
         """Draw the real close-price curve (no synthetic candles).
+
+        Returns ``(svg, end_y_ratio)`` — the second value places the HTML
+        end-point halo in the template (an HTML layer, so the SVG's
+        ``preserveAspectRatio="none"`` stretch cannot turn it into an ellipse).
 
         ``preserveAspectRatio="none"`` stretches the curve to the panel, and
         ``vector-effect: non-scaling-stroke`` (set in CSS) keeps the stroke
@@ -219,7 +224,7 @@ class CoverGenerator:
         )
         if len(closes) < 2:
             return (f'<svg viewBox="0 0 {width:.0f} {height:.0f}" preserveAspectRatio="none" '
-                    f'role="img">{grid}</svg>')
+                    f'role="img">{grid}</svg>', None)
         floor, top = min(closes), max(closes)
         spread = max(top - floor, max(abs(top) * 0.012, 0.01))
         pad = height * 0.08
@@ -229,30 +234,33 @@ class CoverGenerator:
         line = " ".join(f"{x:.1f},{y:.1f}" for x, y in points)
         area = f"M0,{height:.1f} L" + " L".join(f"{x:.1f},{y:.1f}" for x, y in points) + f" L{width:.1f},{height:.1f} Z"
         path = "M" + " L".join(f"{x:.1f},{y:.1f}" for x, y in points)
-        cursor_x = width - 4.0
-        last_y = points[-1][1]
+        end_y_ratio = max(0.0, min(1.0, points[-1][1] / height)) * 100.0
         gradient = (
             f'<defs><linearGradient id="spark-fade" x1="0" y1="0" x2="0" y2="1">'
             f'<stop offset="0" stop-color="currentColor" stop-opacity=".34"/>'
             f'<stop offset="1" stop-color="currentColor" stop-opacity=".02"/>'
             f'</linearGradient></defs>'
         )
-        return (
+        svg = (
             f'<svg viewBox="0 0 {width:.0f} {height:.0f}" preserveAspectRatio="none" role="img">'
             f'{gradient}{grid}'
             f'<path class="spark-fill" fill="url(#spark-fade)" d="{area}"/>'
             f'<path class="spark-line" d="{path}"/>'
-            f'<rect class="cursor-rule" x="{cursor_x:.1f}" y="0" width="3" height="{height:.0f}"/>'
-            f'<rect class="cursor-dot" x="{cursor_x - 8:.1f}" y="{max(0.0, last_y - 7):.1f}" width="17" height="14"/>'
             f'</svg>'
         )
+        return svg, round(end_y_ratio, 2)
 
     @staticmethod
     def _bars(technical: Mapping[str, Any]) -> list[Mapping[str, Any]]:
-        """Flatten real daily closes out of the indicator history."""
+        """Flatten real daily closes out of the indicator history.
+
+        最近 30 根：60 日在缩略图里压成一团噪声，且常与当日涨跌情绪相悖
+        （60 日下行 + 当天大涨，红曲线画成一路向下）；30 日曲率清晰，
+        也更贴近「今天发生了什么」的封面叙事。
+        """
         history = technical.get("history") if isinstance(technical.get("history"), list) else []
         bars: list[Mapping[str, Any]] = []
-        for item in [entry for entry in history if isinstance(entry, Mapping)][-60:]:
+        for item in [entry for entry in history if isinstance(entry, Mapping)][-30:]:
             price = item.get("price") if isinstance(item.get("price"), Mapping) else {}
             if CoverGenerator._number(price.get("current")) is None:
                 continue
@@ -282,7 +290,10 @@ class CoverGenerator:
 
     @staticmethod
     def _tags(script: Mapping[str, Any]) -> list[str]:
-        """A short #话题 行 built from real script keywords."""
+        """A short #话题 行 built from real script keywords.
+
+        只取 2 个：feed 缩略图里第三个以后的胶囊读不清，纯噪声。
+        """
         words: list[str] = []
         for turn in script.get("turns", ()):
             if not isinstance(turn, Mapping):
@@ -294,7 +305,7 @@ class CoverGenerator:
         for fallback in ("A股", "基本面", "财报解读"):
             if fallback not in words:
                 words.append(fallback)
-        return [f"#{word}" for word in words[:4]]
+        return [f"#{word}" for word in words[:2]]
 
     @staticmethod
     def _clip(text: str, limit: int) -> str:
@@ -317,21 +328,6 @@ class CoverGenerator:
     def _change_text(quote: Mapping[str, Any]) -> str:
         change = CoverGenerator._number(quote.get("change_pct"))
         return f"{change:+.2f}%" if change is not None else ""
-
-    @staticmethod
-    def _meta_items(quote: Mapping[str, Any], technical: Mapping[str, Any]) -> list[dict[str, str]]:
-        items: list[dict[str, str]] = []
-        amount = CoverGenerator._number(quote.get("amount"))
-        if amount is not None:
-            items.append({"label": "成交额", "value": f"{amount / 1e8:,.2f}亿" if amount >= 1e8 else f"{amount / 1e4:,.0f}万"})
-        volume = CoverGenerator._number(quote.get("volume"))
-        if volume is not None:
-            items.append({"label": "成交量", "value": f"{volume / 1e4:,.2f}万手" if volume >= 1e4 else f"{volume:,.0f}手"})
-        summary = technical.get("summary") if isinstance(technical.get("summary"), Mapping) else {}
-        signal = str(summary.get("signal") or summary.get("trend") or "").strip()
-        if signal and signal != "—":
-            items.append({"label": "趋势", "value": CoverGenerator._clip(signal, 8)})
-        return items
 
     @staticmethod
     def _number(value: Any) -> float | None:

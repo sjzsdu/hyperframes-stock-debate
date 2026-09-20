@@ -142,6 +142,13 @@ def test_cover_never_shows_compliance_or_role_labels() -> None:
         assert banned not in html
 
 
+def test_cover_never_shows_trade_signals() -> None:
+    """技术信号的「卖出/买入」是买卖信号（合规红线），不许上封面。"""
+    stock = {**STOCK, "technical": {**STOCK["technical"], "summary": {"signal": "卖出"}}}
+    html = make_generator(Path("/tmp"))._html(stock, SCRIPT, "601689", "portrait", 1080, 1440)
+    assert "卖出" not in html
+
+
 def test_quote_tone_follows_a_share_colour_convention() -> None:
     gen = make_generator(Path("/tmp"))
     up = gen._html({**STOCK, "quote": {**STOCK["quote"], "change_pct": 1.2}}, SCRIPT, "601689",

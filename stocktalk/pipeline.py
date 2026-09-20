@@ -21,6 +21,7 @@ from stocktalk.modules.cover import CoverGenerator
 from stocktalk.modules.dialogue_generator import DialogueGenerator
 from stocktalk.modules.hyperframes_builder import HyperFramesBuilder
 from stocktalk.modules.publisher import PLATFORM_LABELS, SauPublisher, cover_sizes_for
+from stocktalk.modules.review import write_review_page
 from stocktalk.modules.stock_data import StockDataClient, StockDataConfig, StockDataIncompleteError
 from stocktalk.modules.tts_agent import TTSAgent
 
@@ -100,6 +101,31 @@ class Pipeline:
         if missing:
             self.console.print(f"[yellow]封面图缺失（{', '.join(missing)}），相关平台将不带封面发布[/yellow]")
         return {size: str(path) for size, path in rendered.items()}
+
+    def _write_review(self, *, stock_code: str, stock_name: str, tag: str, script: Mapping[str, Any],
+                      video_path: Path, platform_videos: Mapping[str, str],
+                      covers: Mapping[str, str], duration: float = 0.0) -> Path | None:
+        """把这次的成片 / 封面 / 发布文案汇总成一个本地审查页。
+
+        审查页和封面一样属于锦上添花：任何失败都只打印一行提示，绝不打断
+        主流程——视频与封面此时都已经落盘了。
+        """
+        try:
+            metadata = self.publisher.metadata_gen.generate(script, stock_name, stock_code)
+            publish = self.config.get("publish", {}) or {}
+            return write_review_page(
+                self.output_dir, tag,
+                stock_name=stock_name or stock_code, stock_code=stock_code, script=script,
+                video_path=video_path, platform_videos=platform_videos, covers=covers,
+                platform_canvas=publish.get("platform_canvas", {}) or {},
+                platforms=[str(p) for p in publish.get("platforms", ())],
+                main_canvas=str(self.builder.video_config.get("canvas", "")),
+                title=metadata.title, description=metadata.full_description, tags=metadata.tags,
+                duration=duration,
+            )
+        except Exception as exc:
+            self.console.print(f"[yellow]审查页生成失败（不影响成片）: {exc}[/yellow]")
+            return None
 
     def render_covers(self, script: Mapping[str, Any], stock_code: str, tag: str,
                       stock_name: str = "") -> dict[str, str]:
@@ -265,6 +291,8 @@ class Pipeline:
 
             video_path: Path | None = None
             platform_videos: dict[str, str] = {}
+            cover_files: dict[str, str] = {}
+            review_path: Path | None = None
             if render:
                 progress.update(task, description="Rendering MP4 (may take several minutes)")
                 try:
@@ -272,14 +300,21 @@ class Pipeline:
                 except Exception as exc:
                     raise PipelineError(f"MP4 render failed: {exc}") from exc
                 platform_videos = self._render_platform_cuts(stock_data, approved, audio, project_dir, tag, progress, task)
+                # 封面与成片一起产出，而不是只在发布时才渲：审查的人要能同时
+                # 看到画面和信息流里的缩略图（2026-09-20 用户要求）。封面失败
+                # 只降级为「无封面」，绝不连累已经渲好的 MP4。
+                cover_files = self._render_covers(stock_data, approved, stock_code, tag, progress, task)
+                review_path = self._write_review(
+                    stock_code=stock_code, stock_name=stock_data.get("quote", {}).get("name", stock_name or ""),
+                    tag=tag, script=approved, video_path=video_path, platform_videos=platform_videos,
+                    covers=cover_files, duration=float(audio.get("total_duration") or 0.0),
+                )
             else:
                 progress.update(task, description="HTML project ready (render skipped)")
             progress.advance(task)
 
             publish_report: dict[str, Any] | None = None
-            cover_files: dict[str, str] = {}
             if publish and video_path:
-                cover_files = self._render_covers(stock_data, approved, stock_code, tag, progress, task)
                 platform_list = [p for p in self.config.get("publish", {}).get("platforms", [])]
                 progress.update(task, description=f"Publishing to {', '.join(platform_list)}")
 
@@ -303,6 +338,7 @@ class Pipeline:
                   "srt": audio.get("srt_path"), "project_dir": str(project_dir),
                   "video_path": str(video_path) if video_path else None, "rendered": bool(video_path),
                   "platform_videos": platform_videos, "covers": cover_files,
+                  "review_path": str(review_path) if review_path else None,
                   # Kept on the result so the CLI summary can name both cuts and
                   # say which platforms each one feeds; otherwise the alternate
                   # canvas render is invisible unless you open the JSON.
