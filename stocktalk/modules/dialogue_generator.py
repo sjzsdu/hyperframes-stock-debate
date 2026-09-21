@@ -22,16 +22,17 @@ Runner = Callable[[Sequence[str], float], str]
 # asking a model for "a 90-second dialogue" reliably overshoots.
 SPEECH_CHARS_PER_SECOND = 4.8
 
-
+# 成片时长目标 2-5 分钟（2026-09-20 用户反馈"内容太短、得不到有效启示"）。
+# 长片要的是把一门生意讲透，所以轮数不追求多、单轮给到 130 字（约 27 秒）。
 @dataclass(frozen=True)
 class DialogueConfig:
     model: str = "qwen3.6-plus"
-    min_duration_seconds: int = 70
-    max_duration_seconds: int = 110
-    max_line_chars: int = 90
-    max_tokens: int = 2500
+    min_duration_seconds: int = 120
+    max_duration_seconds: int = 300
+    max_line_chars: int = 130
+    max_tokens: int = 8000
     temperature: float = 0.8
-    timeout_seconds: float = 180.0
+    timeout_seconds: float = 300.0
 
 
 class DialogueGenerator:
@@ -112,31 +113,48 @@ class DialogueGenerator:
             "必须只输出 JSON，不要 Markdown。"
         )
 
+    @staticmethod
+    def _minutes(seconds: int) -> int:
+        """秒换算成最近的整分钟，给 prompt 里那句「约 X-Y 分钟」用。（120→2、300→5）"""
+        return max(1, round(seconds / 60))
+
     def _user_prompt(self, payload: Mapping[str, Any]) -> str:
         min_s, max_s = self.config.min_duration_seconds, self.config.max_duration_seconds
         min_chars = int(min_s * SPEECH_CHARS_PER_SECOND)
         budget_chars = int(max_s * SPEECH_CHARS_PER_SECOND)
         floor_chars = max(30, self.config.max_line_chars // 2)
-        min_turns = max(4, min_chars // self.config.max_line_chars)
-        max_turns = max(min_turns + 2, budget_chars // floor_chars)
+        # 轮数按「典型单轮」估算，而不是拿极值算：极值配出来的区间太宽
+        # （4-22 轮），模型会往中间凑，长片的实际时长反而失控。
+        typical_chars = max(40, (floor_chars + self.config.max_line_chars) // 2)
+        min_turns = max(6, min_chars // typical_chars)
+        max_turns = max(min_turns + 4, budget_chars // typical_chars)
+        # --duration-minutes 4 会把上下限压成同一个值，别写成「约 4-4 分钟」。
+        minutes = (f"{self._minutes(min_s)}-{self._minutes(max_s)} 分钟" if max_s > min_s
+                   else f"{self._minutes(max_s)} 分钟")
         schema = {"title": "股票名（代码）：一句话点出这门生意或行业看点", "turns": [
             {"speaker": "bull", "line": f"{floor_chars} 到 {self.config.max_line_chars} 字的自然发言；允许极短打断或停顿",
              "beat": "生意本质",
              "visual": ["line 中提到的关键词1", "关键词2"]}],
             }
         return (
-            f"生成一段成片时长在 {min_s}-{max_s} 秒之间的中文对话流："
+            f"生成一段成片时长在 {min_s}-{max_s} 秒（约 {minutes}）的中文对话流："
             f"正文总字数控制在 {min_chars}-{budget_chars} 字之间（配音约 4.8 字/秒，超字数就会超时长），"
             f"分 {min_turns}-{max_turns} 轮发言，单轮 {floor_chars}-{self.config.max_line_chars} 字。"
-            "素材和数据多就往上限展开，素材少就收得住（不低于下限），不要为凑时长注水，也不要意犹未尽地草草收尾。"
             "不要编号、不要 Round、不要强制一来一回；"
             "允许一方连续追问、另一方长答后短驳，长短句交错，不要每轮等长。"
+            "这是一条长视频，不是快讯：观众交出的是几分钟的注意力，每一轮都要让他多懂一点这门生意。"
+            "宁可少几轮、把一轮讲透（说清一件事的来龙去脉和它对生意的含义），"
+            "也不要为了多聊几轮把观点切成碎片、或把同一个意思换句话再说一遍。"
+            "素材和数据多就往上限展开，素材少就收得住（不低于下限），不要为凑时长注水，也不要意犹未尽地草草收尾。"
             "至少一半的篇幅围绕公司业务和行业本身（生意模式、行业格局、竞争与需求），技术信号最多作为一句带过的佐证。"
             "开头几轮就把“这家公司靠什么赚钱”讲明白，让观众听完能多懂一门生意，而不是听了一段行情点评。"
+            "整体按这条主线层层递进（缺数据的层可以短，但不能跳过）："
+            "①这门生意是什么、钱从哪来；②行业位置、竞争格局与天花板；"
+            "③财务数字如何印证或推翻前面的生意判断；④市场预期与估值处在什么位置（只讲数据事实，不做买卖判断）；"
+            "⑤风险与不确定性落在哪个具体环节；⑥对这次聊到的生意做一个小结式收束。"
+            "每一层的对话都要落到具体数字或具体环节上，讲清“这意味着什么”，不要停在结论式的形容。"
             "涉及管理层时只能用公司档案里给出的姓名与职务，不评价个人能力、不推测动机；公司动作只说新闻里写了的，并带上出处和时间。"
-            "内容要充分展开：覆盖业务模式、行业格局、盈利来源、财务印证、风险与不确定性等多个层面，"
-            "避免车轱辘话和重复观点，每一轮都提供新的信息或新的角度。"
-            "收尾要自然：对这次聊到的生意做一个小结式收束，不要戛然而止。"
+            "收尾要自然，不要戛然而止。"
             "输出结构必须匹配：\n"
             f"{json.dumps(schema, ensure_ascii=False)}\n股票数据：\n{json.dumps(payload, ensure_ascii=False, separators=(',', ':'))}"
         )
@@ -162,7 +180,13 @@ class DialogueGenerator:
                           "character_name": self._character(speaker, speaker, "")["name"]})
         quote = stock_data.get("quote") if isinstance(stock_data.get("quote"), Mapping) else {}
         code, name = str(stock_data.get("code") or quote.get("code") or ""), str(quote.get("name") or stock_data.get("code") or "股票")
-        return {"stock_code": code, "stock_name": name, "title": self._clean_title(response.get("title"), name, code), "turns": turns}
+        char_count = sum(len(turn["line"]) for turn in turns)
+        return {"stock_code": code, "stock_name": name, "title": self._clean_title(response.get("title"), name, code),
+                "turns": turns,
+                # 按实测语速换算的自估时长。长片最容易出的偏差是模型多写几百字，
+                # 把它留在结果里，pipeline 就能在渲染前提醒（而不是渲完才发现超长）。
+                "char_count": char_count,
+                "estimated_seconds": round(char_count / SPEECH_CHARS_PER_SECOND, 1)}
 
     def _clean_line(self, value: Any) -> str:
         line = re.sub(r"\s+", "", str(value or ""))

@@ -102,6 +102,24 @@ class Pipeline:
             self.console.print(f"[yellow]封面图缺失（{', '.join(missing)}），相关平台将不带封面发布[/yellow]")
         return {size: str(path) for size, path in rendered.items()}
 
+    def _warn_if_over_budget(self, script: Mapping[str, Any]) -> None:
+        """脚本估算时长明显超出上限时提前提醒。
+
+        长片最容易出的偏差是模型多写几百字（2-5 分钟目标下就是多出一两分钟），
+        渲染前提醒比渲完才发现便宜得多。只提醒不阻断：真要缩短，调
+        ``dialogue.max_duration_seconds`` 即可。
+        """
+        try:
+            cap = float((self.config.get("dialogue", {}) or {}).get("max_duration_seconds") or 0)
+            estimated = float(script.get("estimated_seconds") or 0.0)
+        except (TypeError, ValueError):
+            return
+        if cap and estimated > cap * 1.15:
+            self.console.print(
+                f"[yellow]脚本 {script.get('char_count')} 字，按实测语速约 {estimated:.0f} 秒，"
+                f"超出目标上限 {cap:.0f} 秒——成片可能偏长，必要时调小 dialogue.max_duration_seconds。[/yellow]"
+            )
+
     def _write_review(self, *, stock_code: str, stock_name: str, tag: str, script: Mapping[str, Any],
                       video_path: Path, platform_videos: Mapping[str, str],
                       covers: Mapping[str, str], duration: float = 0.0) -> Path | None:
@@ -261,6 +279,7 @@ class Pipeline:
 
             progress.update(task, description="Generating debate script (may take ~1 min)")
             script = self._retry("Dialogue generation", lambda: self.dialogue_gen.generate(stock_data))
+            self._warn_if_over_budget(script)
             progress.advance(task)
 
             progress.update(task, description="Reviewing compliance")

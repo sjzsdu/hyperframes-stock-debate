@@ -66,11 +66,24 @@ def test_captions_are_one_line_on_both_canvases() -> None:
     assert _config()["video"]["subtitles"] == "line"
 
 
-def test_target_duration_stays_under_two_minutes() -> None:
-    """完播率决定有效播放，超过两分钟的长片分成反而更低。"""
+def test_target_duration_is_two_to_five_minutes() -> None:
+    """时长目标 2-5 分钟：2026-09-20 用户要求用时长换内容深度。
+
+    上限同时要落在平台允许范围内——快手 10 分钟是最紧的一条（其余抖音 15、
+    视频号 30、B站 120），5 分钟留有一倍余量，不构成瓶颈。
+    """
     dialogue = _config()["dialogue"]
-    assert dialogue["min_duration_seconds"] >= 60
-    assert dialogue["max_duration_seconds"] <= 120
+    assert dialogue["min_duration_seconds"] >= 120
+    assert dialogue["max_duration_seconds"] <= 300
+    assert dialogue["max_duration_seconds"] > dialogue["min_duration_seconds"]
+
+
+def test_long_script_budget_gets_headroom_for_tokens_and_timeouts() -> None:
+    """长片要一次性吐完 1400+ 字 JSON：token 上限和 LLM 超时必须跟着放大。"""
+    dialogue = _config()["dialogue"]
+    words = dialogue["max_duration_seconds"] * 4.8
+    assert dialogue["max_tokens"] >= words          # 光正文就得这么多 token 量级
+    assert dialogue["timeout_seconds"] >= 240
 
 
 def test_ai_content_label_is_configured_for_the_cli_platform() -> None:

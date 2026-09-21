@@ -60,6 +60,9 @@ def test_review_page_gathers_video_covers_copy_and_compliance(tmp_path: Path) ->
     assert "x.mp4" in html and "x.vertical.mp4" in html
     assert "x.cover-portrait.png" in html and "x.cover-wide.png" in html
     assert "竖版封面" in html and "1440×810" in html
+    # 等高 + 按比例分宽布局：flex-grow 与 aspect-ratio 都来自素材宽高比
+    assert 'style="flex: 1.7778 1 0;"' in html and 'style="flex: 0.5625 1 0;"' in html
+    assert 'style="aspect-ratio: 1.7778;"' in html and 'style="aspect-ratio: 0.5625;"' in html
     # 文案与时长：审查时不必再回去翻 JSON
     assert "冰轮环境" in html and "从卖设备到温控方案的生意跃迁" in html
     assert "96 秒" in html

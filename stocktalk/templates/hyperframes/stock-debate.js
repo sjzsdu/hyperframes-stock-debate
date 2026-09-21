@@ -24,10 +24,12 @@
   const intro = document.querySelector('#intro-card');
   const outro = document.querySelector('#outro-card');
 
-  // ---- Permanent stage: it arrives once and then never moves again ----------
-  tl.fromTo('#headline', { opacity: 0, y: -18 }, { opacity: 1, y: 0, duration: .5 }, stageIn)
-    .fromTo('#visual-frame', { opacity: 0, y: 14 }, { opacity: 1, y: 0, duration: .55 }, stageIn + .06)
-    .fromTo('#caption-zone', { opacity: 0, y: 14 }, { opacity: 1, y: 0, duration: .45 }, stageIn + .14);
+  // ---- Permanent stage: complete from frame zero ----------------------------
+  // 视频号等平台的聊天分享卡直接取视频首帧（2026-09-20 实测：分享卡=半空首帧），
+  // 所以开场不做淡入——第 0 帧就是完整排版，入场感交给开场卡的溶解。
+  tl.set('#headline', { opacity: 1, y: 0 }, 0)
+    .set('#visual-frame', { opacity: 1, y: 0 }, 0)
+    .set('#caption-zone', { opacity: 1, y: 0 }, 0);
 
   // ---- Content slots: updates happen in place, never as a page turn --------
   // Every slot stacks its versions with a DESCENDING z-index, so version N+1
@@ -43,8 +45,13 @@
       el.style.zIndex = String((SLOT_Z[slot] || 1000) - i);
       const start = Math.max(0, Number(el.dataset.start || 0));
       if (i === 0) {
-        tl.set(el, { visibility: 'visible' }, start);
-        tl.fromTo(el, { opacity: 0 }, { opacity: 1, duration: .5 }, start);
+        if (start === 0) {
+          // 首个版本从第 0 帧起就是完成态（海报帧），不做淡入。
+          tl.set(el, { visibility: 'visible', opacity: 1 }, 0);
+        } else {
+          tl.set(el, { visibility: 'visible' }, start);
+          tl.fromTo(el, { opacity: 0 }, { opacity: 1, duration: .5 }, start);
+        }
         return;
       }
       const previous = items[i - 1];
@@ -59,8 +66,12 @@
   document.querySelectorAll('.caption-line').forEach(el => {
     const at = Math.max(0, Number(el.dataset.start || 0));
     const duration = Math.max(.3, Number(el.dataset.duration || .8));
-    tl.set(el, { visibility: 'visible' }, at);
-    tl.fromTo(el, { opacity: 0, y: 10 }, { opacity: 1, y: 0, duration: .13, ease: 'power2.out' }, at);
+    if (at === 0) {
+      tl.set(el, { visibility: 'visible', opacity: 1, y: 0 }, 0);
+    } else {
+      tl.set(el, { visibility: 'visible' }, at);
+      tl.fromTo(el, { opacity: 0, y: 10 }, { opacity: 1, y: 0, duration: .13, ease: 'power2.out' }, at);
+    }
     tl.set(el, { visibility: 'hidden' }, at + duration);
   });
   document.querySelectorAll('.progress-fill').forEach(el => {
@@ -73,22 +84,44 @@
   document.querySelectorAll('.visual-item').forEach(el => {
     const start = Math.max(0, Number(el.dataset.start || 0));
     const isMarket = el.classList.contains('visual-market');
+    // 首个图板（start=0）直接以完成态上屏：柱状/蜡烛/画线的生长动画会掏空
+    // 第 0 帧，而首帧正是平台抓分享卡的地方；后续图板照旧播生长动画。
+    const born = start === 0;
     const bars = el.querySelectorAll('.bar');
-    if (bars.length) tl.fromTo(bars, { scaleY: 0, opacity: .3, transformOrigin: 'center bottom' }, { scaleY: 1, opacity: 1, stagger: .05, duration: .34 }, start + .2);
+    if (bars.length) {
+      if (born) tl.set(bars, { scaleY: 1, opacity: 1 }, 0);
+      else tl.fromTo(bars, { scaleY: 0, opacity: .3, transformOrigin: 'center bottom' }, { scaleY: 1, opacity: 1, stagger: .05, duration: .34 }, start + .2);
+    }
     const gauge = el.querySelector('.gauge-fill');
-    if (gauge) tl.fromTo(gauge, { strokeDasharray: 240, strokeDashoffset: 240 }, { strokeDashoffset: 0, duration: .6, ease: 'power1.inOut' }, start + .18);
+    if (gauge) {
+      if (born) tl.set(gauge, { strokeDasharray: 240, strokeDashoffset: 0 }, 0);
+      else tl.fromTo(gauge, { strokeDasharray: 240, strokeDashoffset: 240 }, { strokeDashoffset: 0, duration: .6, ease: 'power1.inOut' }, start + .18);
+    }
     const risk = el.querySelectorAll('.risk-line,.risk-area');
-    if (risk.length) tl.fromTo(risk, { opacity: 0, y: 10 }, { opacity: 1, y: 0, stagger: .08, duration: .4 }, start + .18);
+    if (risk.length) {
+      if (born) tl.set(risk, { opacity: 1, y: 0 }, 0);
+      else tl.fromTo(risk, { opacity: 0, y: 10 }, { opacity: 1, y: 0, stagger: .08, duration: .4 }, start + .18);
+    }
     const sentiment = el.querySelector('.sentiment-positive,.sentiment-negative');
-    if (sentiment) tl.fromTo(sentiment, { scaleX: 0, transformOrigin: 'left center' }, { scaleX: 1, duration: .5 }, start + .18);
+    if (sentiment) {
+      if (born) tl.set(sentiment, { scaleX: 1 }, 0);
+      else tl.fromTo(sentiment, { scaleX: 0, transformOrigin: 'left center' }, { scaleX: 1, duration: .5 }, start + .18);
+    }
     if (!isMarket) return;
     el.querySelectorAll('.draw-line').forEach((node, i) => {
-      tl.to(node, { strokeDashoffset: 0, duration: 1.05, ease: 'power1.inOut' }, start + .2 + i * .07);
+      if (born) tl.set(node, { strokeDashoffset: 0 }, 0);
+      else tl.to(node, { strokeDashoffset: 0, duration: 1.05, ease: 'power1.inOut' }, start + .2 + i * .07);
     });
     const candles = el.querySelectorAll('.candle');
-    if (candles.length) tl.fromTo(candles, { opacity: .15, scaleY: .08, transformOrigin: 'center bottom' }, { opacity: 1, scaleY: 1, stagger: .016, duration: .26 }, start + .24);
+    if (candles.length) {
+      if (born) tl.set(candles, { opacity: 1, scaleY: 1 }, 0);
+      else tl.fromTo(candles, { opacity: .15, scaleY: .08, transformOrigin: 'center bottom' }, { opacity: 1, scaleY: 1, stagger: .016, duration: .26 }, start + .24);
+    }
     const metrics = el.querySelectorAll('.metric');
-    if (metrics.length) tl.fromTo(metrics, { opacity: 0, x: 14 }, { opacity: 1, x: 0, stagger: .06, duration: .3 }, start + .3);
+    if (metrics.length) {
+      if (born) tl.set(metrics, { opacity: 1, x: 0 }, 0);
+      else tl.fromTo(metrics, { opacity: 0, x: 14 }, { opacity: 1, x: 0, stagger: .06, duration: .3 }, start + .3);
+    }
   });
 
   // ---- Ambient drift -------------------------------------------------------
@@ -97,9 +130,10 @@
 
   // ---- Opening / closing title cards --------------------------------------
   if (intro) {
-    tl.fromTo(intro, { opacity: 0 }, { opacity: 1, duration: .45 }, 0)
-      .fromTo(intro.querySelector('.intro-kicker'), { opacity: 0, y: 18, letterSpacing: '24px' }, { opacity: 1, y: 0, letterSpacing: '10px', duration: .5 }, .12)
-      .fromTo(intro.querySelector('.intro-title'), { opacity: 0, y: 26 }, { opacity: 1, y: 0, duration: .5 }, .22)
+    // 开场卡第 0 帧即完整上屏（分享卡=首帧），随后在原时刻溶解，露出完成态的舞台。
+    tl.set(intro, { opacity: 1 }, 0)
+      .set(intro.querySelector('.intro-kicker'), { opacity: 1, y: 0, letterSpacing: '10px' }, 0)
+      .set(intro.querySelector('.intro-title'), { opacity: 1, y: 0 }, 0)
       .to(intro, { opacity: 0, duration: .45, ease: 'power1.in' }, Math.max(.6, stageIn + .9));
   }
   if (outro) {

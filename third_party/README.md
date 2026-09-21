@@ -74,6 +74,16 @@ patches here so they survive an upgrade and can be sent upstream later:
     有头（无视 `publish.headless`）。
   - 已用 DryRun（`_submit_publish` 置空）端到端走通：选文件→编辑器→标题/描述→
     上传→AI声明→停在发布前。
+- `patches/0006-sau-tencent-cover-dialog-visible.patch` (2026-09-20)
+  - 视频号发布页把封面编辑弹窗**常驻在 DOM 里（hidden）**。`open_thumbnail_dialog`
+    点完入口只等 500ms 就按标题数 count，拿到隐藏弹窗交给后续
+    `wait_for(visible)`，5s 必超时——2026-09-20 15:49 国轩高科实发：4:3 横版封面
+    设置失败被跳过，视频号随即回退到**视频首帧**当封面，而首帧是入场动画未完成
+    的半空画面，聊天分享卡很难看（3:4 竖版那次入口点击恰好真弹了窗所以成功）。
+  - 修复：点入口后轮询最多 8s 等 `div.weui-desktop-dialog` **真正可见**
+    （`is_visible()`），等不到就换下一个入口选择器重试；全部失败才返回 None。
+  - 配套修复在 stocktalk 侧：`templates/hyperframes/stock-debate.js` 把开场场景
+    改为第 0 帧完成态（海报帧）——即使封面再被跳过，首帧也是完整排版。
 
 Re-apply after an upgrade (all patches are diffed against `0012d2c` and
 verified with `git apply --check`; apply in numeric order):
@@ -85,6 +95,7 @@ git apply ../patches/0002-sau-bilibili-runtime-resilience.patch
 git apply ../patches/0003-sau-ai-content-declaration.patch
 git apply ../patches/0004-sau-baijiahao-navigation-race.patch
 git apply ../patches/0005-sau-baijiahao-system-chrome-title-panel.patch
+git apply ../patches/0006-sau-tencent-cover-dialog-visible.patch
 ```
 
 All patches together reproduce this directory exactly apart from the

@@ -536,6 +536,27 @@ class ChartLibraryTests(unittest.TestCase):
         self.assertEqual(HyperFramesBuilder._headline_stats({}), [])
         self.assertEqual(HyperFramesBuilder._headline_stats("junk"), [])
 
+    # ---- Poster frame: 视频号分享卡直接取视频首帧，第 0 帧必须完整 ----------
+
+    def test_intro_scene_is_fully_composed_at_frame_zero(self) -> None:
+        """第 0 帧即完整排版（海报帧）——入场动画全部让位于可见性。
+
+        2026-09-20 实测：视频号 4:3 封面设置失败后回退到首帧当分享卡，
+        而首帧是 GSAP 入场动画未完成的半空画面。自此开场场景一律用
+        tl.set(..., 0) 置为完成态，入场感只靠开场卡溶解。
+        """
+        js = (HyperFramesBuilder({"video": {}})._asset_dir / "stock-debate.js").read_text(encoding="utf-8")
+        # 舞台三件套不再做入场淡入，第 0 帧就是完成态
+        self.assertNotIn("fromTo('#headline'", js)
+        self.assertIn("tl.set('#headline', { opacity: 1, y: 0 }, 0)", js)
+        # 开场卡第 0 帧完整上屏（只保留此后的溶解）
+        self.assertIn("tl.set(intro, { opacity: 1 }, 0)", js)
+        # 首个槽位版本与首个图板的细节（蜡烛/柱/画线）都 born-complete
+        self.assertIn("const born = start === 0", js)
+        self.assertIn("if (born) tl.set(candles, { opacity: 1, scaleY: 1 }, 0);", js)
+        # 首条字幕（at === 0）直接可见
+        self.assertIn("tl.set(el, { visibility: 'visible', opacity: 1, y: 0 }, 0);", js)
+
 
 if __name__ == "__main__":
     unittest.main()

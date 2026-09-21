@@ -6,7 +6,12 @@
 <style>
   /* 发布前的人工审查页：把成片、各画幅封面、发布元数据放到同一屏。
      自包含、无外部资源，和成片放在同一个 output/ 目录下双击即开；
-     视频与封面都用相对文件名引用，所以整包挪动目录后依然可用。 */
+     视频与封面都用相对文件名引用，所以整包挪动目录后依然可用。
+
+     布局两条铁律：
+     1) 高度一致 —— 每一行内的卡片拉伸到同一高度，媒体画面顶边/底边对齐；
+     2) 宽度按比例分配 —— 列宽不平均分，flex-grow ∝ 素材宽高比，
+        横版 16:9 分宽列、竖版 9:16 分窄列，画面高度便天然相等。 */
   :root {
     --bg: #0a1523;
     --panel: #101f33;
@@ -30,22 +35,23 @@
     margin: 34px 0 14px; font-size: 14px; font-weight: 600;
     letter-spacing: .18em; color: var(--accent);
   }
-  .grid { display: grid; gap: 18px; align-items: start; }
-  .videos { grid-template-columns: repeat(auto-fit, minmax(360px, 1fr)); }
-  .covers { grid-template-columns: repeat(auto-fit, minmax(268px, 1fr)); }
-  figure { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 12px; }
+  /* 一行 = 一组等高卡片。flex-grow 由模板按素材宽高比内联写入。 */
+  .row { display: flex; gap: 18px; align-items: stretch; flex-wrap: wrap; }
+  .row > * { min-width: 240px; }
+  figure, .panel {
+    background: var(--panel); border: 1px solid var(--line); border-radius: 12px;
+    padding: 12px; display: flex; flex-direction: column;
+  }
   video, img { width: 100%; border-radius: 8px; display: block; background: #000; }
-  figcaption { margin-top: 10px; font-size: 13px; line-height: 1.75; color: var(--muted); word-break: break-all; }
+  figcaption { margin-top: auto; padding-top: 10px; font-size: 13px; line-height: 1.75; color: var(--muted); word-break: break-all; }
   figcaption b { display: block; color: var(--text); font-weight: 600; margin-bottom: 2px; }
   figcaption .tagline { color: var(--accent); }
-  .kv {
-    background: var(--panel); border: 1px solid var(--line); border-radius: 12px;
-    padding: 16px 18px; font-size: 14px; line-height: 1.95;
-  }
-  .kv .k { color: var(--muted); display: inline-block; min-width: 62px; }
-  .kv ul { margin: 4px 0 0 76px; padding-left: 18px; }
-  .kv li { margin: 2px 0; }
-  table { border-collapse: collapse; font-size: 13px; }
+  .panel { padding: 16px 18px; font-size: 14px; line-height: 1.95; }
+  .panel h3 { font-size: 13px; font-weight: 600; letter-spacing: .14em; color: var(--accent); margin-bottom: 10px; }
+  .panel .k { color: var(--muted); display: inline-block; min-width: 62px; }
+  .panel ul { margin: 4px 0 0 76px; padding-left: 18px; }
+  .panel li { margin: 2px 0; }
+  table { border-collapse: collapse; font-size: 13px; width: 100%; }
   th, td { border: 1px solid var(--line); padding: 6px 14px; text-align: left; }
   th { color: var(--muted); font-weight: 500; }
   td.ratio { color: var(--accent); }
@@ -63,10 +69,10 @@
   </header>
 
   <h2>成片</h2>
-  <div class="grid videos">
+  <div class="row">
   {% for video in videos %}
-    <figure>
-      <video controls preload="metadata" src="{{ video.file }}"></video>
+    <figure style="flex: {{ video.aspect }} 1 0;">
+      <video controls preload="metadata" src="{{ video.file }}" style="aspect-ratio: {{ video.aspect }};"></video>
       <figcaption>
         <b>{{ video.label }}</b>
         {{ video.file }}{% if video.platforms %}<br><span class="tagline">用于 {{ video.platforms }}</span>{% endif %}
@@ -77,10 +83,10 @@
 
   {% if covers %}
   <h2>封面图（信息流缩略图）</h2>
-  <div class="grid covers">
+  <div class="row">
   {% for cover in covers %}
-    <figure>
-      <img src="{{ cover.file }}" alt="{{ cover.label }}">
+    <figure style="flex: {{ cover.aspect }} 1 0;">
+      <img src="{{ cover.file }}" alt="{{ cover.label }}" style="aspect-ratio: {{ cover.aspect }};">
       <figcaption>
         <b>{{ cover.label }} · {{ cover.size }}</b>
         {{ cover.file }}{% if cover.platforms %}<br><span class="tagline">用于 {{ cover.platforms }}</span>{% endif %}
@@ -90,35 +96,38 @@
   </div>
   {% endif %}
 
+  <h2>发布信息</h2>
+  <div class="row">
   {% if canvas_rows %}
-  <h2>平台画幅对应</h2>
-  <table>
-    <tr><th>平台</th><th>投放画幅</th></tr>
-    {% for row in canvas_rows %}
-    <tr><td>{{ row.label }}</td><td class="ratio">{{ row.canvas }}</td></tr>
-    {% endfor %}
-  </table>
+    <div class="panel" style="flex: 1 1 0;">
+      <h3>平台画幅对应</h3>
+      <table>
+        <tr><th>平台</th><th>投放画幅</th></tr>
+        {% for row in canvas_rows %}
+        <tr><td>{{ row.label }}</td><td class="ratio">{{ row.canvas }}</td></tr>
+        {% endfor %}
+      </table>
+    </div>
   {% endif %}
-
-  <h2>发布文案</h2>
-  <div class="kv">
-    <div><span class="k">标题</span>{{ title }}</div>
-    <div><span class="k">简介</span>{{ description }}</div>
-    <div><span class="k">话题</span>{{ tags }}</div>
-  </div>
-
+    <div class="panel" style="flex: 2 1 0;">
+      <h3>发布文案</h3>
+      <div><span class="k">标题</span>{{ title }}</div>
+      <div><span class="k">简介</span>{{ description }}</div>
+      <div><span class="k">话题</span>{{ tags }}</div>
+    </div>
   {% if issues or disclaimers %}
-  <h2>合规自检</h2>
-  <div class="kv">
-    {% if issues %}
-    <div><span class="k">已拦截</span>共 {{ issues|length }} 条，改写后入片：</div>
-    <ul>{% for issue in issues %}<li>{{ issue }}</li>{% endfor %}</ul>
-    {% else %}
-    <div><span class="k">已拦截</span>无</div>
-    {% endif %}
-    {% if disclaimers %}<div><span class="k">风险提示</span>{{ disclaimers }}</div>{% endif %}
-  </div>
+    <div class="panel" style="flex: 1 1 0;">
+      <h3>合规自检</h3>
+      {% if issues %}
+      <div><span class="k">已拦截</span>共 {{ issues|length }} 条，改写后入片：</div>
+      <ul>{% for issue in issues %}<li>{{ issue }}</li>{% endfor %}</ul>
+      {% else %}
+      <div><span class="k">已拦截</span>无</div>
+      {% endif %}
+      {% if disclaimers %}<div><span class="k">风险提示</span>{{ disclaimers }}</div>{% endif %}
+    </div>
   {% endif %}
+  </div>
 
 </div>
 </body>

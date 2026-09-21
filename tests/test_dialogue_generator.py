@@ -54,6 +54,41 @@ class DialogueGeneratorTests(unittest.TestCase):
         self.assertIn("45-90 字", message)
         self.assertNotIn("分钟之间", message)
 
+    def test_default_budget_targets_a_two_to_five_minute_cut(self):
+        """默认配置按 2-5 分钟算预算，并把轮数收敛成「少轮、讲透」的区间。
+
+        轮数用典型单轮（97 字）估算而不是极值：极值会配出 4-22 轮这种宽区间，
+        模型往中间凑，长片的时长反而失控。
+        """
+        message = DialogueGenerator()._user_prompt({"code": "1"})
+        self.assertIn("120-300 秒", message)
+        self.assertIn("约 2-5 分钟", message)
+        # 120s × 4.8 = 576 字，300s × 4.8 = 1440 字
+        self.assertIn("576-1440 字", message)
+        # 单轮 65-130 字，轮数按典型 97 字估 → 6-14 轮
+        self.assertIn("65-130 字", message)
+        self.assertIn("6-14 轮", message)
+        # 长片要的是深度，prompt 必须点明这一点
+        self.assertIn("这是一条长视频", message)
+        self.assertIn("把一轮讲透", message)
+
+    def test_fixed_duration_reads_as_a_single_minute_span(self):
+        """--duration-minutes 4 会把上下限压成同一个值，prompt 别写成「约 4-4 分钟」。"""
+        generator = DialogueGenerator({"dialogue": {"min_duration_seconds": 240, "max_duration_seconds": 240}})
+        message = generator._user_prompt({"code": "1"})
+        self.assertIn("（约 4 分钟）", message)
+        self.assertNotIn("4-4 分钟", message)
+
+    def test_script_reports_estimated_speech_duration(self):
+        """结果里带上字数与换算时长，好让流水线在渲染前就能提醒超长。"""
+        generator = DialogueGenerator(runner=lambda argv, timeout: self._response())
+        with patch("stocktalk.modules.dialogue_generator.shutil.which", return_value="bl"):
+            script = generator.generate({"code": "000001", "quote": {"name": "平安银行"}})
+
+        chars = sum(len(turn["line"]) for turn in script["turns"])
+        self.assertEqual(script["char_count"], chars)
+        self.assertAlmostEqual(script["estimated_seconds"], round(chars / 4.8, 1), places=1)
+
     def test_script_has_no_disclaimer_or_visual_prompt_fields(self):
         generator = DialogueGenerator(runner=lambda argv, timeout: self._response())
         with patch("stocktalk.modules.dialogue_generator.shutil.which", return_value="bl"):

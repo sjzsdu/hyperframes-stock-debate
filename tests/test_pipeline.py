@@ -257,3 +257,18 @@ def test_review_failure_never_breaks_the_run(tmp_path: Path) -> None:
 
     assert result["rendered"] is True
     assert result["review_path"] is None
+
+
+def test_over_budget_script_is_flagged_before_rendering(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    """脚本换算出的时长明显超上限时提前提醒——长片最容易多写几百字。
+
+    只提醒不阻断：真正要缩短是改 dialogue.max_duration_seconds 的事。
+    """
+    pipeline = Pipeline({"output": {"dir": str(tmp_path / "out")},
+                         "dialogue": {"max_duration_seconds": 300}})
+
+    pipeline._warn_if_over_budget({"char_count": 2000, "estimated_seconds": 417.0})
+    assert "超出目标上限" in capsys.readouterr().out
+
+    pipeline._warn_if_over_budget({"char_count": 1200, "estimated_seconds": 250.0})
+    assert "超出目标上限" not in capsys.readouterr().out

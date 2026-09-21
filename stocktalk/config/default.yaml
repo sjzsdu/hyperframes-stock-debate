@@ -3,19 +3,26 @@
 
 dialogue:
   model: qwen3.6-plus
-  # 成片时长目标：70-110 秒。平台播放分成只算「有效播放」，完播率是决定性因素，
-  # 3 分钟以上的长片完播率通常跌到 20% 以下，实际分成反而不如 90 秒的短片。
-  # 语速约 2.8 字/秒，110 秒 ≈ 300 字正文，见 max_line_chars 与 _user_prompt 的字数预算。
-  min_duration_seconds: 70
-  max_duration_seconds: 110
-  max_line_chars: 90
-  # 2 分钟对话正文约 250-350 字，JSON 开销另计。
-  max_tokens: 2500
+  # 成片时长目标：2-5 分钟（120-300 秒）。2026-09-20 用户反馈"内容太短、
+  # 得不到有效启示"，从原来的 70-110 秒上调——用时长换内容深度。
+  # 权衡记录：平台分成只算有效播放，完播率是决定性因素，长片完播率更低，
+  # 所以这是"讲透一门生意"优先于"分成最优"的选择，不是免费的。
+  # 平台上限不是瓶颈：快手 10 分钟最紧，其余抖音 15 分钟 / 视频号 30 分钟 /
+  # B站 120 分钟，5 分钟都留有充足余量。
+  # 字数预算 = 秒数 × 4.8 字/秒（实测语速，见 dialogue_generator.SPEECH_CHARS_PER_SECOND）：
+  # 120 秒 ≈ 576 字，300 秒 ≈ 1440 字。
+  min_duration_seconds: 120
+  max_duration_seconds: 300
+  # 单轮上限 130 字（约 27 秒）：长片要的是"把一个点讲透"，不是多聊几轮，
+  # 所以宁可轮数少、单轮长。
+  max_line_chars: 130
+  # 1440 字正文 + 每轮 JSON 结构（speaker/beat/visual）约 3000 token，留一倍余量。
+  max_tokens: 8000
   temperature: 0.8
   # Measured end-to-end `bl text chat` latency for a full 2-5 min script is
   # ~90-100s; a short script is faster, but retries each cost the full
   # timeout, so keep a wide margin.
-  timeout_seconds: 180
+  timeout_seconds: 300
 
 # tongstock connects to the remote TDX server on every invocation, which
 # typically takes 20-30s.  The timeout must comfortably exceed that so a

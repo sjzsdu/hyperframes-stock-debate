@@ -1000,15 +1000,23 @@ class TencentVideo(TencentBaseUploader):
                     continue
                 await cover_entry.wait_for(state="visible", timeout=3000)
                 await cover_entry.click()
-                await page.wait_for_timeout(500)
-                break
             except Exception:
                 continue
-
-        for title in dialog_titles:
-            cover_dialog = page.locator("div.weui-desktop-dialog").filter(has_text=title).first
-            if await cover_dialog.count():
-                return cover_dialog
+            # 微信页面把弹窗常驻在 DOM 里（hidden），只数 count 会拿到隐藏弹窗、
+            # 交给后续 wait_for(visible) 必超时——2026-09-20 横版封面就这样被跳过，
+            # 视频号随即回退到视频首帧当封面（首帧是半空的开场画面，分享卡很糟）。
+            # 所以点完入口后轮询等弹窗真正"可见"；等不到就换下一个入口选择器重试。
+            waited = 0.0
+            while waited < 8.0:
+                for title in dialog_titles:
+                    cover_dialog = page.locator("div.weui-desktop-dialog").filter(has_text=title).first
+                    try:
+                        if await cover_dialog.count() and await cover_dialog.is_visible():
+                            return cover_dialog
+                    except Exception:
+                        pass
+                await page.wait_for_timeout(400)
+                waited += 0.4
         return None
 
     async def confirm_thumbnail_crop(self, page: Page) -> None:
