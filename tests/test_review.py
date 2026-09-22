@@ -81,3 +81,42 @@ def test_review_page_renders_without_covers_or_metadata(tmp_path: Path) -> None:
 
     assert "y.mp4" in html
     assert "封面图" not in html
+
+
+def test_review_page_shows_the_arc_interaction_copy_and_rewrites(tmp_path: Path) -> None:
+    """骨架、片尾互动文案、逐字改写对照都要在同一页上。
+
+    这三样决定"这期为什么长这样"：骨架说明结构选择，互动文案说明片尾会打什么
+    上屏，改写对照说明合规层动了哪几句。审查时不该再回去翻 JSON。
+    """
+    script = {
+        **SCRIPT,
+        "arc": {"id": "annual", "name": "年报逐条", "beats": ["revenue", "margin", "shadow"],
+                "pruned": ["cash", "occupied"], "eligible": ["annual", "crack"], "forced": False},
+        "arc_notes": ["[第3轮] 骨架指定由 bear 说这段（margin），模型派给了 bull"],
+        "hook": "下一份财报的外销收入占比",
+        "question": "你更信渠道还是产能？",
+        "sides": {"bull": "乐观一边：产品力扎实", "bear": "谨慎一边：客户集中就是命门"},
+        "compliance_rewrites": [
+            {"where": "片尾·bull立场", "before": "看多一方：产品力扎实", "after": "乐观一边：产品力扎实"}],
+    }
+    path = write_review_page(tmp_path, "z", stock_name="华瓷股份", stock_code="001216",
+                             script=script, video_path=tmp_path / "z.mp4", platforms=[])
+    html = path.read_text(encoding="utf-8")
+
+    assert "本期结构与互动" in html
+    assert "年报逐条" in html
+    # 被剪掉的节拍要说明"这只票没有对应数据"，否则看不出结构为什么变短
+    assert "revenue → margin → shadow" in html
+    assert "cash" in html and "occupied" in html and "没有对应数据" in html
+    # 候选骨架：为什么这期不是裂痕式
+    assert "annual" in html and "crack" in html
+    # 模型没照骨架走的地方要留痕
+    assert "模型派给了 bull" in html
+    # 片尾会打在画面上的四样东西
+    assert "下一份财报的外销收入占比" in html
+    assert "你更信渠道还是产能？" in html
+    assert "客户集中就是命门" in html
+    # 改写对照：改了什么、改成什么（语义有没有被改跑要人能判断）
+    assert "改写对照" in html
+    assert "看多一方：产品力扎实" in html and "乐观一边：产品力扎实" in html

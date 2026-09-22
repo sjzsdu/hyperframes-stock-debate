@@ -18,6 +18,8 @@ import subprocess
 from pathlib import Path
 from typing import Any, Dict, List, Mapping
 
+from stocktalk.modules.arcs import resolve_speakers
+
 try:
     import websockets
 except ImportError:
@@ -35,6 +37,10 @@ class TTSAgent:
         self.config = config
         self.tts_config = config.get("tts", {})
         self.characters = config.get("characters", {})
+        # 说话的角色由配置决定，不写死：硬编码 {"bull","bear"} 会让配置里新增的
+        # 角色在这一步被静默丢掉（台词消失且不报错），是最难查的一类坑。
+        # 默认两名角色始终可用，配置只覆盖其中一个时不会误判。
+        self.speakers = resolve_speakers(self.characters)
         self.output_dir = Path(
             config.get("output", {}).get(
                 "dir", config.get("video", {}).get("output_dir", "./output")
@@ -79,17 +85,16 @@ class TTSAgent:
             "total_duration": segments[-1]["end_time"] if segments else 0.0,
         }
 
-    @staticmethod
-    def _turns(script: Mapping[str, Any]) -> List[Dict[str, str]]:
+    def _turns(self, script: Mapping[str, Any]) -> List[Dict[str, str]]:
         """Read the natural-turn contract, with legacy round support for old files."""
         turns = script.get("turns", [])
         if isinstance(turns, list):
             return [{"speaker": str(item.get("speaker")), "line": str(item.get("line"))}
-                    for item in turns if isinstance(item, Mapping) and item.get("speaker") in {"bull", "bear"} and item.get("line")]
+                    for item in turns if isinstance(item, Mapping) and item.get("speaker") in self.speakers and item.get("line")]
         result: List[Dict[str, str]] = []
         for round_data in script.get("rounds", []):
             if isinstance(round_data, Mapping):
-                for speaker in ("bull", "bear"):
+                for speaker in self.speakers:
                     line = TTSAgent._line_from(round_data.get(speaker))
                     if line: result.append({"speaker": speaker, "line": line})
         return result

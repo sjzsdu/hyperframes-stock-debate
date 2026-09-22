@@ -125,13 +125,19 @@ def render_review_html(*, tag: str, stock_name: str, stock_code: str, created_at
                        turns: int, duration: float, videos: Sequence[Mapping[str, Any]],
                        covers: Sequence[Mapping[str, str]], canvas_rows: Sequence[Mapping[str, str]],
                        title: str, description: str, tags: str,
-                       issues: Sequence[str], disclaimers: str) -> str:
+                       issues: Sequence[str], disclaimers: str,
+                       arc: Mapping[str, Any] | None = None,
+                       rewrites: Sequence[Mapping[str, str]] = (),
+                       cta: Mapping[str, Any] | None = None,
+                       arc_notes: Sequence[str] = ()) -> str:
     return _environment().get_template("review.html.j2").render(
         tag=tag, video_tag=tag, stock_name=stock_name, stock_code=stock_code, created_at=created_at,
         turns=turns, duration=f"{duration:.0f}" if duration else "—",
         videos=videos, covers=covers, canvas_rows=canvas_rows,
         title=title, description=description, tags=tags,
         issues=list(issues), disclaimers=disclaimers,
+        arc=dict(arc or {}), rewrites=list(rewrites), cta=dict(cta or {}),
+        arc_notes=list(arc_notes),
     )
 
 
@@ -153,6 +159,10 @@ def write_review_page(output_dir: str | Path, tag: str, *, stock_name: str, stoc
             "label": PLATFORM_LABELS.get(platform, platform),
             "canvas": (CANVAS_LABELS.get(canvas) or CANVAS_LABELS.get(main_canvas) or "主片") if canvas or main_canvas else "—",
         })
+    # 片尾互动图板上的三样东西，审查时要能一眼看到（它们比台词更容易被读成建议）。
+    sides = script.get("sides") if isinstance(script.get("sides"), Mapping) else {}
+    cta = {"hook": script.get("hook") or "", "question": script.get("question") or "",
+           "bull": sides.get("bull") or "", "bear": sides.get("bear") or ""}
     html = render_review_html(
         tag=tag, stock_name=stock_name, stock_code=stock_code,
         created_at=(created_at or datetime.now()).strftime("%Y-%m-%d %H:%M"),
@@ -161,6 +171,10 @@ def write_review_page(output_dir: str | Path, tag: str, *, stock_name: str, stoc
         title=title, description=description, tags=_join(tags),
         issues=[str(issue) for issue in script.get("compliance_issues", ()) or ()],
         disclaimers=_join(script.get("disclaimers", ()) or ()),
+        arc=script.get("arc") if isinstance(script.get("arc"), Mapping) else {},
+        rewrites=[r for r in (script.get("compliance_rewrites") or ()) if isinstance(r, Mapping)],
+        cta=cta,
+        arc_notes=[str(note) for note in script.get("arc_notes", ()) or ()],
     )
     path = Path(output_dir) / f"{tag}.review.html"
     path.write_text(html, encoding="utf-8")

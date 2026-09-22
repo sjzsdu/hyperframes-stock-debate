@@ -96,6 +96,34 @@
   </div>
   {% endif %}
 
+  {% if arc or cta.hook or cta.question or cta.bull or cta.bear or arc_notes %}
+  <h2>本期结构与互动</h2>
+  <div class="row">
+    <div class="panel" style="flex: 2 1 0;">
+      <h3>剧本骨架</h3>
+      {% if arc %}
+      <div><span class="k">骨架</span>{{ arc.name or arc.id }}{% if arc.forced %}（配置强制指定）{% endif %}</div>
+      <div><span class="k">节拍</span>{{ arc.beats|join(' → ') }}</div>
+      {% if arc.pruned %}<div><span class="k">剪掉</span>{{ arc.pruned|join('、') }}（这只票没有对应数据）</div>{% endif %}
+      {% if arc.eligible %}<div><span class="k">候选</span>{{ arc.eligible|join('、') }}</div>{% endif %}
+      {% else %}
+      <div><span class="k">骨架</span>—（脚本未记录，可能是旧版生成结果）</div>
+      {% endif %}
+      {% if arc_notes %}
+      <div><span class="k">偏差</span>模型有 {{ arc_notes|length }} 处没完全照骨架走：</div>
+      <ul>{% for note in arc_notes %}<li>{{ note }}</li>{% endfor %}</ul>
+      {% endif %}
+    </div>
+    <div class="panel" style="flex: 2 1 0;">
+      <h3>片尾互动（会打在画面上）</h3>
+      <div><span class="k">乐观一边</span>{{ cta.bull or "—" }}</div>
+      <div><span class="k">谨慎一边</span>{{ cta.bear or "—" }}</div>
+      <div><span class="k">下期盯</span>{{ cta.hook or "—" }}</div>
+      <div><span class="k">提问</span>{{ cta.question or "—" }}</div>
+    </div>
+  </div>
+  {% endif %}
+
   <h2>发布信息</h2>
   <div class="row">
   {% if canvas_rows %}
@@ -115,14 +143,18 @@
       <div><span class="k">简介</span>{{ description }}</div>
       <div><span class="k">话题</span>{{ tags }}</div>
     </div>
-  {% if issues or disclaimers %}
-    <div class="panel" style="flex: 1 1 0;">
+  {% if issues or disclaimers or rewrites %}
+    <div class="panel" style="flex: 2 1 0;">
       <h3>合规自检</h3>
       {% if issues %}
       <div><span class="k">已拦截</span>共 {{ issues|length }} 条，改写后入片：</div>
       <ul>{% for issue in issues %}<li>{{ issue }}</li>{% endfor %}</ul>
       {% else %}
       <div><span class="k">已拦截</span>无</div>
+      {% endif %}
+      {% if rewrites %}
+      <div><span class="k">改写对照</span>以下是逐字替换的结果，请确认语义没有被改跑：</div>
+      <ul>{% for item in rewrites %}<li><b>{{ item.where }}</b><br>{{ item.before }}<br><span class="tagline">→ {{ item.after }}</span></li>{% endfor %}</ul>
       {% endif %}
       {% if disclaimers %}<div><span class="k">风险提示</span>{{ disclaimers }}</div>{% endif %}
     </div>

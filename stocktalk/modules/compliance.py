@@ -64,6 +64,36 @@ PREDICTIVE_PATTERNS = (
     "将会", "必将", "肯定会", "一定会", "一定涨", "一定跌", "必涨", "必跌",
 )
 
+# 成片帧内的文案红线（tests/test_hyperframes_builder.py 的断言）：画面上不能出现
+# 免责声明、AI 声明，也不能出现"看多/看空"这类立场标签。片尾互动图板是新增的
+# **上屏**文案，所以它的字段（sides/hook/question）要比台词多过一道。
+FRAME_REPLACEMENTS: Tuple[Tuple[str, str], ...] = (
+    ("看多一方", "乐观一边"),
+    ("看空一方", "谨慎一边"),
+    ("看多方", "乐观一边"),
+    ("看空方", "谨慎一边"),
+    ("看多", "乐观"),
+    ("看空", "谨慎"),
+    ("免责", "说明"),
+    ("不构成投资建议", "仅供参考"),
+    ("不构成", "不作为"),
+    ("投资建议", "操作依据"),
+    ("虚拟人物", ""),
+    ("AI生成", ""),
+    ("AI 生成", ""),
+    # 画面里不能出现"生成"（AI 声明词），但业务语境里"生成现金流"这类说法很常见，
+    # 所以做同义替换而不是整句删除。
+    ("生成", "形成"),
+)
+
+# 片尾互动文案的红线：分歧只能落在生意层面。买卖动作、点位、收益暗示一旦出现在
+# 字幕之外**更醒目的**片尾图板上，比一句台词更容易被读成建议，所以直接拦截。
+FRAME_ADVICE_TERMS: Tuple[str, ...] = (
+    "买入", "卖出", "加仓", "减仓", "建仓", "清仓", "抄底", "逃顶",
+    "目标价", "点位", "止损", "止盈", "满仓", "空仓", "梭哈", "上车",
+    "必涨", "必跌", "翻倍", "稳赚", "包赚", "保本",
+)
+
 
 class ComplianceAgent:
     """Review a dialogue script and remove investment-advice-like wording."""
@@ -98,6 +128,9 @@ class ComplianceAgent:
 
         approved_script = deepcopy(dict(script))
         issues: List[str] = []
+        # 改写了哪些字句要留痕：``_fix_line`` 是纯字符串替换，"一定→可能"这种改动
+        # 会无声地改变语气强度，审查的人必须看得见自己那期到底被动了哪几句。
+        rewrites: List[Dict[str, str]] = []
         turns = approved_script.get("turns", [])
         if "turns" in approved_script and isinstance(turns, list):
             for turn in turns:
@@ -105,7 +138,11 @@ class ComplianceAgent:
                 character, line = str(turn.get("speaker", "unknown")), turn["line"]
                 line_issues = self._review_line(line, character)
                 issues.extend(line_issues)
-                if line_issues: turn["line"] = self._fix_line(line)
+                if line_issues:
+                    fixed = self._fix_line(line)
+                    if fixed != line:
+                        rewrites.append({"where": f"台词 · {character}", "before": line, "after": fixed})
+                    turn["line"] = fixed
         else:  # Legacy scripts remain reviewable.
             for round_data in approved_script.get("rounds", []):
                 if not isinstance(round_data, dict): continue
@@ -115,12 +152,60 @@ class ComplianceAgent:
                         line_issues = self._review_line(dialogue["line"], character); issues.extend(line_issues)
                         if line_issues: dialogue["line"] = self._fix_line(dialogue["line"])
 
+        # 标题会原样发到各平台；hook/question/sides 会打在片尾画面上。三者此前
+        # 完全没过审——标题里的"必涨"能直接发出去，这是实打实的缺口。
+        #
+        # 两个方向都要覆盖，不能只挑一个：
+        # · 有问题但没改写（"目标价/止损"这类词没有对应替换项）→ 必须记进 issues，
+        #   否则红线漏报；此前 issues 只在"文本被改写"时才收集，等于白报。
+        # · 改写了但没判问题（"看多→乐观"是画面红线替换，不算禁用词）→ 必须写回，
+        #   否则词照旧上屏。
+        for key, label, frame in (("title", "标题", False),
+                                  ("hook", "片尾·下期关注", True),
+                                  ("question", "片尾·提问", True)):
+            if key in approved_script:
+                original = str(approved_script.get(key) or "")
+                text, extra, changes = self._review_plain(label, original, frame=frame)
+                issues.extend(extra)
+                if text != original:
+                    approved_script[key] = text
+                    rewrites.extend(changes)
+        sides = approved_script.get("sides")
+        if isinstance(sides, Mapping):
+            clean_sides = dict(sides)
+            for role, value in sides.items():
+                original = str(value or "")
+                text, extra, changes = self._review_plain(f"片尾·{role}立场", original, frame=True)
+                issues.extend(extra)
+                if text != original:
+                    clean_sides[role] = text
+                    rewrites.extend(changes)
+            approved_script["sides"] = clean_sides
+
         existing = approved_script.get("disclaimers", [])
         if not isinstance(existing, list):
             existing = []
         approved_script["disclaimers"] = self._append_disclaimers(existing)
         approved_script["compliance_issues"] = issues
+        approved_script["compliance_rewrites"] = rewrites
         return approved_script
+
+    def _review_plain(self, label: str, value: Any, *, frame: bool = False) -> Tuple[str, List[str], List[Dict[str, str]]]:
+        """过审一段上屏文案，返回 (清洗后的文本, 问题清单, 改写对照)。
+
+        ``frame=True`` 用于会出现在画面上的片尾文案，额外拦一条"分歧必须落在
+        生意维度"——出现买卖动作/点位/收益暗示即记问题。
+        """
+        text = str(value or "")
+        if not text.strip():
+            return text, [], []
+        issues = self._review_line(text, label)
+        if frame:
+            issues.extend(f"[{label}] 片尾文案触碰画面红线: {term}"
+                          for term in FRAME_ADVICE_TERMS if term in text)
+        fixed = self.sanitize_frame(text) if frame else self.sanitize(text)
+        changes = [{"where": label, "before": text, "after": fixed}] if fixed != text else []
+        return fixed, issues, changes
 
     def sanitize(self, text: str) -> str:
         """Neutralise advice-like wording in free text (e.g. a cover headline).
@@ -129,6 +214,17 @@ class ComplianceAgent:
         needs the same treatment — the cover image is published too.
         """
         return self._fix_line(str(text or "")) if text else ""
+
+    def sanitize_frame(self, text: str) -> str:
+        """台词之外但**打在画面上**的文案（片尾互动图板）专用清洗。
+
+        比 ``sanitize`` 多一层画面红线替换：立场标签、免责声明、AI 声明词都不能
+        出现在帧内，所以这里把它们换成中性说法而不是只报告。
+        """
+        fixed = self._fix_line(str(text or ""))
+        for phrase, replacement in FRAME_REPLACEMENTS:
+            fixed = fixed.replace(phrase, replacement)
+        return re.sub(r"[，,]{2,}", "，", re.sub(r"\s{2,}", " ", fixed)).strip()
 
     def _append_disclaimers(self, existing: Iterable[Any]) -> List[str]:
         """Append configured notices without duplicating existing notices."""

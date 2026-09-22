@@ -135,10 +135,23 @@ class StockDataClient:
             result["kline"] = self._history_to_bars(result["technical"])
         self._enrich_quote(result["quote"], result["technical"])
         if not result["quote"].get("name"):
-            # `quote` often returns no name; `block show` echoes one as part of
-            # its header, and it is the same exchange source.
-            board = result.get("board") if isinstance(result.get("board"), Mapping) else {}
-            result["quote"]["name"] = str(board.get("name") or "") or self._resolve_name(symbol)
+            # `quote` often returns no name.  Pick the fallback carefully:
+            # `block show` echoes a name in its header, but that name comes from
+            # the block member files (block_fg.dat/block_gn.dat) and can be
+            # years stale — 000066 prints 上证商品 (a rename from ~2017) while
+            # every other dataset says 中国长城, and the stale name then leaks
+            # into the on-screen title.  F10 公司概况 (公司名称/证券简称) and
+            # stockinfo are maintained sources; the codes list is the last
+            # resort because `codes list` alone can miss a rename.
+            fallback = self._f10_short_name(result.get("f10"))
+            if not fallback:
+                stockinfo = result.get("stockinfo")
+                if isinstance(stockinfo, Mapping):
+                    fallback = str(stockinfo.get("name") or "")
+            if not fallback:
+                board = result.get("board") if isinstance(result.get("board"), Mapping) else {}
+                fallback = str(board.get("name") or "")
+            result["quote"]["name"] = fallback or self._resolve_name(symbol)
         return result
 
     @staticmethod
@@ -315,6 +328,34 @@ class StockDataClient:
             "unavailable_sections": unavailable,
         }
 
+    @staticmethod
+    def _f10_short_name(f10: Any) -> str:
+        """The display name from F10: 证券简称 first, then 公司名称.
+
+        证券简称 is what every other screen calls the stock (中国长城, not the
+        registered 中国长城科技集团股份有限公司).  Both are read from the
+        parsed profile when available and fall back to scanning the raw
+        公司概况 table, because block text arrives before parsing succeeds.
+        """
+        if not isinstance(f10, Mapping):
+            return ""
+        profile = f10.get("profile") if isinstance(f10.get("profile"), Mapping) else {}
+        for key in ("证券简称", "公司名称"):
+            value = str(profile.get(key) or "").strip()
+            if value:
+                return value
+        # The profile parser keeps only a fixed field list; scan the raw block
+        # text so a rename of the parser cannot silently empty this source.
+        overview = f10.get("sections").get("公司概况", "") if isinstance(f10.get("sections"), Mapping) else ""
+        if not overview:
+            return ""
+        rows = StockDataClient._parse_pipe_table(overview)
+        for key in ("证券简称", "公司名称"):
+            value = str(rows.get(key) or "").strip()
+            if value:
+                return value
+        return ""
+
     def get_board(self, code: str | int) -> dict[str, Any]:
         """Industry and concept membership for one symbol.
 
@@ -367,7 +408,7 @@ class StockDataClient:
         """
         overview = cls._parse_pipe_table(sections.get("公司概况", ""))
         profile: dict[str, Any] = {}
-        for source, label in (("公司名称", "公司名称"), ("主营业务", "主营业务"),
+        for source, label in (("证券简称", "证券简称"), ("公司名称", "公司名称"), ("主营业务", "主营业务"),
                               ("通达信研究行业", "所属行业"), ("证监会行业", "证监会行业"),
                               ("上市日期", "上市日期"), ("董事长", "董事长"), ("法人代表", "法人代表"),
                               ("总经理", "总经理"), ("公司董秘", "董秘")):

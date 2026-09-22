@@ -15,6 +15,8 @@ F10_OVERVIEW = (
     "┌───────┬───────────────────────────────┐\n"
     "│公司名称      │贵州茅台酒股份有限公司                                        │\n"
     "├───────┼───────────────────────────────┤\n"
+    "│证券简称      │贵州茅台                  │证券代码      │600519                │\n"
+    "├───────┼───────────────────────────────┤\n"
     "│主营业务      │茅台酒及系列酒的生产与销售                                    │\n"
     "├───────┼───────────────────────────────┤\n"
     "│通达信研究行业│食品饮料-酿酒              │证监会行业    │酒、饮料和精制茶制造业│\n"
@@ -72,14 +74,19 @@ class StockDataClientTests(unittest.TestCase):
         self.assertEqual(quote["price"], 1281.0)
 
     def test_missing_quote_name_resolved_from_codes_list(self):
+        """quote 无名且公司数据关闭时，从 codes list 补（最后手段）。
+
+        公司数据开着时名字来自 F10/stockinfo（见 block 表头改名测试），这里
+        必须关掉 require_company_data 才能走到 codes list 这条兜底路径。
+        """
         def runner(argv, timeout):
             if argv[1] == "quote":
                 return "600519 \n  最新价: 100.0\n"
             if argv[1] == "codes":
                 return "600519 贵州茅台 [沪市A股] 上交所\n000001 平安银行 [深市A股] 深交所\n"
-            return f10_response(argv) or '{"summary": {}, "history": []}'
+            return '{"summary": {}, "history": []}'
 
-        data = StockDataClient(runner=runner).get_stock_data("600519")
+        data = StockDataClient(StockDataConfig(require_company_data=False), runner=runner).get_stock_data("600519")
         self.assertEqual(data["quote"]["name"], "贵州茅台")
 
     def test_spaced_cjk_name_in_codes_list_is_collapsed(self):
@@ -90,10 +97,53 @@ class StockDataClientTests(unittest.TestCase):
                 return "002224 \n  最新价: 3.660\n"
             if argv[1] == "codes":
                 return "002224 三 力 士 [深市主板] 深交所\n600519 贵 州 茅 台 [沪市A股] 上交所\n"
-            return f10_response(argv) or '{"summary": {}, "history": []}'
+            return '{"summary": {}, "history": []}'
 
-        data = StockDataClient(runner=runner).get_stock_data("002224")
+        data = StockDataClient(StockDataConfig(require_company_data=False), runner=runner).get_stock_data("002224")
         self.assertEqual(data["quote"]["name"], "三力士")
+
+    def test_board_header_rename_does_not_override_fresh_sources(self):
+        """block show 表头名可能落后行情数年：000066 在 block_fg/gn.dat 里仍叫
+        上证商品，而 F10/stockinfo 都已改名中国长城——取旧名会把错误名字渲染
+        进成片标题。名字必须以维护中的数据源为准。
+        """
+        overview = (
+            "公司概况☆ ◇000066 中国长城 更新日期：2026-09-22◇ 通达信沪深京F10\n"
+            "【1.基本资料】\n"
+            "│公司名称      │中国长城科技集团股份有限公司                                │\n"
+            "│证券简称      │中国长城              │证券代码      │000066              │\n"
+            "│主营业务      │计算机及相关设备制造                                        │\n"
+        )
+
+        def runner(argv, timeout):
+            if argv[1] == "quote":
+                return "000066 \n  最新价: 15.910\n"  # text quote carries no name
+            if argv[1] == "block":
+                return "股票: 000066 上证商品 所属板块:\n--------------------------------------------------\n  国防军工 (type:2, 798只成分股)\n"
+            if argv[1] == "stockinfo":
+                return '{"code":"000066","name":"中国长城","marketCap":478.7}'
+            if argv[1] == "company":
+                return 'log\n[{"Name": "公司概况", "Length": 1}]'
+            if argv[1] == "company-content":
+                return json.dumps({"block": "公司概况", "code": "000066", "content": overview})
+            if argv[1] == "finance":
+                return json.dumps({"ZhuYingShouRu": 9382865, "JingLiRun": -83617, "ZongGuBen": 3225799.0,
+                                   "LiuTongGuBen": 3225549.7, "MeiGuJingZiChan": 3.389, "UpdatedDate": 20260630})
+            return '{"summary": {}, "history": []}'
+
+        data = StockDataClient(runner=runner).get_stock_data("000066")
+        self.assertEqual(data["quote"]["name"], "中国长城")
+        # board still records the block source verbatim — it feeds 板块分析.
+        self.assertEqual(data["board"]["name"], "上证商品")
+
+    def test_f10_short_name_prefers_display_name_over_registered_name(self):
+        # F10 公司概况 carries both: 证券简称 (display, what screens show) and
+        # 公司名称 (registered).  The display name must win.
+        f10 = {"sections": {"公司概况": F10_OVERVIEW}, "profile": {}}
+        self.assertEqual(StockDataClient._f10_short_name(f10), "贵州茅台")
+        # Only the registered name present → that is still a real name.
+        f10_registered = {"sections": {"公司概况": F10_OVERVIEW.replace("│证券简称      │贵州茅台                  │证券代码      │600519                │\n", "")}, "profile": {}}
+        self.assertEqual(StockDataClient._f10_short_name(f10_registered), "贵州茅台酒股份有限公司")
 
     def test_exchange_flag_matches_code_prefix(self):
         self.assertEqual(StockDataClient._exchange_of("600519"), "sh")
@@ -251,7 +301,11 @@ class StockDataClientTests(unittest.TestCase):
             StockDataClient(runner=runner).get_stock_data("600519")
 
     def test_quote_name_falls_back_to_block_header(self):
-        """quote 常返回空名，block 的输出头带着交易所的正式名称。"""
+        """F10/stockinfo 都拿不到时，block 表头名仍是有效来源。
+
+        它可能落后行情数年（000066 上证商品→中国长城），所以排在两个维护中
+        的数据源之后；有总比没有强——封面与标题顶着真名发。
+        """
         def runner(argv, timeout):
             if argv[1] == "quote":
                 return "600519 \n  最新价: 100.0\n"
@@ -261,7 +315,7 @@ class StockDataClientTests(unittest.TestCase):
                 return "600519 贵州茅台 [沪市A股] 上交所\n"
             return f10_response(argv) or '{"summary": {}, "history": []}'
 
-        data = StockDataClient(runner=runner).get_stock_data("600519")
+        data = StockDataClient(StockDataConfig(require_company_data=False), runner=runner).get_stock_data("600519")
         self.assertEqual(data["quote"]["name"], "贵州茅台")
 
 

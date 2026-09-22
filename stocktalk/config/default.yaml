@@ -19,6 +19,22 @@ dialogue:
   # 1440 字正文 + 每轮 JSON 结构（speaker/beat/visual）约 3000 token，留一倍余量。
   max_tokens: 8000
   temperature: 0.8
+  # 剧本骨架（2026-09-22）。此前"怎么讲"写死在 prompt 字符串里，导致每一期的
+  # 节拍序列、开场句式、收尾方式完全一样，看三期就疲（用户反馈）。
+  # 骨架注册表见 stocktalk/modules/arcs.py：
+  #   auto     按这只票**实际拿得到的数据**挑（默认）：有数据才加这一段，没有就不加，
+  #            不硬凑；够格的骨架有多条时按 (代码, 日期) 稳定分散，于是同一只票不同
+  #            日子、或不同票之间天然不会撞形，且不依赖任何跨运行状态。
+  #   mainline 六层主线（回退用：生意本质→行业→财务→风险→估值→小结）
+  #   crack    裂痕式：反常识数字开场→追问代价→数据核对→极短认可→留下分歧
+  #   customer 客户视角：谁在买→为什么买→会不会续买→谁能替代→生意小结
+  #   annual   年报逐条：收入结构→毛利来源→现金流质量→钱压在哪→隐患
+  #   peers    同行对比：同行家数→规模位置→毛利差距→排名证据→小结
+  # 想固定成一种风格就写它的 id（例如 annual），想恢复旧观感写 mainline。
+  arc: auto
+  # 短回应（"嗯""有道理""但是——"）的字数上限：对话该长则长、该短则短，
+  # 用户 2026-09-22 明确要求。命中的轮次不再重画画面图板（一句话的认可没必要）。
+  short_line_chars: 20
   # Measured end-to-end `bl text chat` latency for a full 2-5 min script is
   # ~90-100s; a short script is faster, but retries each cost the full
   # timeout, so keep a wide margin.

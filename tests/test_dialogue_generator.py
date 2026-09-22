@@ -161,5 +161,134 @@ class DialogueGeneratorTests(unittest.TestCase):
         self.assertNotIn("news", empty)
 
 
+    # ---- 剧本骨架：结构不再由 prompt 字符串里的固定主线决定 ---------------
+
+    def _arc_response(self):
+        """带 beat / 互动字段的完整响应。"""
+        return json.dumps({
+            "title": "华瓷股份（001216）：九成收入靠色釉陶瓷",
+            "turns": [
+                {"speaker": "bull", "beat": "revenue", "line": "上半年 5.76 亿营收里色釉陶瓷占了 90.56%，毛利率 33.52%。"},
+                {"speaker": "bear", "beat": "margin", "line": "九成收入压在一类产品上，抗风险能力得再看两眼。"},
+                {"speaker": "bull", "beat": "cash", "line": "嗯。"},
+                {"speaker": "bear", "beat": "occupied", "line": "存货 2.76 亿、应收 1.67 亿都压在账上。"},
+                {"speaker": "bull", "beat": "shadow", "line": "所以真正要盯的是产能爬坡的实际产出。"},
+            ],
+            "sides": {"bull": "单一品类做到九成，说明产品力扎实", "bear": "客户集中就是命门"},
+            "hook": "下一份财报的外销收入占比",
+            "question": "你更信渠道还是产能？",
+        }, ensure_ascii=False)
+
+    def _annual_generator(self, response=None):
+        return DialogueGenerator({"dialogue": {"arc": "annual", "max_line_chars": 80},
+                                  "characters": {"bull": {"name": "新手"}, "bear": {"name": "老手"}}},
+                                 runner=lambda argv, timeout: response or self._arc_response())
+
+    def _full_data(self):
+        """年报逐条所需的真实数据：主营构成（收入/毛利）+ 现金流与存货/应收。
+
+        骨架只认"压平后的 payload"路径（f10.主营构成.明细 / financials.*），所以这里给
+        stock_data 的原始形状，由 _compact_data 压平。缺数据的节拍会被正常剪枝——那是
+        设计如此；这几个测试要验的恰恰是"数据齐了，骨架就该全须全尾地进 prompt"。
+        """
+        return {
+            "code": "001216",
+            "quote": {"name": "华瓷股份"},
+            "f10": {"profile": {
+                "主营业务": "色釉陶瓷的研发、生产与销售",
+                "所属行业": "轻工制造-陶瓷",
+                "主营构成": {"报告期": "2026-06-30", "明细": [
+                    {"项目": "色釉陶瓷(产品)", "收入": "5.22亿", "收入占比(%)": "90.56", "毛利率(%)": "33.52"},
+                    {"项目": "其他(产品)", "收入": "0.54亿", "收入占比(%)": "9.44", "毛利率(%)": "18.10"}]}}},
+            "financials": {"报告期": "2026-06-30", "营业收入(亿元)": 5.76, "净利润(亿元)": 0.71,
+                           "经营现金流(亿元)": 0.83, "存货(亿元)": 2.76, "应收账款(亿元)": 1.67},
+        }
+
+    def test_system_prompt_renders_the_chosen_arc_instead_of_a_fixed_mainline(self):
+        generator = self._annual_generator()
+        with patch("stocktalk.modules.dialogue_generator.shutil.which", return_value="bl"):
+            generator.generate(self._full_data())
+        system = generator._system_prompt()
+        # 骨架的节拍与分工进了 prompt
+        self.assertIn("本期骨架：年报逐条", system)
+        for key in ("revenue", "margin", "cash", "occupied", "shadow"):
+            self.assertIn(key, system)
+        # 旧的固定主线（①…⑥）必须消失，否则模型还是会照着它写
+        self.assertNotIn("①这门生意是什么", system)
+        # 反套话与短回应许可
+        self.assertIn("反套话", system)
+        self.assertIn("咱们先看", system)   # 作为被禁止的套式被列出来
+        self.assertIn("该长则长、该短则短", system)
+
+    def test_user_prompt_carries_the_arc_order_and_interaction_fields(self):
+        generator = self._annual_generator()
+        message = generator._user_prompt(generator._compact_data(self._full_data()))
+        self.assertIn("revenue→margin→cash→occupied→shadow", message)
+        self.assertNotIn("整体按这条主线层层递进", message)
+        for field in ("hook", "question", "sides"):
+            self.assertIn(field, message)
+        # 互动文案的红线要写在 prompt 里，不能等合规层事后擦
+        self.assertIn("禁止询问买卖", message)
+        self.assertIn("可验证的具体变量", message)
+
+    def test_script_records_the_arc_beats_and_interaction_copy(self):
+        with patch("stocktalk.modules.dialogue_generator.shutil.which", return_value="bl"):
+            script = self._annual_generator().generate(self._full_data())
+        self.assertEqual(script["arc"]["id"], "annual")
+        self.assertEqual(script["arc"]["beats"], ["revenue", "margin", "cash", "occupied", "shadow"])
+        self.assertEqual(script["hook"], "下一份财报的外销收入占比")
+        self.assertEqual(script["question"], "你更信渠道还是产能？")
+        self.assertEqual(script["sides"]["bull"], "单一品类做到九成，说明产品力扎实")
+        self.assertEqual(script["sides"]["bear"], "客户集中就是命门")
+        self.assertEqual(script["arc_notes"], [])
+
+    def test_missing_interaction_fields_degrade_without_breaking(self):
+        """模型没给 hook/question/sides 时不能抛错——只是片尾退化成原样。"""
+        with patch("stocktalk.modules.dialogue_generator.shutil.which", return_value="bl"):
+            script = self._annual_generator(response=self._response()).generate(self._full_data())
+        self.assertEqual(script["hook"], "")
+        self.assertEqual(script["question"], "")
+        self.assertEqual(script["sides"], {"bull": "", "bear": ""})
+
+    def test_beat_outside_the_arc_is_carried_forward_and_reported(self):
+        """模型报了个骨架外的 beat：结构不能被它带乱，但偏差要留痕。"""
+        response = json.dumps({"turns": [
+            {"speaker": "bull", "beat": "revenue", "line": "收入结构先看主营构成。"},
+            {"speaker": "bear", "beat": "生意本质", "line": "这个 beat 不在年报逐条里。"},
+        ]}, ensure_ascii=False)
+        with patch("stocktalk.modules.dialogue_generator.shutil.which", return_value="bl"):
+            script = self._annual_generator(response=response).generate(self._full_data())
+        self.assertEqual([turn["beat"] for turn in script["turns"]], ["revenue", "revenue"])
+        self.assertTrue(any("不在本期骨架内" in note for note in script["arc_notes"]))
+
+    def test_beat_cannot_rewind_the_arc_order(self):
+        response = json.dumps({"turns": [
+            {"speaker": "bull", "beat": "cash", "line": "先跳到现金流。"},
+            {"speaker": "bear", "beat": "revenue", "line": "又想回到收入结构。"},
+        ]}, ensure_ascii=False)
+        with patch("stocktalk.modules.dialogue_generator.shutil.which", return_value="bl"):
+            script = self._annual_generator(response=response).generate(self._full_data())
+        self.assertEqual([turn["beat"] for turn in script["turns"]], ["cash", "cash"])
+        self.assertTrue(any("回退了骨架顺序" in note for note in script["arc_notes"]))
+
+    def test_short_reply_is_flagged_and_tolerated(self):
+        """一句"嗯"也是合法的一轮：标成 short，交给渲染层跳过换图板。"""
+        with patch("stocktalk.modules.dialogue_generator.shutil.which", return_value="bl"):
+            script = self._annual_generator().generate(self._full_data())
+        short = next(turn for turn in script["turns"] if turn["line"] == "嗯。")
+        self.assertTrue(short["short"])
+        self.assertFalse(script["turns"][0]["short"])   # 长台词不算短回应
+
+    def test_forced_arc_that_lacks_data_still_falls_back_to_a_usable_arc(self):
+        """配置强制一条骨架、这只票却没那份数据时，不能产出一个缺开场的空壳。"""
+        generator = DialogueGenerator({"dialogue": {"arc": "peers"}, "characters": {}},
+                                      runner=lambda argv, timeout: self._response())
+        with patch("stocktalk.modules.dialogue_generator.shutil.which", return_value="bl"):
+            generated = generator.generate({"code": "1", "quote": {"name": "平安银行"}})
+        self.assertEqual(generated["arc"]["id"], "peers")   # 显式配置要被尊重
+        self.assertTrue(generated["arc"]["forced"])
+        self.assertTrue(generated["arc"]["pruned"], "缺数据的节拍要记录成被剪掉")
+
+
 if __name__ == "__main__":
     unittest.main()

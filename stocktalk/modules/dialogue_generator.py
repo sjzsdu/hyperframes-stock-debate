@@ -6,7 +6,11 @@ import re
 import shutil
 import subprocess
 from dataclasses import dataclass
+from datetime import date
 from typing import Any, Callable, Mapping, Sequence
+
+from stocktalk.modules.arcs import (Arc, ArcChoice, Beat, beats_by_key,
+                                    resolve_speakers, select_arc)
 
 
 class DialogueGenerationError(RuntimeError):
@@ -33,6 +37,12 @@ class DialogueConfig:
     max_tokens: int = 8000
     temperature: float = 0.8
     timeout_seconds: float = 300.0
+    # 剧本骨架：注册表 id，或 "auto"（按这只票实际拿得到的数据自动挑）。
+    # 见 stocktalk/modules/arcs.py。
+    arc: str = "auto"
+    # 短回应（"嗯""有道理，但是…"）的字数上限。用户 2026-09-22：
+    # 对话该长则长该短则短，有时候只是认可一句。
+    short_line_chars: int = 20
 
 
 class DialogueGenerator:
@@ -48,6 +58,8 @@ class DialogueGenerator:
             max_tokens=int(source.get("max_tokens", DialogueConfig.max_tokens)),
             temperature=float(source.get("temperature", DialogueConfig.temperature)),
             timeout_seconds=float(source.get("timeout_seconds", DialogueConfig.timeout_seconds)),
+            arc=str(source.get("arc", DialogueConfig.arc) or DialogueConfig.arc),
+            short_line_chars=int(source.get("short_line_chars", DialogueConfig.short_line_chars)),
         )
         if (self.config.min_duration_seconds < 1 or self.config.max_duration_seconds < self.config.min_duration_seconds
                 or not 30 <= self.config.max_line_chars <= 150 or self.config.max_tokens < 1):
@@ -55,22 +67,46 @@ class DialogueGenerator:
         if not 0 < self.config.temperature <= 2:
             raise ValueError("temperature must be in (0, 2]")
         self.characters = dict((config or {}).get("characters", {}))
+        # 说话的只有这两个角色，但"有哪几个角色"由配置决定而不是写死：
+        # 之前 {"bull", "bear"} 硬编码在两处（这里与 tts_agent），新增角色会被
+        # 静默丢弃——一个不报错的坑。配置里加了角色就自动可用。
+        self.speakers = resolve_speakers(self.characters)
+        self._active: ArcChoice | None = None
         self._runner = runner or self._run_subprocess
+
+    def select_arc(self, payload: Mapping[str, Any]) -> ArcChoice:
+        """按这只票的数据挑骨架，并记下选择结果供 prompt 与审计复用。"""
+        quote = payload.get("quote") if isinstance(payload.get("quote"), Mapping) else {}
+        code = str(payload.get("code") or quote.get("code") or "")
+        choice = select_arc(payload, configured=self.config.arc, code=code,
+                            day=date.today().isoformat())
+        self._active = choice
+        return choice
+
+    def _arc_choice(self, payload: Mapping[str, Any] | None = None) -> ArcChoice:
+        """当前生效的骨架：已选过的就用它，否则就地选一次。"""
+        if self._active is not None:
+            return self._active
+        return self.select_arc(payload if isinstance(payload, Mapping) else {})
 
     def generate(self, stock_data: Mapping[str, Any]) -> dict[str, Any]:
         if not isinstance(stock_data, Mapping):
             raise TypeError("stock_data must be a mapping")
         self._require_bailian_cli()
         payload = self._compact_data(stock_data)
-        raw = self._runner(self._command(self._system_prompt(), self._user_prompt(payload)), self.config.timeout_seconds)
-        return self._normalize_script(self._decode_response(raw), payload)
+        choice = self.select_arc(payload)
+        raw = self._runner(self._command(self._system_prompt(choice.arc),
+                                         self._user_prompt(payload, choice.arc)),
+                           self.config.timeout_seconds)
+        return self._normalize_script(self._decode_response(raw), payload, choice)
 
     def _command(self, system: str, message: str) -> list[str]:
         return ["bl", "text", "chat", "--model", self.config.model, "--system", system, "--message", message,
                 "--max-tokens", str(self.config.max_tokens), "--temperature", str(self.config.temperature),
                 "--output", "json", "--quiet"]
 
-    def _system_prompt(self) -> str:
+    def _system_prompt(self, arc: Arc | None = None) -> str:
+        choice = self._choice_for(arc)
         bull = self._character("bull", "增长派", "擅长类比、未来叙事和增长逻辑；承认数据边界")
         bear = self._character("bear", "审计派", "擅长数据引用、风险揭示和历史比较；追问叙事")
         return (
@@ -105,20 +141,62 @@ class DialogueGenerator:
             "8. 台词要有情绪起伏和口语节奏：多使用反问、设问、惊讶、质疑、认同后转折；"
             "在最想强调的词和数字上自然用上\u201c！\u201d\u201c？\u201d\u201c……\u201d\u201c——\u201d等标点，"
             "但不要每句都感叹，该克制时克制，做到有张有弛。\n"
+            + "\n" + self._arc_section(choice) + "\n"
+            "\n反套话（重要）：每一期的开场都必须是新的。禁止把这些当开场套式——"
+            "“咱们先看 XX 到底卖啥”“说白了”“这家公司靠什么赚钱”式的设问、“XX 这门生意”式的名词解释。"
+            "这些意思可以在正文里讲，但第一句必须从具体事实、具体数字或一个反直觉的判断切入，"
+            "不要出处介绍、不要背景铺垫。收尾同样禁止“总的来说/说到底”式的空转，要落到一个具体变量上。\n"
+            "\n对话节奏（重要）：长度由内容决定，该长则长、该短则短。允许某一轮只有几个字"
+            "（如“嗯”“有道理”“但是——”“等等，这个不对”），用来表示认可、打断或迟疑；"
+            "也允许一方连续追问、另一方长答后短驳。不要为了凑字数把每一轮都写满，也不要每轮等长。\n"
             "\n风格要求：像两个懂行的人聊天，允许追问、打断（……或破折号）、短暂停顿、跑题后拉回、惊讶/认同/质疑，"
             "及被说服后修正观点。每一轮都必须提供新信息、新数字或新角度，严禁重复已经说过的观点；"
             "鼓励连续 2-3 轮围绕一个话题层层深挖（提出→举例/数字→追问短板→修正），再自然转到下一个话题。"
-            "按话题递进：这门生意是什么→行业里的位置→钱怎么赚、财务是否印证→风险与不确定性。"
             "数据存在时引用具体数字；数据缺失就坦诚说缺，不硬编。\n"
             "必须只输出 JSON，不要 Markdown。"
         )
+
+    def _choice_for(self, arc: Arc | None = None,
+                    payload: Mapping[str, Any] | None = None) -> ArcChoice:
+        """解析出这次要用来渲染 prompt 的骨架（含已按数据剪枝后的节拍）。
+
+        ``generate`` 的正常路径上骨架已经选过（``self._active``），直接用。但审查页
+        与单测会直接调 ``_system_prompt``/``_user_prompt``，此时还没选过——这时必须
+        **按配置和这份数据就地选一次**，而不是悄悄退回写死的主线：否则配置里写了
+        ``arc: annual``，prompt 却仍然是主线，而且轮数下限会按主线的节拍数算。
+        """
+        if self._active is not None:
+            return self._active
+        source = payload if isinstance(payload, Mapping) else {}
+        quote = source.get("quote") if isinstance(source.get("quote"), Mapping) else {}
+        configured = arc.id if isinstance(arc, Arc) else self.config.arc
+        return select_arc(source, configured=configured,
+                          code=str(source.get("code") or quote.get("code") or ""),
+                          day=date.today().isoformat())
+
+    def _arc_section(self, choice: ArcChoice) -> str:
+        """把骨架渲染成给模型的节拍清单——这是"这期怎么讲"的唯一来源。"""
+        lines = [f"本期骨架：{choice.arc.name}——{choice.arc.summary}",
+                 "严格按下面的节拍顺序展开，每个节拍至少一轮发言；被标为可短的那一拍允许只有几个字："]
+        for index, beat in enumerate(choice.beats, 1):
+            who = f"（由{self._character(beat.speaker, beat.speaker, '')['name']}说）" if beat.speaker else "（谁来说都行）"
+            limit = f"，最多 {beat.max_chars} 字" if beat.max_chars else ""
+            lines.append(f"{index}. {beat.intent}{who}{'，这一拍可以说得很短' if beat.short else ''}{limit}")
+        if choice.arc.opener and choice.beats and choice.beats[0] is choice.arc.beats[0]:
+            # 开场要求是绑在首拍上的：首拍因为没数据被剪掉时不能再提它，
+            # 否则 prompt 会让模型去完成一个数据里根本没有的开场。
+            lines.append(f"开场要求：{choice.arc.opener}")
+        # 节拍的 key 同时是 JSON 里 beat 字段的合法取值，明确写出来，模型不用猜。
+        lines.append(f"beat 字段只能从这些值里取：{'、'.join(beats_by_key(choice.beats))}。")
+        return "\n".join(lines)
 
     @staticmethod
     def _minutes(seconds: int) -> int:
         """秒换算成最近的整分钟，给 prompt 里那句「约 X-Y 分钟」用。（120→2、300→5）"""
         return max(1, round(seconds / 60))
 
-    def _user_prompt(self, payload: Mapping[str, Any]) -> str:
+    def _user_prompt(self, payload: Mapping[str, Any], arc: Arc | None = None) -> str:
+        choice = self._choice_for(arc, payload)
         min_s, max_s = self.config.min_duration_seconds, self.config.max_duration_seconds
         min_chars = int(min_s * SPEECH_CHARS_PER_SECOND)
         budget_chars = int(max_s * SPEECH_CHARS_PER_SECOND)
@@ -126,20 +204,28 @@ class DialogueGenerator:
         # 轮数按「典型单轮」估算，而不是拿极值算：极值配出来的区间太宽
         # （4-22 轮），模型会往中间凑，长片的实际时长反而失控。
         typical_chars = max(40, (floor_chars + self.config.max_line_chars) // 2)
-        min_turns = max(6, min_chars // typical_chars)
+        # 下限同时受骨架约束：每个节拍至少要有一轮发言。
+        min_turns = max(len(choice.beats), min_chars // typical_chars)
         max_turns = max(min_turns + 4, budget_chars // typical_chars)
         # --duration-minutes 4 会把上下限压成同一个值，别写成「约 4-4 分钟」。
         minutes = (f"{self._minutes(min_s)}-{self._minutes(max_s)} 分钟" if max_s > min_s
                    else f"{self._minutes(max_s)} 分钟")
+        beat_keys = beats_by_key(choice.beats)
         schema = {"title": "股票名（代码）：一句话点出这门生意或行业看点", "turns": [
-            {"speaker": "bull", "line": f"{floor_chars} 到 {self.config.max_line_chars} 字的自然发言；允许极短打断或停顿",
-             "beat": "生意本质",
+            {"speaker": "bull", "line": f"{floor_chars} 到 {self.config.max_line_chars} 字的自然发言；"
+                                        f"短回应可以只有 2-8 字",
+             "beat": f"骨架节拍，只能取：{'/'.join(beat_keys)}",
              "visual": ["line 中提到的关键词1", "关键词2"]}],
+            "sides": {"bull": "看多一方的一句话立场（只讲生意层面的分歧）",
+                      "bear": "看空一方的一句话立场"},
+            "hook": "下一期要盯的一个可验证的具体变量",
+            "question": "抛给观众的一个生意层面二选一问题",
             }
         return (
             f"生成一段成片时长在 {min_s}-{max_s} 秒（约 {minutes}）的中文对话流："
             f"正文总字数控制在 {min_chars}-{budget_chars} 字之间（配音约 4.8 字/秒，超字数就会超时长），"
-            f"分 {min_turns}-{max_turns} 轮发言，单轮 {floor_chars}-{self.config.max_line_chars} 字。"
+            f"分 {min_turns}-{max_turns} 轮发言，单轮 {floor_chars}-{self.config.max_line_chars} 字"
+            f"（允许出现只有几个字的短回应轮，如“嗯”“有道理”“但是——”，这类短回应不受单轮下限约束）。"
             "不要编号、不要 Round、不要强制一来一回；"
             "允许一方连续追问、另一方长答后短驳，长短句交错，不要每轮等长。"
             "这是一条长视频，不是快讯：观众交出的是几分钟的注意力，每一轮都要让他多懂一点这门生意。"
@@ -148,34 +234,53 @@ class DialogueGenerator:
             "素材和数据多就往上限展开，素材少就收得住（不低于下限），不要为凑时长注水，也不要意犹未尽地草草收尾。"
             "至少一半的篇幅围绕公司业务和行业本身（生意模式、行业格局、竞争与需求），技术信号最多作为一句带过的佐证。"
             "开头几轮就把“这家公司靠什么赚钱”讲明白，让观众听完能多懂一门生意，而不是听了一段行情点评。"
-            "整体按这条主线层层递进（缺数据的层可以短，但不能跳过）："
-            "①这门生意是什么、钱从哪来；②行业位置、竞争格局与天花板；"
-            "③财务数字如何印证或推翻前面的生意判断；④市场预期与估值处在什么位置（只讲数据事实，不做买卖判断）；"
-            "⑤风险与不确定性落在哪个具体环节；⑥对这次聊到的生意做一个小结式收束。"
-            "每一层的对话都要落到具体数字或具体环节上，讲清“这意味着什么”，不要停在结论式的形容。"
+            f"本期必须按这条骨架展开（节拍顺序与分工见系统提示，第 1 拍就是开场）：{'→'.join(beat_keys)}。"
+            "每一拍的对话都要落到具体数字或具体环节上，讲清“这意味着什么”，不要停在结论式的形容。"
             "涉及管理层时只能用公司档案里给出的姓名与职务，不评价个人能力、不推测动机；公司动作只说新闻里写了的，并带上出处和时间。"
             "收尾要自然，不要戛然而止。"
+            "另外必须产出三个用于和观众互动的字段（本期片尾会把它们打在画面上，必须经得起核对）："
+            "hook —— 下一期要盯的一个可验证的具体变量（如“下一份财报的外销收入占比”“越南基地的实际产出”），"
+            "要能被下一期直接核对，不要写“继续关注”“拭目以待”这类空话；"
+            "question —— 抛给观众的一个问题，必须是生意层面的二选一（如“你更信渠道还是产能”），"
+            "观众能用一句话回答；禁止询问买卖、点位、涨跌、能不能涨；"
+            "sides —— 多空各一句立场，只讲生意层面的分歧（渠道、产能、价格能不能传导、谁会替代谁），"
+            "一句话说完；禁止出现点位、目标价、买卖动作、收益暗示。"
             "输出结构必须匹配：\n"
             f"{json.dumps(schema, ensure_ascii=False)}\n股票数据：\n{json.dumps(payload, ensure_ascii=False, separators=(',', ':'))}"
         )
 
-    def _normalize_script(self, response: Any, stock_data: Mapping[str, Any]) -> dict[str, Any]:
+    def _normalize_script(self, response: Any, stock_data: Mapping[str, Any],
+                          choice: ArcChoice | None = None) -> dict[str, Any]:
         if not isinstance(response, Mapping):
             raise DialogueGenerationError("Bailian response does not contain a JSON object")
         raw_turns = response.get("turns", response.get("dialogue"))
         if not isinstance(raw_turns, list) or not raw_turns:
             raise DialogueGenerationError("Bailian must return a non-empty turns array")
-        turns = []
+        choice = choice or self._active
+        beats = list(choice.beats) if choice else []
+        beat_keys = beats_by_key(beats)
+        turns: list[dict[str, Any]] = []
+        notes: list[str] = []
+        cursor = 0
         for index, entry in enumerate(raw_turns, 1):
             if not isinstance(entry, Mapping):
                 raise DialogueGenerationError(f"turn {index} is not an object")
             speaker = str(entry.get("speaker") or entry.get("role") or "").lower()
-            if speaker not in {"bull", "bear"}:
-                raise DialogueGenerationError(f"turn {index} must name bull or bear as speaker")
+            if speaker not in self.speakers:
+                raise DialogueGenerationError(
+                    f"turn {index} must name one of {', '.join(self.speakers)} as speaker")
             line = self._clean_line(entry.get("line"))
             if not line:
                 raise DialogueGenerationError(f"turn {index} line is empty")
-            turns.append({"speaker": speaker, "line": line, "beat": self._clean_beat(entry.get("beat")),
+            beat, cursor = self._resolve_beat(entry.get("beat"), beats, cursor, index, notes)
+            # 节拍声明为短回应、或者模型自己就写了极短的一句，都按"短回应"处理：
+            # 这类轮次不换画面图板（一句话的认可没必要把图板重画一遍）。
+            short = bool(beat and beat.short) or len(line) <= self.config.short_line_chars
+            if beat and beat.speaker and beat.speaker != speaker:
+                notes.append(f"[第{index}轮] 骨架指定由 {beat.speaker} 说这段（{beat.key}），模型派给了 {speaker}")
+            turns.append({"speaker": speaker, "line": line,
+                          "beat": beat.key if beat else self._clean_beat(entry.get("beat")),
+                          "short": short,
                           "visual": self._clean_visuals(entry.get("visual")),
                           "character_name": self._character(speaker, speaker, "")["name"]})
         quote = stock_data.get("quote") if isinstance(stock_data.get("quote"), Mapping) else {}
@@ -183,10 +288,39 @@ class DialogueGenerator:
         char_count = sum(len(turn["line"]) for turn in turns)
         return {"stock_code": code, "stock_name": name, "title": self._clean_title(response.get("title"), name, code),
                 "turns": turns,
+                # 本期用了哪条骨架、哪些节拍因为没数据被剪掉、模型哪里没照着走。
+                # 结构"是否真的变了"要可核对，不能只看 prompt 写了什么。
+                "arc": choice.report() if choice else None,
+                "arc_notes": notes,
+                "hook": self._clean_text(response.get("hook"), 60),
+                "question": self._clean_text(response.get("question"), 60),
+                "sides": self._clean_sides(response.get("sides")),
+                "char_count": char_count,
                 # 按实测语速换算的自估时长。长片最容易出的偏差是模型多写几百字，
                 # 把它留在结果里，pipeline 就能在渲染前提醒（而不是渲完才发现超长）。
-                "char_count": char_count,
                 "estimated_seconds": round(char_count / SPEECH_CHARS_PER_SECOND, 1)}
+
+    @staticmethod
+    def _resolve_beat(reported: Any, beats: Sequence[Beat], cursor: int, index: int,
+                      notes: list[str]) -> tuple[Beat | None, int]:
+        """把模型报的 beat 落到骨架的某个节拍上。
+
+        骨架顺序是权威的：游标只前进、不后退。模型漏报或写了个骨架外的名字，
+        就沿用当前节拍并记一条备注——宁可结构稳、也不因为一次错字把整期打乱。
+        """
+        if not beats:
+            return None, cursor
+        keys = beats_by_key(beats)
+        name = str(reported or "").strip()
+        if name not in keys:
+            notes.append(f"[第{index}轮] beat “{name or '空'}” 不在本期骨架内，"
+                         f"归入第{cursor + 1}拍（{keys[cursor]}）")
+            return beats[cursor], cursor
+        position = keys.index(name)
+        if position < cursor:
+            notes.append(f"[第{index}轮] beat “{name}” 回退了骨架顺序（已到第{cursor + 1}拍），按当前节拍处理")
+            return beats[cursor], cursor
+        return beats[position], position
 
     def _clean_line(self, value: Any) -> str:
         line = re.sub(r"\s+", "", str(value or ""))
@@ -213,6 +347,17 @@ class DialogueGenerator:
     def _clean_title(value: Any, name: str, code: str) -> str:
         title = re.sub(r"\s+", " ", str(value or "")).strip()
         return title[:60] or f"{name}（{code}）这门生意怎么看"
+
+    @staticmethod
+    def _clean_text(value: Any, limit: int) -> str:
+        """一句用于片尾的短文案（hook / question），去掉换行、限长。"""
+        text = re.sub(r"\s+", " ", str(value or "")).strip()
+        return text[:limit]
+
+    def _clean_sides(self, value: Any) -> dict[str, str]:
+        """多空各一句立场；只认配置里的角色，缺的就留空。"""
+        source = value if isinstance(value, Mapping) else {}
+        return {role: self._clean_text(source.get(role), 60) for role in ("bull", "bear")}
 
     def _character(self, role: str, default_name: str, default_persona: str) -> dict[str, str]:
         value = self.characters.get(role, {})

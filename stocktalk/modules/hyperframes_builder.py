@@ -281,7 +281,7 @@ class HyperFramesBuilder:
                 seg["audio_path"] = self._project_audio_path(Path(ap), directory)
         duration = self._duration(segments, tts_timeline or {})
         self._copy_assets(directory)
-        composition = directory / "index.html"; composition.write_text(self._html(stock_data, segments, duration), encoding="utf-8")
+        composition = directory / "index.html"; composition.write_text(self._html(stock_data, segments, duration, script or {}), encoding="utf-8")
         (directory / "index.motion.json").write_text(json.dumps({"duration": duration, "assertions": [
             {"kind": "appearsBy", "selector": "#headline", "bySec": 2.6},
             {"kind": "staysInFrame", "selector": "#visual-frame"},
@@ -378,6 +378,15 @@ class HyperFramesBuilder:
             beat = str((turn or {}).get("beat") or "").strip()
             return topic_key, beat[:24] if beat else topic_title, keywords
 
+        def short_for(line: str) -> bool:
+            """这一段是不是"短回应"（"嗯""有道理"），决定要不要换图板。
+
+            标记由 dialogue_generator 打在脚本的轮次上（``turn["short"]``），而 TTS
+            的时间轴只带 speaker/line——所以这里按台词回查脚本原轮次，否则渲染层
+            永远看不到这个标记，"短回应不换图板"就成了死代码。
+            """
+            return bool((turns_by_line.get(line) or {}).get("short"))
+
         supplied = timeline.get("segments", [])
         segments: list[dict[str, Any]] = []
         if isinstance(supplied, list):
@@ -390,7 +399,7 @@ class HyperFramesBuilder:
                 if line and duration > 0:
                     character = str(item.get("character", "bull"))
                     topic, topic_title, keywords = meta_for(line, character)
-                    segments.append({"line": line, "character": character, "start": max(0.0, start), "duration": duration, "audio_path": item.get("audio_path"), "topic": topic, "topic_title": topic_title, "keywords": keywords})
+                    segments.append({"line": line, "character": character, "start": max(0.0, start), "duration": duration, "audio_path": item.get("audio_path"), "topic": topic, "topic_title": topic_title, "keywords": keywords, "short": short_for(line)})
         if segments:
             segments = sorted(segments, key=lambda item: item["start"])
             return self._decorate_segments(segments)
@@ -401,7 +410,7 @@ class HyperFramesBuilder:
             if character in {"bull", "bear"} and line:
                 topic, topic_title, keywords = meta_for(line, character)
                 duration = max(2.5, min(30.0, len(line) * 0.23))
-                segments.append({"line": line, "character": character, "start": cursor, "duration": duration, "audio_path": None, "topic": topic, "topic_title": topic_title, "keywords": keywords})
+                segments.append({"line": line, "character": character, "start": cursor, "duration": duration, "audio_path": None, "topic": topic, "topic_title": topic_title, "keywords": keywords, "short": bool(turn.get("short"))})
                 cursor += duration + 0.25
         return self._decorate_segments(segments)
 
@@ -500,6 +509,7 @@ class HyperFramesBuilder:
     def _slots(self, segments: Sequence[Mapping[str, Any]], duration: float = 0.0) -> dict[str, list[dict[str, Any]]]:
         """Split the dialogue into independently-updating stage slots."""
         slots: dict[str, list[dict[str, Any]]] = {name: [] for name in self.SLOT_NAMES}
+        total = float(duration or 0.0)
         first = dict(segments[0]) if segments else {}
         market_end = (float(first.get("visual_start") or 0.0) + float(first.get("visual_duration") or 1.0)
                       if first else max(1.0, float(duration) - 0.9))
@@ -531,9 +541,16 @@ class HyperFramesBuilder:
             keywords = [str(k) for k in (segment.get("keywords") or []) if str(k).strip()]
             keyword_entries.append((start, duration, "||".join(keywords),
                                     {"keywords": keywords, "character": character}))
-            if index:
+            # 短回应（"嗯""有道理"）不换图板：一句话的认可没必要把整块图板重画一遍。
+            # 不追加这一段，上一块图板就会一直留在屏上直到下一个真正的图板进场
+            # （GSAP 只在下一版进场时才隐藏前一层）。片尾互动图板例外——它挂在
+            # 最后一轮上，不能因为那一轮短就被跳过。注意这里不能 continue：
+            # 短回应轮照样要有字幕和进度。
+            if index and (not segment.get("short") or segment.get("cta")):
                 visual = str(segment.get("visual") or "")
-                visual_entries.append((start, duration, visual, {"kind": "board", "svg": visual}))
+                # 片尾互动图板要留够阅读时间：一直挂到成片结束。
+                run = max(duration, max(0.6, total - start)) if segment.get("cta") else duration
+                visual_entries.append((start, run, visual, {"kind": "board", "svg": visual}))
             turn_start = float(segment.get("start") or 0.0)
             for caption in (segment.get("caption_lines") or []):
                 text = str(caption.get("text") or "").strip()
@@ -713,7 +730,9 @@ class HyperFramesBuilder:
             digest = (digest * 31 + ord(char)) & 0xFFFFFFFF
         return 190 + (digest % 130)  # 190–319: cyan → blue → violet
 
-    def _html(self, stock: Mapping[str, Any], segments: list[Mapping[str, Any]], duration: float) -> str:
+    def _html(self, stock: Mapping[str, Any], segments: list[Mapping[str, Any]], duration: float,
+              script: Mapping[str, Any] | None = None) -> str:
+        script = script if isinstance(script, Mapping) else {}
         quote = stock.get("quote", {}) if isinstance(stock.get("quote"), Mapping) else {}
         financials = stock.get("financials", {}) if isinstance(stock.get("financials"), Mapping) else {}
         f10 = stock.get("f10", {}) if isinstance(stock.get("f10"), Mapping) else {}
@@ -734,6 +753,13 @@ class HyperFramesBuilder:
                  visual=self._turn_board_svg(segment, quote, history, technical, news,
                                              financials, f10, used_charts, chart_history))
             for segment in segments]
+        cta = self._cta_payload(script)
+        if cta and len(rendered_segments) > 1:
+            # 片尾把最后一块图板换成互动图板（多空立场 + 下期盯什么 + 一个真问题）。
+            # 这不是新槽位——复用 visual 槽，所以模板/CSS/JS 一行都不用改。
+            rendered_segments[-1] = dict(rendered_segments[-1],
+                                         visual=self._cta_board_svg(cta, quote),
+                                         cta=True)
         slots = self._slots(rendered_segments, duration)
         stock_name = str(quote.get("name") or stock.get("name") or stock.get("code") or "股票")
         identity = self._identity(stock.get("code") or quote.get("code") or "", history, quote)
@@ -745,8 +771,11 @@ class HyperFramesBuilder:
             price_tone=self._price_tone(quote),
             headline_stats=self._headline_stats(stock.get("stockinfo")),
             identity=identity,
-            outro_title=self._text(f"以上就是{stock_name}的生意观察"),
-            outro_tip="行情会变，生意逻辑才是主线——下次再一起跟踪验证",
+            # 收尾不再是一句每期都一样的固定文案：有 hook（下期要盯的可验证变量）就把它
+            # 放在收尾大标题上、"下次一起跟踪验证"这句承诺才有实际内容；没有问题就退回
+            # 原来的写法。
+            outro_title=self._text(self._outro_title(cta, stock_name)),
+            outro_tip=self._text(self._outro_tip(cta)),
             outro_svg=visuals["outro"],
             duration=duration,
             theme=str(self.video_config.get("theme", "dark")),
@@ -766,6 +795,104 @@ class HyperFramesBuilder:
             segments=rendered_segments,
             slots=slots,
         )
+
+    # ------------------------------------------------------------------
+    # 片尾互动图板 —— 内容层（脚本里的 sides/hook/question）落到画面上
+    # ------------------------------------------------------------------
+    # 这不是新槽位：它复用 visual 槽的最后一块图板，所以 Jinja 模板、CSS、GSAP
+    # 时间轴一行都不用改，也就没有任何新的版面风险。图板上的每一句都来自脚本
+    # （LLM 产出的、已经过合规清洗的文本），不在这里拼任何数字。
+    @staticmethod
+    def _cta_payload(script: Mapping[str, Any]) -> dict[str, Any]:
+        """收集片尾要展示的互动内容；三样都没有就返回空（不硬凑一个空图板）。"""
+        sides = script.get("sides") if isinstance(script.get("sides"), Mapping) else {}
+        payload = {
+            "sides": {role: str(sides.get(role) or "").strip() for role in ("bull", "bear")},
+            "hook": str(script.get("hook") or "").strip(),
+            "question": str(script.get("question") or "").strip(),
+            "arc": "",
+        }
+        arc = script.get("arc") if isinstance(script.get("arc"), Mapping) else {}
+        payload["arc"] = str(arc.get("name") or "")
+        if not any(payload["sides"].values()) and not payload["hook"] and not payload["question"]:
+            return {}
+        return payload
+
+    @staticmethod
+    def _wrap_cn(text: str, per_line: int, limit: int = 3) -> list[str]:
+        """按字数折行——SVG 没有自动换行，只能自己切。"""
+        text = str(text or "").strip()
+        lines = [text[index:index + per_line] for index in range(0, len(text), per_line)]
+        return lines[:limit]
+
+    def _cta_board_svg(self, cta: Mapping[str, Any], quote: Mapping[str, Any]) -> str:
+        """多空立场 + 下期盯什么 + 一个真问题。
+
+        两条硬约束（成片帧内的文案红线，见 tests/test_hyperframes_builder.py）：
+        ① 不出现"看多/看空/免责/不构成/投资建议"等词——所以列名用"更乐观/更谨慎"
+           这种不带判断立场的说法，风险提示只留在发布简介里；
+        ② 不出现角色名（config 里的人设名是内部称谓，不上屏）。
+        立场两列用说话人自己的配色（bull/bear 的粉/蓝），刻意不用红绿——红涨绿跌
+        是行情语义，用在"观点"上会被误读成看涨/看跌信号。
+        """
+        stacked = self.layout != "horizontal"
+        W, H = (1160, 800) if stacked else (1956, 500)
+        sides = cta.get("sides") or {}
+        hook = str(cta.get("hook") or "")
+        question = str(cta.get("question") or "")
+        out = [f'<svg viewBox="0 0 {W} {H}" role="img" aria-label="两方的分歧与下一期关注">']
+        # header
+        out.append('<circle cx="36" cy="42" r="5" fill="#ffd166"/>')
+        out.append('<text x="52" y="50" class="snap-label" style="font-size:20px;letter-spacing:2px">'
+                   '两方还没谈拢的地方</text>')
+        note = f'本期骨架 · {html.escape(str(cta.get("arc") or ""))}' if cta.get("arc") else ""
+        if note:
+            out.append(f'<text x="{W - 34}" y="48" text-anchor="end" class="snap-label" '
+                       f'style="font-size:16px">{note}</text>')
+        # 两列立场
+        if stacked:
+            col_w, per_line, gap = 512, 17, 36
+            label_y, body_y = 122, 178
+        else:
+            col_w, per_line, gap = 880, 21, 60
+            label_y, body_y = 122, 176
+        cols = [(34, "#ff78bc", "更乐观的一边", sides.get("bull", "")),
+                (34 + col_w + gap, "#65baff", "更谨慎的一边", sides.get("bear", ""))]
+        divider_x = 34 + col_w + gap // 2
+        out.append(f'<line x1="{divider_x}" y1="86" x2="{divider_x}" y2="300" '
+                   'stroke="rgba(101,151,196,.22)" stroke-width="1"/>')
+        for x, tone, name, text in cols:
+            out.append(f'<text x="{x}" y="{label_y}" fill="{tone}" font-size="24" '
+                       f'font-weight="700">{html.escape(name)}</text>')
+            for index, line in enumerate(self._wrap_cn(text, per_line, 3)):
+                out.append(f'<text x="{x}" y="{body_y + index * 42}" fill="#dbe7f5" '
+                           f'font-size="30">{html.escape(line)}</text>')
+        # 下期盯什么 / 你怎么看
+        foot_y = 470 if stacked else 372
+        if hook:
+            out.append(f'<text x="34" y="{foot_y}" fill="#ffd166" font-size="22" font-weight="700">'
+                       '下期盯什么</text>')
+            out.append(f'<text x="176" y="{foot_y}" fill="#dbe7f5" font-size="26">'
+                       f'{html.escape(hook[:44])}</text>')
+        if question:
+            qy = foot_y + (58 if stacked else 56)
+            out.append(f'<text x="34" y="{qy}" fill="#5ee0a7" font-size="22" font-weight="700">'
+                       '你怎么看</text>')
+            out.append(f'<text x="176" y="{qy}" fill="#dbe7f5" font-size="26">'
+                       f'{html.escape(question[:44])}</text>')
+        out.append('</svg>')
+        return ''.join(out)
+
+    def _outro_title(self, cta: Mapping[str, Any], stock_name: str) -> str:
+        """收尾大标题：优先用本期的 hook（下期要核对的具体变量）。"""
+        hook = str((cta or {}).get("hook") or "").strip()
+        return f"下期盯：{hook[:40]}" if hook else f"以上就是{stock_name}的生意观察"
+
+    @staticmethod
+    def _outro_tip(cta: Mapping[str, Any]) -> str:
+        """收尾副标题：优先用抛给观众的那个问题。"""
+        question = str((cta or {}).get("question") or "").strip()
+        return question[:40] if question else "行情会变，生意逻辑才是主线——下次再一起跟踪验证"
 
     @staticmethod
     def _real_close_bars(technical: Mapping[str, Any]) -> list[dict[str, Any]]:

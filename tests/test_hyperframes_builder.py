@@ -328,6 +328,94 @@ class HyperFramesBuilderTests(unittest.TestCase):
             # 开场钩子不再是千篇一律的「聊公司」
             self.assertNotIn(">聊公司<", html)
 
+    # ---- 片尾互动图板 + 短回应：内容层落到画面层 ---------------------------
+
+    def _cta_script(self):
+        return {
+            "arc": {"id": "annual", "name": "年报逐条"},
+            "turns": [
+                {"speaker": "bull", "line": "主营是色釉陶瓷，九成收入都来自这一块业务。"},
+                {"speaker": "bear", "line": "存货和应收都压在账上，现金能不能回来要盯。"}],
+            "sides": {"bull": "单一品类做到九成，说明产品力扎实", "bear": "客户集中就是命门"},
+            "hook": "下一份财报的外销收入占比",
+            "question": "你更信渠道还是产能？",
+        }
+
+    def test_cta_board_shows_the_interaction_copy_without_touching_the_layout(self):
+        """片尾互动图板复用 visual 槽的最后一块图板——不加新槽位、不动模板。
+
+        图板上的每一句都来自脚本（已过合规清洗），画面上不出现立场标签、
+        免责声明与 AI 声明。
+        """
+        with tempfile.TemporaryDirectory() as temp:
+            project = HyperFramesBuilder(self._config(temp)).build_project(
+                {"code": "001216", "quote": {"name": "华瓷股份"}}, self._cta_script(), {})
+            content = project.composition_path.read_text(encoding="utf-8")
+
+        self.assertIn("两方还没谈拢的地方", content)
+        # 两列立场用不带判断的列名；红涨绿跌是行情语义，用在观点上会被误读成信号，
+        # 所以立场两列取说话人自己的配色而不是红/绿。
+        self.assertIn("更乐观的一边", content)
+        self.assertIn("更谨慎的一边", content)
+        self.assertIn("单一品类做到九成，说明产品力扎实", content)
+        self.assertIn("客户集中就是命门", content)
+        self.assertIn("下期盯什么", content)
+        self.assertIn("下一份财报的外销收入占比", content)
+        self.assertIn("你怎么看", content)
+        self.assertIn("你更信渠道还是产能？", content)
+        self.assertIn("本期骨架 · 年报逐条", content)
+        for banned in ("看多", "看空", "免责", "不构成", "投资建议", "AI", "生成"):
+            self.assertNotIn(banned, content)
+
+    def test_cta_board_is_absent_without_interaction_copy(self):
+        """三样互动文案都没有时不硬凑一块空图板：片尾退回原来的样子。"""
+        with tempfile.TemporaryDirectory() as temp:
+            project = HyperFramesBuilder(self._config(temp)).build_project(
+                {"code": "001216", "quote": {"name": "华瓷股份"}},
+                {"turns": [{"speaker": "bull", "line": "主营是色釉陶瓷。"},
+                           {"speaker": "bear", "line": "要看现金能不能回来。"}]}, {})
+            content = project.composition_path.read_text(encoding="utf-8")
+
+        self.assertNotIn("两方还没谈拢的地方", content)
+        self.assertEqual(HyperFramesBuilder._cta_payload({"hook": "", "sides": {}}), {})
+        self.assertEqual(HyperFramesBuilder._cta_payload({"sides": {"bull": "  ", "bear": ""}}), {})
+
+    def test_short_reply_keeps_the_previous_board(self):
+        """一句"嗯"不换图板：图板沿用前一块，省掉一次整屏重绘。
+
+        用户 2026-09-22："对话有长有短，有时候只是说一个'嗯'"。标记由对话层打在
+        轮次上（``short``），渲染层照做——但字幕与进度照旧。
+        """
+        first = {"speaker": "bull", "line": "主营是色釉陶瓷，九成收入都来自这一块业务。"}
+        second = {"speaker": "bull", "line": "存货和应收都压在账上，现金能不能回来要盯。"}
+        ack = {"speaker": "bear", "line": "嗯。", "short": True}
+
+        def visual_slots(turns):
+            with tempfile.TemporaryDirectory() as temp:
+                builder = HyperFramesBuilder(self._config(temp))
+                script = {"turns": turns}
+                # TTS 的时间轴只带 speaker/line，标记必须靠回查脚本传下去——
+                # 否则渲染层的判断永远拿到 None，"短回应不换图板"就是死代码。
+                self.assertEqual([bool(seg.get("short")) for seg in builder._segments(script, {})],
+                                 [bool(turn.get("short")) for turn in turns],
+                                 "短回应标记必须从脚本传到渲染段")
+                project = builder.build_project({}, script, {})
+                return project.composition_path.read_text(encoding="utf-8").count('data-slot="visual"')
+
+        self.assertEqual(visual_slots([first, second]),
+                         visual_slots([first, ack, second]))
+
+    def test_outro_headline_reads_the_hook_and_question(self):
+        """收尾大标题优先用本期的 hook——"下次一起跟踪验证"这句承诺才有实际内容。"""
+        builder = HyperFramesBuilder({"video": {}})
+        cta = {"hook": "下一份财报的外销收入占比", "question": "你更信渠道还是产能？"}
+
+        self.assertEqual(builder._outro_title(cta, "华瓷股份"), "下期盯：下一份财报的外销收入占比")
+        self.assertEqual(builder._outro_tip(cta), "你更信渠道还是产能？")
+        # 没有互动文案时退回原来的收尾，不留空标题
+        self.assertEqual(builder._outro_title({}, "华瓷股份"), "以上就是华瓷股份的生意观察")
+        self.assertIn("下次再一起跟踪验证", builder._outro_tip({}))
+
 
 class ChartLibraryTests(unittest.TestCase):
     """图表库：每轮右半屏按话题轮换，同一支视频尽量不重样，数据不足就换下一个。"""

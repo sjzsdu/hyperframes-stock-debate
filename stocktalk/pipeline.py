@@ -167,6 +167,19 @@ class Pipeline:
             self.stock_client._enrich_quote(quote, technical)
         except Exception as exc:
             self.console.print(f"[yellow]封面行情补抓失败（{exc}），封面将缺价格与走势图[/yellow]")
+        if not quote.get("name"):
+            # get_quote 的文本输出经常不带名字；封面要顶着一个真实名字发出去。
+            # stockinfo/F10 都是维护中的数据源，block show 的表头名可能落后
+            # 行情数年（000066 上证商品→中国长城），这里绝不采用它。
+            for resolver in (lambda: str(self.stock_client.get_stockinfo(str(stock_code)).get("name") or ""),
+                             lambda: self.stock_client._f10_short_name(self.stock_client.get_f10(str(stock_code)))):
+                try:
+                    name = str(resolver() or "")
+                except Exception:
+                    continue
+                if name:
+                    quote["name"] = name
+                    break
         quote.setdefault("name", stock_name)
         stock_data = {"quote": quote, "technical": technical}
         return self._render_covers(stock_data, script, stock_code, tag)
