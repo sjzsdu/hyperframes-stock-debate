@@ -48,17 +48,19 @@ body { margin: 0; overflow: hidden; background: var(--bg); color: var(--text); f
 .orb-a { left: -140px; top: 300px; background: var(--stock-accent); opacity: .16; }
 .orb-b { right: -140px; top: 160px; background: var(--bear); }
 
-/* Left edge of the content column (kicker / chips / panel).  Horizontal
-   leaves room for the identity rail; vertical overrides it below.  Defined
-   on #root — not :root — because safe-area values are injected as inline
-   overrides on #root and custom properties resolve where they are defined. */
-#root { --stage-left: calc(var(--safe-side-left) + 330px); }
+/* Left edge of the content column (kicker / chips / panel).  2026-09-23: the
+   identity rail moved off the left edge onto the kicker row (right-aligned
+   strip), so the panel spans nearly the full stage width — the old 330px
+   rail + gap used to cost the chart a third of the stage.  Defined on #root —
+   not :root — because safe-area values are injected as inline overrides on
+   #root and custom properties resolve where they are defined. */
+#root { --stage-left: calc(var(--safe-side-left) + 34px); }
 
 /* ==========================================================================
    Permanent stage — these four pieces keep the same rect for the whole clip.
    Only the slots layered between them change.
    ========================================================================== */
-#headline { top: var(--safe-top); left: 70px; right: 70px; height: 132px; z-index: 7000; }
+#headline { top: var(--safe-top); left: 70px; right: 70px; height: 116px; z-index: 7000; }
 .title-row { display: flex; align-items: center; justify-content: space-between; }
 /* Right side of the headline: 总市值 / 换手率 from stockinfo.  Fills the dead
    band right of the stock name with real unit-verified numbers instead of
@@ -77,16 +79,18 @@ h1 em { color: var(--accent); font-style: normal; font-size: 30px; font-weight: 
 #headline p.down { color: var(--down); }
 
 /* The panel is inset from the safe edges on both sides: its height follows from
-   top/bottom, so a bigger safe area just makes the panel shorter.  The content
-   column starts after the identity rail, so it is wider than the old centred
-   1220px while the rail keeps its own lane. */
-#visual-frame { top: calc(var(--safe-top) + 286px); bottom: calc(var(--safe-bottom) + 170px);
+   top/bottom, so a bigger safe area just makes the panel shorter.  2026-09-23:
+   the panel is the star — full stage width, pushed up under a compressed text
+   band.  Inner rect 1690×432 matches the horizontal board viewBox 1956×500
+   (both 3.912:1) so the SVG fills it edge to edge with no dead bands. */
+#visual-frame { top: calc(var(--safe-top) + 234px); bottom: calc(var(--safe-bottom) + 146px);
   left: var(--stage-left); right: var(--safe-side-right); z-index: 4900;
-  border-radius: 28px; border: 1px solid var(--line);
-  background: linear-gradient(145deg, rgba(17, 38, 64, .94), var(--panel));
-  box-shadow: 0 26px 80px rgba(0,0,0,.45); }
+  border-radius: 28px; border: 1.5px solid var(--line);
+  background: linear-gradient(145deg, rgba(17, 38, 64, .96), var(--panel));
+  box-shadow: 0 26px 80px rgba(0,0,0,.48), 0 0 0 1px rgba(105,183,255,.08),
+              0 0 46px color-mix(in srgb, var(--accent) 22%, transparent); }
 
-#caption-zone { bottom: var(--safe-bottom); left: var(--safe-side-left); right: var(--safe-side-right); height: 122px; z-index: 6500;
+#caption-zone { bottom: calc(var(--safe-bottom) - 30px); left: var(--safe-side-left); right: var(--safe-side-right); height: 122px; z-index: 6500;
   border-radius: 26px; border: 1px solid var(--line);
   background: linear-gradient(145deg, rgba(17, 38, 64, .94), var(--panel));
   box-shadow: 0 18px 54px rgba(0,0,0,.40); overflow: hidden; }
@@ -115,33 +119,40 @@ h1 em { color: var(--accent); font-style: normal; font-size: 30px; font-weight: 
 .stage-tint.bull { background: radial-gradient(circle at 22% 16%, var(--bull-soft), transparent 46%), radial-gradient(circle at 80% 84%, rgba(105,183,255,.06), transparent 44%); }
 .stage-tint.bear { background: radial-gradient(circle at 22% 16%, var(--bear-soft), transparent 46%), radial-gradient(circle at 80% 84%, rgba(255,120,188,.05), transparent 44%); }
 
-/* ---- Horizontal: the identity rail runs down the left of the stage, aligned
-        with the kicker row above and the panel bottom below.  The tags list
-        stretches over the remaining rail height so the rail doesn't die out
-        halfway and leave a dead block above the panel bottom. ---- */
-#identity { top: calc(var(--safe-top) + 148px); bottom: calc(var(--safe-bottom) + 170px);
-  left: var(--safe-side-left); width: 300px; flex-direction: column; gap: 14px; }
-#identity .identity-tags { flex-direction: column; gap: 12px; flex: 1; justify-content: space-evenly; }
+/* ---- Horizontal: identity is a right-aligned strip in the band between the
+        headline and the keyword chips.  The 300px left rail was mostly static
+        info sitting on prime chart real estate; 2026-09-23 it moves here and
+        the panel gains ~300px of width and ~76px of height. ---- */
+#identity { top: calc(var(--safe-top) + 124px); bottom: auto;
+  right: var(--safe-side-right); height: 48px;
+  flex-direction: row; align-items: center; justify-content: flex-end; gap: 12px; }
+#identity .identity-tags { flex-direction: row; flex-wrap: nowrap; overflow: hidden; gap: 10px; flex: none; }
+#identity .identity-tag { padding: 8px 14px; }
 
-/* ---- Slot 1 / 2: topic label and talking-point chips ---- */
-.slot-kicker { top: calc(var(--safe-top) + 156px); left: var(--stage-left); right: var(--safe-side-right); height: 44px; line-height: 44px;
-  font-size: 24px; font-weight: 700; color: var(--accent); letter-spacing: 3px;
-  opacity: 0; visibility: hidden; }
-.slot-kicker.bull { color: var(--bull); }
-.slot-kicker.bear { color: var(--bear); }
-.slot-keywords { top: calc(var(--safe-top) + 208px); left: var(--stage-left); right: var(--safe-side-right); height: 60px;
-  display: flex; flex-wrap: wrap; align-items: flex-start; gap: 14px; opacity: 0; visibility: hidden; overflow: hidden; }
-.slot-keywords span { padding: 10px 22px; border: 1px solid var(--line); border-radius: 999px;
-  background: rgba(10, 24, 43, .78); font-size: 24px; font-weight: 600; letter-spacing: 1px; line-height: 1.6;
+/* ---- Slot 2: talking-point chips.  The kicker text was removed 2026-09-23
+        (the board SVG carries its own Chinese title; the old label showed raw
+        skeleton beat keys), so this row holds only the identity strip. ---- */
+.slot-keywords { top: calc(var(--safe-top) + 176px); left: var(--stage-left); right: var(--safe-side-right); height: 56px;
+  display: flex; flex-wrap: wrap; align-items: flex-start; gap: 12px; opacity: 0; visibility: hidden; overflow: hidden; }
+.slot-keywords span { padding: 8px 20px; border: 1px solid var(--line); border-radius: 999px;
+  background: rgba(10, 24, 43, .78); font-size: 24px; font-weight: 600; letter-spacing: 1px; line-height: 1.5;
   flex: none; }
 .slot-keywords span:first-child { color: var(--gold); border-color: rgba(255, 209, 102, .45); }
 
 /* ---- Slot 3: panel contents.  Sits exactly over the frame, so swapping it
         moves nothing around it. ---- */
-.visual-item { top: calc(var(--safe-top) + 286px); bottom: calc(var(--safe-bottom) + 170px);
+.visual-item { top: calc(var(--safe-top) + 234px); bottom: calc(var(--safe-bottom) + 146px);
   left: var(--stage-left); right: var(--safe-side-right); padding: 24px 28px;
   border-radius: 28px; opacity: 0; visibility: hidden; overflow: hidden; }
 .visual-item svg { width: 100%; height: 100%; }
+/* Sheen: a soft highlight band that sweeps across the panel after each board
+   change (and every few seconds on long-lived boards) — in-page motion that
+   never touches the layout.  Parked off-panel at rest, so frame zero (the
+   poster frame) stays clean. */
+.sheen { position: absolute; top: 0; bottom: 0; left: 0; width: 34%;
+  background: linear-gradient(105deg, transparent 0%, rgba(148,190,235,.05) 38%,
+              rgba(198,224,250,.15) 50%, rgba(148,190,235,.05) 62%, transparent 100%);
+  transform: translateX(-140%); pointer-events: none; }
 .visual-market { display: flex; align-items: stretch; gap: 0; }
 .market-chart { flex: 1; height: 100%; padding: 20px 24px; }
 .chart-camera { width: 100%; height: 100%; }
@@ -177,7 +188,7 @@ h1 em { color: var(--accent); font-style: normal; font-size: 30px; font-weight: 
 /* The opening title card takes over the panel area only — it shares the frame's
    exact rect, so the headline and the caption row stay live underneath and the
    first spoken words are never hidden behind a full-screen cover. */
-.intro-card { top: calc(var(--safe-top) + 286px); bottom: calc(var(--safe-bottom) + 170px);
+.intro-card { top: calc(var(--safe-top) + 234px); bottom: calc(var(--safe-bottom) + 146px);
   left: var(--stage-left); right: var(--safe-side-right); border-radius: 28px;
   border: 1px solid var(--line);
   display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 20px;
@@ -250,7 +261,7 @@ h1 em { color: var(--accent); font-style: normal; font-size: 30px; font-weight: 
    long tag set from pushing the panel down (the band below is fixed). */
 #root.layout-vertical #identity { top: calc(var(--safe-top) + 190px); bottom: auto;
   left: var(--safe-side-left); right: var(--safe-side-right); width: auto; height: 56px;
-  flex-direction: row; align-items: center; gap: 12px; }
+  flex-direction: row; align-items: center; justify-content: flex-start; gap: 12px; }
 #root.layout-vertical .identity-tags { flex-direction: row; flex-wrap: nowrap; overflow: hidden; gap: 10px;
   flex: none; justify-content: flex-start; }
 #root.layout-vertical .identity-tag { padding: 6px 14px; border-radius: 14px; }
@@ -263,8 +274,9 @@ h1 em { color: var(--accent); font-style: normal; font-size: 30px; font-weight: 
    (130px) needed ~152px for two chip rows, so the second row was always cut in
    half — the "bottom tag half visible" bug.  One nowrap row frees the rest of
    the band for the panel, which is the element that actually carries content. */
-#root.layout-vertical .slot-kicker { top: calc(var(--safe-top) + 270px); left: var(--stage-left); right: var(--safe-side-right); height: 58px; line-height: 58px; font-size: 36px; }
-#root.layout-vertical .slot-keywords { top: calc(var(--safe-top) + 338px); left: var(--stage-left); right: var(--safe-side-right); height: 74px; flex-wrap: nowrap; align-items: center; gap: 14px; }
+/* kicker 行删除后（2026-09-23）竖屏 band 收拢：关键词行上移填补原 topic
+   label 的空档，面板 top 432 不动——它与竖版 board viewBox 1160×800 锁死。 */
+#root.layout-vertical .slot-keywords { top: calc(var(--safe-top) + 296px); left: var(--stage-left); right: var(--safe-side-right); height: 74px; flex-wrap: nowrap; align-items: center; gap: 14px; }
 /* flex:0 1 auto + ellipsis: 长关键词行收缩省略，而不是裁半截或溢出画幅。 */
 #root.layout-vertical .slot-keywords span { font-size: 28px; padding: 10px 20px; line-height: 1.5; white-space: nowrap; flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 #root.layout-vertical #visual-frame { top: calc(var(--safe-top) + 432px); bottom: calc(var(--safe-bottom) + 160px); left: var(--stage-left); right: var(--safe-side-right); width: auto; border-radius: 36px; }
@@ -280,9 +292,12 @@ h1 em { color: var(--accent); font-style: normal; font-size: 30px; font-weight: 
 #root.layout-vertical .metric { min-height: 58px; font-size: 24px; border-top: 0; border-bottom: 1px solid var(--line); }
 #root.layout-vertical .metric strong { font-size: 30px; }
 
-/* Band 3 — one caption row, sitting on the bottom safe edge so the platform's
-   own caption block can never end up underneath it. */
-#root.layout-vertical #caption-zone { bottom: var(--safe-bottom); left: var(--safe-side-left); right: var(--safe-side-right); height: 140px; border-radius: 32px; }
+/* Band 3 — one caption row, sitting near the bottom safe edge so the platform's
+   own caption block can never end up underneath it.  2026-09-23: dropped 50px
+   below that edge (same treatment as the horizontal cut, scaled to the 1920px
+   canvas) — the row read visually high with 460px of empty band under it.
+   420px still leaves the safe-area headroom for 抖音/快手 底部 UI. */
+#root.layout-vertical #caption-zone { bottom: calc(var(--safe-bottom) - 50px); left: var(--safe-side-left); right: var(--safe-side-right); height: 140px; border-radius: 32px; }
 #root.layout-vertical .caption-line { left: 36px; right: 36px; height: 140px; line-height: 140px; font-size: 44px; }
 #root.layout-vertical .progress-fill { height: 6px; }
 

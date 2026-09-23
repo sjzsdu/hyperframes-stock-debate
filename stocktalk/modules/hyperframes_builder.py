@@ -23,8 +23,9 @@ Runner = Callable[[Sequence[str], Path], subprocess.CompletedProcess[str]]
 # One-line captions: the spoken line is split at punctuation so every caption
 # fits a single row.  Horizontal: 22 chars at ~40px in a 1220px strip.
 # Vertical: 14 chars at 46px (~644px + 72px inner padding) fits whatever side
-# inset is in force — the strip has been 720px (180×2), 880px (100×2) and
-# 1030px (25×2) wide across the 2026-09 layout rounds (2026-09-18/19).
+# inset is in force — the strip has been 720px (180×2), 880px (100×2),
+# 1030px (25×2) and now 850px (115×2, real-device crop) wide across the
+# 2026-09 layout rounds (2026-09-18/22).
 CAPTION_MAX_CHARS = 14
 CAPTION_BREAKS = "，。；！？、：,.!?;:"
 # Punctuation that ends a sentence — never merge a chunk across one of these.
@@ -37,13 +38,16 @@ CAPTION_SENTENCE_ENDS = "。；！？.!?;"
 DEFAULT_SAFE_AREA: dict[str, tuple[int, int]] = {"vertical": (240, 460), "horizontal": (120, 100)}
 # Side inset (left, right).  抖音/快手 stack like / comment / share down the
 # RIGHT edge of a vertical cut, so small insets risk sitting under that overlay
-# (56 was covered, 2026-09-18 user feedback) — but 100×2 read as huge empty
-# bands on screen (2026-09-19), and the user chose width over overlay margin:
-# 25 both sides (a quarter of 100) keeps a 1030px content column.  If a live
-# publish shows the right-edge chart labels under the action bar, raise the
-# right side via config `video.safe_area.vertical.side_right`.  Horizontal
-# cuts only clear the progress bar, so 70 both sides is enough.
-DEFAULT_SAFE_SIDE: dict[str, tuple[int, int]] = {"vertical": (25, 25), "horizontal": (70, 70)}
+# (56 was covered, 2026-09-18 user feedback).  Vertical 115: phones at
+# 19.5:9–20:9 crop ~97–108px per side when a 9:16 video is scaled to fill the
+# screen height (Kuaishou confirmed on a real device 2026-09-22: side=25 turned
+# "最新价" into "新价").  115 covers the worst crop with headroom → 850px
+# column.  History: 100×2 read as huge empty bands on the desktop preview
+# (2026-09-19) but the preview browser never crops — the real device is the
+# hard constraint.  If the right-edge chart labels still sit under the action
+# bar, raise the right side via config `video.safe_area.vertical.side_right`.
+# Horizontal cuts only clear the progress bar, so 70 both sides is enough.
+DEFAULT_SAFE_SIDE: dict[str, tuple[int, int]] = {"vertical": (115, 115), "horizontal": (70, 70)}
 
 # Discussion topics, detected from the dialogue text itself. The first matching
 # entry wins, so specific topics precede generic ones.
@@ -370,13 +374,15 @@ class HyperFramesBuilder:
                 turns_by_line[line] = turn
 
         def meta_for(line: str, character: str) -> tuple[str, str, list[str]]:
+            # kicker 文本已下线（2026-09-23：beat key「books/occupied」这类骨架
+            # 内部代号对观众无意义，图板 SVG 自带中文标题）；这里仍返回
+            # topic_title 供图板左上角的小标签使用，beat 只留在脚本结构里。
             turn = turns_by_line.get(line)
             keywords = [str(x) for x in ((turn or {}).get("visual") or []) if str(x).strip()]
             if not keywords:
                 keywords = self._keywords_for(line, character)
             topic_key, topic_title = self._visual_topic(line)
-            beat = str((turn or {}).get("beat") or "").strip()
-            return topic_key, beat[:24] if beat else topic_title, keywords
+            return topic_key, topic_title, keywords
 
         def short_for(line: str) -> bool:
             """这一段是不是"短回应"（"嗯""有道理"），决定要不要换图板。
@@ -522,7 +528,6 @@ class HyperFramesBuilder:
         first_character = str(first.get("character") or "bull")
         tint_entries: list[tuple[float, float, str, dict[str, Any]]] = [
             (market_start, market_span, first_character, {"character": first_character})]
-        kicker_entries: list[tuple[float, float, str, dict[str, Any]]] = []
         keyword_entries: list[tuple[float, float, str, dict[str, Any]]] = []
         for index, segment in enumerate(segments):
             start = float(segment.get("visual_start") or 0.0)
@@ -533,14 +538,11 @@ class HyperFramesBuilder:
                 duration += 0.5
             character = str(segment.get("character") or "bull")
             topic = str(segment.get("topic") or "industry")
-            title = str(segment.get("topic_title") or "公司与行业")
             if index:
                 tint_entries.append((start, duration, character, {"character": character}))
-            kicker_entries.append((start, duration, f"{topic}|{title}",
-                                   {"text": title, "character": character, "topic": topic}))
             keywords = [str(k) for k in (segment.get("keywords") or []) if str(k).strip()]
             keyword_entries.append((start, duration, "||".join(keywords),
-                                    {"keywords": keywords, "character": character}))
+                                    {"keywords": keywords, "character": character, "topic": topic}))
             # 短回应（"嗯""有道理"）不换图板：一句话的认可没必要把整块图板重画一遍。
             # 不追加这一段，上一块图板就会一直留在屏上直到下一个真正的图板进场
             # （GSAP 只在下一版进场时才隐藏前一层）。片尾互动图板例外——它挂在
@@ -550,7 +552,7 @@ class HyperFramesBuilder:
                 visual = str(segment.get("visual") or "")
                 # 片尾互动图板要留够阅读时间：一直挂到成片结束。
                 run = max(duration, max(0.6, total - start)) if segment.get("cta") else duration
-                visual_entries.append((start, run, visual, {"kind": "board", "svg": visual}))
+                visual_entries.append((start, run, visual, {"kind": "board", "svg": visual, "topic": topic}))
             turn_start = float(segment.get("start") or 0.0)
             for caption in (segment.get("caption_lines") or []):
                 text = str(caption.get("text") or "").strip()
@@ -564,7 +566,6 @@ class HyperFramesBuilder:
             slots["progress"].append({"start": round(turn_start, 3),
                                       "duration": round(max(0.2, float(segment.get("duration") or 1.0)), 3)})
         slots["tint"] = self._merge_slot(tint_entries)
-        slots["kicker"] = self._merge_slot(kicker_entries)
         slots["keywords"] = self._merge_slot(keyword_entries)
         slots["visual"] = self._merge_slot(visual_entries)
         return slots
@@ -884,9 +885,13 @@ class HyperFramesBuilder:
         return ''.join(out)
 
     def _outro_title(self, cta: Mapping[str, Any], stock_name: str) -> str:
-        """收尾大标题：优先用本期的 hook（下期要核对的具体变量）。"""
+        """收尾大标题：直接用本期的 hook（下期要核对的具体变量）。
+
+        2026-09-22 用户反馈「下期盯：这几个字有必要吗」——没必要：图板上
+        已经有小字栏目名交代语境，大标题再带一遍前缀是重复，直接说内容。
+        """
         hook = str((cta or {}).get("hook") or "").strip()
-        return f"下期盯：{hook[:40]}" if hook else f"以上就是{stock_name}的生意观察"
+        return hook[:40] if hook else f"以上就是{stock_name}的生意观察"
 
     @staticmethod
     def _outro_tip(cta: Mapping[str, Any]) -> str:
@@ -1085,7 +1090,8 @@ class HyperFramesBuilder:
         # Horizontal panels are height-bound (inner ≈1394×356, aspect 3.9): a
         # 1160-wide board floats between dead margins.  Stretch the board to
         # match the panel aspect so charts spread out instead.  Vertical panels
-        # are ≈820×576 (aspect 1.4), so the stacked board is 1160×800.
+        # are ≈790×576 (aspect 1.4 at 115×2 side insets), so the stacked board
+        # is 1160×800 and scales down into the panel.
         stacked = self.layout != "horizontal"
         W, H = (1160, 800) if stacked else (1956, 500)
         _, zone_right = self._chart_zone()

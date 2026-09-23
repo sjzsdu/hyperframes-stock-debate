@@ -51,6 +51,13 @@ CHROME_CANDIDATES: tuple[str, ...] = (
 # Chart panel title per canvas family.
 CHART_TITLES = {"portrait": "近30日价格走势", "landscape": "近30日价格走势", "wide": "近30日价格走势"}
 
+# 涨跌幅 → 背景色深浅（2026-09-23 用户反馈：每张封面都是同一种浅浅红，
+# 看多了审美疲劳）。|涨跌幅| 线性映射到强度 0-1、TINT_SATURATION_PCT 处
+# 饱和到顶：A 股日常 5-7% 的大阳线就该是最醒目的一档，20cm 涨停不再加深。
+# 下限压在 TINT_ALPHA_RANGE[0]：微涨微跌也有可感知的色差，但不至于淹没文字。
+TINT_SATURATION_PCT = 7.0
+TINT_ALPHA_RANGE = (0.10, 0.44)
+
 Screenshotter = Callable[[str, Path, Path, tuple[int, int], float], bool]
 
 
@@ -178,7 +185,9 @@ class CoverGenerator:
         quote = stock_data.get("quote") if isinstance(stock_data.get("quote"), Mapping) else {}
         technical = stock_data.get("technical") if isinstance(stock_data.get("technical"), Mapping) else {}
         stock_name = str(quote.get("name") or script.get("title") or stock_code).strip()
+        change = self._number(quote.get("change_pct"))
         tone = self._tone(quote)
+        tints = self._tints(tone, change)
         bars = self._bars(technical)
         clamps = [self._number(bar.get("close")) for bar in bars]
         clamps = [value for value in clamps if value is not None]
@@ -190,6 +199,7 @@ class CoverGenerator:
             width=width,
             height=height,
             tone=tone,
+            tint_style=self._tint_style(tints),
             price_text=self._price_text(quote),
             change_text=self._change_text(quote),
             chart_title=CHART_TITLES.get(size, "近30日价格走势"),
@@ -318,6 +328,34 @@ class CoverGenerator:
         if change is None or change == 0:
             return "flat"
         return "up" if change > 0 else "down"
+
+    @classmethod
+    def _tints(cls, tone: str, change: float | None) -> tuple[str, str, str] | None:
+        """最近交易日涨跌幅 → (背景主氛围色, 次氛围色, 胶囊底色alpha)。
+
+        红涨绿跌的方向由 ``tone`` 决定，深浅由 ``|change_pct|`` 决定：
+        平盘/缺数据返回 None，模板退回固定的蓝灰氛围。
+        """
+        if tone == "flat" or change is None:
+            return None
+        rgb = (255, 90, 120) if tone == "up" else (70, 230, 165)
+        chip_rgb = (255, 113, 136) if tone == "up" else (94, 224, 167)
+        strength = min(1.0, abs(change) / TINT_SATURATION_PCT)
+        low, high = TINT_ALPHA_RANGE
+        alpha_a = low + (high - low) * strength
+        alpha_b = alpha_a * 0.47
+        chip = 0.08 + 0.24 * strength
+        return (f"rgba({rgb[0]},{rgb[1]},{rgb[2]},{alpha_a:.2f})",
+                f"rgba({rgb[0]},{rgb[1]},{rgb[2]},{alpha_b:.2f})",
+                f"rgba({chip_rgb[0]},{chip_rgb[1]},{chip_rgb[2]},{chip:.2f})")
+
+    @staticmethod
+    def _tint_style(tints: tuple[str, str, str] | None) -> str:
+        """把深浅变量写成 #cover 的内联 style（类里的值只作回退）。"""
+        if not tints:
+            return ""
+        main, soft, chip = tints
+        return f"--tint-a: {main}; --tint-b: {soft}; --tint-chip: {chip};"
 
     @staticmethod
     def _price_text(quote: Mapping[str, Any]) -> str:

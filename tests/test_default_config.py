@@ -44,21 +44,23 @@ def test_every_platform_names_its_preferred_canvas() -> None:
 def test_safe_areas_cover_platform_ui() -> None:
     """安全区按用户反馈定稿。
 
-    竖版 25×2 对称：100×2 的 1/4（2026-09-19 用户反馈两侧留白太大），
-    内容列 1030px；代价是抖音/快手右缘互动竖排可能压图表右端文字，
-    真机若被遮用 side_right 单独抬高。180×2 只剩 720px、60/140 非对称
-    都被否掉。横版顶部 120：B站播放器左上角 logo/标题会压住 60 的旧值。
+    竖版 115×2 对称：手机（19.5:9–20:9）全屏播 9:16 视频按高铺满、左右各裁
+    97–108px（2026-09-22 快手真机：side=25 时「最新价」被裁成「新价」），
+    内容列 850px；25×2 是只看预览器定的旧值，已被真机裁切否掉。右缘互动
+    竖排仍可能压图表下沿，真机被遮用 side_right 单独抬高。180×2 只剩
+    720px、60/140 非对称都被否掉。横版顶部 120：B站播放器左上角 logo/
+    标题会压住 60 的旧值。
     """
     safe = _config()["video"]["safe_area"]
-    assert safe["vertical"] == {"top": 240, "bottom": 460, "side": 25}
+    assert safe["vertical"] == {"top": 240, "bottom": 460, "side": 115}
     assert safe["horizontal"] == {"top": 120, "bottom": 100, "side": 70}
 
 
 def test_vertical_captions_fit_the_safe_strip() -> None:
-    """竖版字幕一行必须装进安全条（当前 25×2 边距 → 1030px）。"""
+    """竖版字幕一行必须装进安全条（当前 115×2 边距 → 850px）。"""
     from stocktalk.modules.hyperframes_builder import CAPTION_MAX_CHARS
 
-    assert CAPTION_MAX_CHARS * 44 + 72 <= 1080 - 2 * 25  # 44px 字号 + 36px 内边距×2
+    assert CAPTION_MAX_CHARS * 44 + 72 <= 1080 - 2 * 115  # 44px 字号 + 36px 内边距×2
 
 
 def test_captions_are_one_line_on_both_canvases() -> None:

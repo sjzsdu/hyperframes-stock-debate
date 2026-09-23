@@ -47,8 +47,11 @@
       radial-gradient(circle at 12% 88%, var(--tint-b) 0, transparent 46%),
       linear-gradient(160deg, #0b1a2c 0, var(--bg) 70%);
   }
-  #cover.up   { --tint-a: rgba(255, 90, 120, .34); --tint-b: rgba(255, 113, 136, .16); }
-  #cover.down { --tint-a: rgba(70, 230, 165, .26); --tint-b: rgba(94, 224, 167, .13); }
+  /* 氛围色的深浅由最近交易日的涨跌幅决定（cover.py 内联注入 --tint-*）：
+     红涨绿跌，涨跌幅越大颜色越浓，平盘/缺数据退回下面固定的蓝灰。
+     这里的固定值只是无数据时的回退，实际值逐张封面都不同。 */
+  #cover.up   { --tint-a: rgba(255, 90, 120, .34); --tint-b: rgba(255, 113, 136, .16); --tint-chip: rgba(255, 113, 136, .15); }
+  #cover.down { --tint-a: rgba(70, 230, 165, .26); --tint-b: rgba(94, 224, 167, .13); --tint-chip: rgba(94, 224, 167, .15); }
   #cover.flat { --tint-a: rgba(105, 183, 255, .26); --tint-b: rgba(105, 183, 255, .12); }
   /* 细网格纹理：给深底一点印刷质感 */
   #cover::before {
@@ -88,8 +91,9 @@
   }
   .quote.up .price, .quote.up .change { color: var(--up); }
   .quote.down .price, .quote.down .change { color: var(--down); }
-  .quote.up .change { background: rgba(255,113,136,.15); text-shadow: 0 0 3.4vh rgba(255,113,136,.65); }
-  .quote.down .change { background: rgba(94,224,167,.15); text-shadow: 0 0 3.4vh rgba(94,224,167,.55); }
+  /* 胶囊底色深浅跟涨跌幅走（--tint-chip 由 cover.py 内联注入） */
+  .quote.up .change { background: var(--tint-chip, rgba(255,113,136,.15)); text-shadow: 0 0 3.4vh rgba(255,113,136,.65); }
+  .quote.down .change { background: var(--tint-chip, rgba(94,224,167,.15)); text-shadow: 0 0 3.4vh rgba(94,224,167,.55); }
   .quote.flat .change { color: var(--muted); background: rgba(145,168,191,.12); text-shadow: none; }
 
   .chart {
@@ -166,7 +170,7 @@
 </style>
 </head>
 <body>
-<main id="cover" class="{{ tone }}" data-ratio="{{ width }}x{{ height }}">
+<main id="cover" class="{{ tone }}" data-ratio="{{ width }}x{{ height }}"{% if tint_style %} style="{{ tint_style }}"{% endif %}>
 
   <header class="brand">
     <span class="mark">谈股论金</span>

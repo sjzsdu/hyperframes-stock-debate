@@ -20,11 +20,11 @@ class HyperFramesBuilderTests(unittest.TestCase):
         # The bottom band is the dangerous one: caption + action bar + hashtags.
         self.assertGreaterEqual(vertical.safe_bottom, 400)
         self.assertLess(horizontal.safe_bottom, vertical.safe_bottom)
-        # Vertical sides are symmetric: 180×2 left the stage too narrow,
-        # 60/140 asymmetric read lopsided and 100×2 still read as huge empty
-        # bands — 25×2 (a quarter of 100) is the 2026-09-19 verdict, trading
-        # the right-edge overlay margin for a 1030px column.
-        self.assertEqual((vertical.safe_side_left, vertical.safe_side_right), (25, 25))
+        # Vertical sides are symmetric.  2026-09-22 快手真机：19.5:9–20:9 屏
+        # 全屏播放 9:16 视频按高铺满，左右各裁 97–108px，side=25 时「最新价」
+        # 被裁成「新价」——115 盖住最大裁切 + 余量。180×2 left the stage too
+        # narrow and 60/140 asymmetric read lopsided (2026-09-19).
+        self.assertEqual((vertical.safe_side_left, vertical.safe_side_right), (115, 115))
         self.assertEqual(vertical.safe_side_left, vertical.safe_side_right)
         self.assertEqual((horizontal.safe_top, horizontal.safe_side_left, horizontal.safe_side_right), (120, 70, 70))
 
@@ -54,8 +54,8 @@ class HyperFramesBuilderTests(unittest.TestCase):
             html = project.composition_path.read_text(encoding="utf-8")
             css = (project.directory / "stock-debate.css").read_text(encoding="utf-8")
             self.assertIn("--safe-top: 240px; --safe-bottom: 460px;", html)
-            self.assertIn("--safe-side-left: 25px; --safe-side-right: 25px;", html)
-            for selector in ("#headline", ".slot-kicker", "#visual-frame", "#caption-zone"):
+            self.assertIn("--safe-side-left: 115px; --safe-side-right: 115px;", html)
+            for selector in ("#headline", "#identity", "#visual-frame", "#caption-zone"):
                 block = css.split(f"#root.layout-vertical {selector} {{")[1].split("}")[0]
                 self.assertIn("var(--safe-", block, selector)
 
@@ -104,8 +104,11 @@ class HyperFramesBuilderTests(unittest.TestCase):
                            "谈什么", "字幕突出", "visual_prompt", "股市新手", "股市老登", "THE ROOKIE",
                            "THE VETERAN", "TOPIC VISUAL", "正在讨论", "正在发言", "AI", "生成"):
                 self.assertNotIn(banned, content)
-            self.assertIn("slot-kicker bear", content)
+            # kicker 文本已下线（2026-09-23）：骨架 beat key 对观众无意义，
+            # 话题分类仍通过 keywords 槽位的 data-topic 到达成片。
+            self.assertIn('data-slot="keywords"', content)
             self.assertIn('data-topic="risk"', content)
+            self.assertNotIn("slot-kicker", content)
 
     def test_news_topic_slide_shows_real_headlines(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -152,8 +155,9 @@ class HyperFramesBuilderTests(unittest.TestCase):
                 {},
             )
             content = project.composition_path.read_text(encoding="utf-8")
-            self.assertEqual(content.count('data-slot="kicker"'), 1)
-            # 话题没变，但说话人换了：氛围层按说话人合并，仍是两层。
+            # kicker 槽位已删（节拍 key 不再上屏）；同类内容合并语义由 tint
+            # 槽承担：话题没变但说话人换了 → bull 一层 + bear 一层。
+            self.assertEqual(content.count('data-slot="kicker"'), 0)
             self.assertEqual(content.count('data-slot="tint"'), 2)
 
     def test_captions_are_single_rows_on_an_absolute_clock(self):
@@ -190,7 +194,6 @@ class HyperFramesBuilderTests(unittest.TestCase):
             )
             content = project.composition_path.read_text(encoding="utf-8")
             self.assertIn('data-topic="industry"', content)
-            self.assertIn("行业与业务", content)
 
     def test_topic_visual_falls_back_to_company_profile(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -410,7 +413,7 @@ class HyperFramesBuilderTests(unittest.TestCase):
         builder = HyperFramesBuilder({"video": {}})
         cta = {"hook": "下一份财报的外销收入占比", "question": "你更信渠道还是产能？"}
 
-        self.assertEqual(builder._outro_title(cta, "华瓷股份"), "下期盯：下一份财报的外销收入占比")
+        self.assertEqual(builder._outro_title(cta, "华瓷股份"), "下一份财报的外销收入占比")
         self.assertEqual(builder._outro_tip(cta), "你更信渠道还是产能？")
         # 没有互动文案时退回原来的收尾，不留空标题
         self.assertEqual(builder._outro_title({}, "华瓷股份"), "以上就是华瓷股份的生意观察")

@@ -45,14 +45,12 @@
     {% endfor %}</ul>
   </aside>
 
-  {# Slot 1 — topic label #}
-  {% for item in slots.kicker %}
-  <div class="slot-kicker {{ item.character }} clip" data-start="{{ item.start }}" data-duration="{{ item.duration }}" data-track-index="10" data-slot="kicker" data-topic="{{ item.topic }}" data-layout-ignore>{{ item.text }}</div>
-  {% endfor %}
-
-  {# Slot 2 — talking-point chips #}
+  {# Slot 1 — topic label: removed 2026-09-23.  The board SVG already carries
+     its own Chinese title, and the old kicker showed raw skeleton beat keys
+     ("books", "occupied") that mean nothing to a viewer.  The topic tag now
+     rides on the board element itself (data-topic) for tooling. #}
   {% for item in slots.keywords %}
-  <div class="slot-keywords {{ item.character }} clip" data-start="{{ item.start }}" data-duration="{{ item.duration }}" data-track-index="11" data-slot="keywords" data-layout-ignore>{% for keyword in item.keywords %}<span>{{ keyword }}</span>{% endfor %}</div>
+  <div class="slot-keywords {{ item.character }} clip" data-start="{{ item.start }}" data-duration="{{ item.duration }}" data-track-index="11" data-slot="keywords" data-topic="{{ item.topic }}" data-layout-ignore>{% for keyword in item.keywords %}<span>{{ keyword }}</span>{% endfor %}</div>
   {% endfor %}
 
   {# Permanent: the panel frame.  Contents swap inside it, the frame itself
@@ -65,9 +63,10 @@
   <div class="visual-item visual-market clip" data-start="{{ item.start }}" data-duration="{{ item.duration }}" data-track-index="{{ 20 + loop.index }}" data-slot="visual" data-layout-ignore>
     <div class="market-chart"><div class="chart-camera">{{ chart|safe }}</div></div>
     <div class="market-finance"><div class="metric-list">{% for metric in financials %}<div class="metric"><span>{{ metric.label }}</span><strong class="{{ metric.tone or '' }}">{{ metric.value }}</strong></div>{% endfor %}</div></div>
+    <i class="sheen" aria-hidden="true"></i>
   </div>
   {% else %}
-  <div class="visual-item clip" data-start="{{ item.start }}" data-duration="{{ item.duration }}" data-track-index="{{ 20 + loop.index }}" data-slot="visual" data-layout-ignore>{{ item.svg|safe }}</div>
+  <div class="visual-item clip" data-start="{{ item.start }}" data-duration="{{ item.duration }}" data-track-index="{{ 20 + loop.index }}" data-slot="visual" {% if item.topic %}data-topic="{{ item.topic }}" {% endif %}data-layout-ignore>{{ item.svg|safe }}<i class="sheen" aria-hidden="true"></i></div>
   {% endif %}
   {% endfor %}
 

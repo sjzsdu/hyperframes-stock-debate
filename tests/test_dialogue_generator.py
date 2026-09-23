@@ -55,9 +55,9 @@ class DialogueGeneratorTests(unittest.TestCase):
         self.assertNotIn("分钟之间", message)
 
     def test_default_budget_targets_a_two_to_five_minute_cut(self):
-        """默认配置按 2-5 分钟算预算，并把轮数收敛成「少轮、讲透」的区间。
+        """默认配置按 2-5 分钟算预算，轮次多、单轮短（2026-09-22 用户反馈）。
 
-        轮数用典型单轮（97 字）估算而不是极值：极值会配出 4-22 轮这种宽区间，
+        轮数用典型单轮（60 字）估算而不是极值：极值会配出宽区间，
         模型往中间凑，长片的时长反而失控。
         """
         message = DialogueGenerator()._user_prompt({"code": "1"})
@@ -65,12 +65,14 @@ class DialogueGeneratorTests(unittest.TestCase):
         self.assertIn("约 2-5 分钟", message)
         # 120s × 4.8 = 576 字，300s × 4.8 = 1440 字
         self.assertIn("576-1440 字", message)
-        # 单轮 65-130 字，轮数按典型 97 字估 → 6-14 轮
-        self.assertIn("65-130 字", message)
-        self.assertIn("6-14 轮", message)
+        # 单轮 40-80 字，轮数按典型 60 字估 → 9-24 轮
+        self.assertIn("40-80 字", message)
+        self.assertIn("9-24 轮", message)
         # 长片要的是深度，prompt 必须点明这一点
         self.assertIn("这是一条长视频", message)
-        self.assertIn("把一轮讲透", message)
+        # 节奏导向：多轮短交锋，但每轮仍要有新信息
+        self.assertIn("多轮短交锋", message)
+        self.assertIn("严禁把同一个意思换句话再说一遍", message)
 
     def test_fixed_duration_reads_as_a_single_minute_span(self):
         """--duration-minutes 4 会把上下限压成同一个值，prompt 别写成「约 4-4 分钟」。"""
@@ -78,6 +80,53 @@ class DialogueGeneratorTests(unittest.TestCase):
         message = generator._user_prompt({"code": "1"})
         self.assertIn("（约 4 分钟）", message)
         self.assertNotIn("4-4 分钟", message)
+
+    def test_prompt_puts_sentence_integrity_above_the_char_budget(self):
+        """2026-09-22 000066 实锤：模型把字数上限当硬约束，把句子压成半截
+        （「…产能释。」「…反而。」），配音照念，听感就是语音被掐掉。
+        prompt 必须明确：字数是节奏参考，句子完整性优先，装不下拆轮。"""
+        message = DialogueGenerator()._user_prompt({"code": "1"})
+        self.assertIn("先把句子说完整", message)
+        self.assertIn("宁可多拆一轮", message)
+        self.assertIn("完整自然的话", message)
+
+    def test_overlong_line_is_split_into_complete_continuation_turns(self):
+        """模型没管住字数时，超长台词拆成同说话人的续轮——一个字不丢，
+        也不再把半句硬截成「…产能释。」。"""
+        long_line = ("政企采购的订单毛利其实不高，计算产业毛利率只有百分之十七，"
+                     "但是它的粘性在于后续的运维和集成服务，客户一旦用了就很难换供应商，"
+                     "这才是这门生意真正的护城河所在，也是利润率能慢慢爬起来的原因。")
+        self.assertGreater(len(long_line), 80)
+        response = json.dumps({"title": "t", "turns": [
+            {"speaker": "bull", "beat": "生意本质", "line": long_line}]}, ensure_ascii=False)
+        generator = DialogueGenerator({"dialogue": {"max_line_chars": 80},
+                                       "characters": {"bull": {"name": "新手"}, "bear": {"name": "老手"}}},
+                                      runner=lambda argv, timeout: response)
+        with patch("stocktalk.modules.dialogue_generator.shutil.which", return_value="bl"):
+            script = generator.generate({"code": "000001", "quote": {"name": "平安银行"}})
+        turns = script["turns"]
+        self.assertGreater(len(turns), 1, "超长台词必须拆成多轮")
+        self.assertTrue(all(turn["speaker"] == "bull" for turn in turns))
+        self.assertTrue(all(len(turn["line"]) <= 80 for turn in turns))
+        self.assertTrue(all(turn["beat"] == turns[0]["beat"] for turn in turns),
+                        "续轮必须落在同一个节拍上")
+        # 内容无损：拆分只会在断点处把句读点换成句号，文字一个不丢
+        import re as _re
+        strip = lambda s: _re.sub(r"[。！？…，、；：,]", "", s)
+        self.assertEqual(strip("".join(turn["line"] for turn in turns)), strip(long_line))
+        # 续轮是正常发言，不能被当成短回应跳过图板
+        self.assertFalse(any(turn["short"] for turn in turns))
+
+    def test_split_prefers_sentence_boundaries_over_hard_cuts(self):
+        """拆分点优先落在完整句边界，切出来的每轮都以完整句收尾。"""
+        generator = DialogueGenerator({"dialogue": {"max_line_chars": 40}})
+        text = ("第一句话讲的是生意模式到底是什么。第二句话讲的是这门生意最要命的成本在哪里。"
+                "第三句话讲的是现金流什么时候能转正。")
+        pieces = generator._split_line(text)
+        self.assertGreater(len(pieces), 1)
+        self.assertTrue(all(piece[-1] in "。！？…" for piece in pieces))
+        self.assertTrue(all(len(piece) <= 40 for piece in pieces))
+        self.assertEqual("".join(pieces), text)
 
     def test_script_reports_estimated_speech_duration(self):
         """结果里带上字数与换算时长，好让流水线在渲染前就能提醒超长。"""

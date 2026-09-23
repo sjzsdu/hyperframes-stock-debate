@@ -27,13 +27,14 @@ Runner = Callable[[Sequence[str], float], str]
 SPEECH_CHARS_PER_SECOND = 4.8
 
 # 成片时长目标 2-5 分钟（2026-09-20 用户反馈"内容太短、得不到有效启示"）。
-# 长片要的是把一门生意讲透，所以轮数不追求多、单轮给到 130 字（约 27 秒）。
+# 2026-09-22 用户反馈：轮次多一点、每人一次讲短一点——短交锋才有辩论的节奏，
+# 一人一口气 27 秒太闷。单轮默认 80 字（约 17 秒），轮数按典型 60 字估。
 @dataclass(frozen=True)
 class DialogueConfig:
     model: str = "qwen3.6-plus"
     min_duration_seconds: int = 120
     max_duration_seconds: int = 300
-    max_line_chars: int = 130
+    max_line_chars: int = 80
     max_tokens: int = 8000
     temperature: float = 0.8
     timeout_seconds: float = 300.0
@@ -212,8 +213,8 @@ class DialogueGenerator:
                    else f"{self._minutes(max_s)} 分钟")
         beat_keys = beats_by_key(choice.beats)
         schema = {"title": "股票名（代码）：一句话点出这门生意或行业看点", "turns": [
-            {"speaker": "bull", "line": f"{floor_chars} 到 {self.config.max_line_chars} 字的自然发言；"
-                                        f"短回应可以只有 2-8 字",
+            {"speaker": "bull", "line": f"一句完整自然的话，{floor_chars} 到 {self.config.max_line_chars} 字；"
+                                        f"说不下就拆成两轮说；短回应可以只有 2-8 字",
              "beat": f"骨架节拍，只能取：{'/'.join(beat_keys)}",
              "visual": ["line 中提到的关键词1", "关键词2"]}],
             "sides": {"bull": "看多一方的一句话立场（只讲生意层面的分歧）",
@@ -226,11 +227,14 @@ class DialogueGenerator:
             f"正文总字数控制在 {min_chars}-{budget_chars} 字之间（配音约 4.8 字/秒，超字数就会超时长），"
             f"分 {min_turns}-{max_turns} 轮发言，单轮 {floor_chars}-{self.config.max_line_chars} 字"
             f"（允许出现只有几个字的短回应轮，如“嗯”“有道理”“但是——”，这类短回应不受单轮下限约束）。"
+            "单轮字数是节奏参考，不是硬上限：先把句子说完整，再考虑字数。"
+            "任何一句话都不许为了压字数砍成半截——宁可多拆一轮，也不能丢掉半句意思；"
+            "写完自己检查每轮是否是完整的话，结尾不能是“……的”“……反而”这种断句。"
             "不要编号、不要 Round、不要强制一来一回；"
             "允许一方连续追问、另一方长答后短驳，长短句交错，不要每轮等长。"
             "这是一条长视频，不是快讯：观众交出的是几分钟的注意力，每一轮都要让他多懂一点这门生意。"
-            "宁可少几轮、把一轮讲透（说清一件事的来龙去脉和它对生意的含义），"
-            "也不要为了多聊几轮把观点切成碎片、或把同一个意思换句话再说一遍。"
+            "多轮短交锋，别让一个人一口气讲太久：一轮只讲一个点，讲完就把话头递出去。"
+            "但每一轮仍必须有新信息、新数字或新角度，严禁把同一个意思换句话再说一遍。"
             "素材和数据多就往上限展开，素材少就收得住（不低于下限），不要为凑时长注水，也不要意犹未尽地草草收尾。"
             "至少一半的篇幅围绕公司业务和行业本身（生意模式、行业格局、竞争与需求），技术信号最多作为一句带过的佐证。"
             "开头几轮就把“这家公司靠什么赚钱”讲明白，让观众听完能多懂一门生意，而不是听了一段行情点评。"
@@ -278,11 +282,17 @@ class DialogueGenerator:
             short = bool(beat and beat.short) or len(line) <= self.config.short_line_chars
             if beat and beat.speaker and beat.speaker != speaker:
                 notes.append(f"[第{index}轮] 骨架指定由 {beat.speaker} 说这段（{beat.key}），模型派给了 {speaker}")
-            turns.append({"speaker": speaker, "line": line,
-                          "beat": beat.key if beat else self._clean_beat(entry.get("beat")),
-                          "short": short,
-                          "visual": self._clean_visuals(entry.get("visual")),
-                          "character_name": self._character(speaker, speaker, "")["name"]})
+            visuals = self._clean_visuals(entry.get("visual"))
+            # 模型没管住字数时，把超长台词拆成同说话人的续轮——一个字都不丢，
+            # 而且正好贴合"轮次多一点、每次讲短一点"的节奏（2026-09-22 用户反馈）。
+            pieces = self._split_line(line)
+            for offset, piece in enumerate(pieces):
+                turns.append({"speaker": speaker, "line": piece,
+                              "beat": beat.key if beat else self._clean_beat(entry.get("beat")),
+                              # 只有首段能算短回应；续轮是正常发言，别跳过图板
+                              "short": short and offset == 0,
+                              "visual": visuals,
+                              "character_name": self._character(speaker, speaker, "")["name"]})
         quote = stock_data.get("quote") if isinstance(stock_data.get("quote"), Mapping) else {}
         code, name = str(stock_data.get("code") or quote.get("code") or ""), str(quote.get("name") or stock_data.get("code") or "股票")
         char_count = sum(len(turn["line"]) for turn in turns)
@@ -323,8 +333,41 @@ class DialogueGenerator:
         return beats[position], position
 
     def _clean_line(self, value: Any) -> str:
-        line = re.sub(r"\s+", "", str(value or ""))
-        return line[:self.config.max_line_chars - 1].rstrip("，。；、") + "。" if len(line) > self.config.max_line_chars else line
+        """清洗台词。只去空白，不做字数截断——截断会把句子砍成半截，
+        配音照着半句念，听感就是"语音被掐掉"（2026-09-22 000066 实锤）。
+        超长交给 :meth:`_split_line` 拆成续轮，内容一个字都不丢。"""
+        return re.sub(r"\s+", "", str(value or ""))
+
+    def _split_line(self, value: Any) -> list[str]:
+        """把超长台词按标点拆成多轮（每轮 ≤ max_line_chars），保句子的完整。
+
+        优先在句号/问号/叹号/分号处断（完整句边界），其次逗号/顿号/冒号，
+        都没有才硬切。软目标靠 prompt 传达，这里只兜底。
+        """
+        text = re.sub(r"\s+", "", str(value or ""))
+        limit = self.config.max_line_chars
+        if len(text) <= limit:
+            return [text] if text else []
+        chunks: list[str] = []
+        while len(text) > limit:
+            window = text[:limit]
+            # 先找完整句边界；最近的句边界太靠前（切出来太碎）就退到句内标点
+            cut = max(window.rfind(p) for p in "。！？；…")
+            if cut < limit // 2:
+                cut = max(window.rfind(p) for p in "，、：,—-")
+            if cut < limit // 2:
+                cut = limit - 1
+            head, text = text[:cut + 1], text[cut + 1:]
+            head = head.rstrip("，、；：,")
+            if head and head[-1] not in "。！？…":
+                head += "。"
+            chunks.append(head)
+        if text:
+            text = text.rstrip("，、；：,")
+            if text and text[-1] not in "。！？…":
+                text += "。"
+            chunks.append(text)
+        return chunks
 
     @staticmethod
     def _clean_beat(value: Any) -> str:

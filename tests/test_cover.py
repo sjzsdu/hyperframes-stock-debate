@@ -159,6 +159,47 @@ def test_quote_tone_follows_a_share_colour_convention() -> None:
     assert 'class="quote down"' in down
 
 
+# ---------------------------------------------------------------------------
+# 涨跌幅 → 封面配色深浅（2026-09-23：每张封面同一种浅浅红，审美疲劳）
+# ---------------------------------------------------------------------------
+
+def test_tint_depth_scales_with_change_magnitude() -> None:
+    """涨得越狠封面越红；大阳线（7%+）饱和到顶不再加深。"""
+    assert CoverGenerator._tints("up", 0.4)[0] < CoverGenerator._tints("up", 3.2)[0]
+    assert CoverGenerator._tints("up", 3.2)[0] < CoverGenerator._tints("up", 9.9)[0]
+    assert CoverGenerator._tints("up", 9.9) == CoverGenerator._tints("up", 20.0)  # 20cm 也封顶
+
+
+def test_tint_direction_stays_red_up_green_down() -> None:
+    up = CoverGenerator._tints("up", 3.2)
+    down = CoverGenerator._tints("down", -3.2)
+    assert "255,90,120" in up[0]    # A股红涨
+    assert "70,230,165" in down[0]  # A股绿跌
+    # 同样幅度时红绿两侧深浅一致（对称体验）
+    assert up[0].split(",")[-1] == down[0].split(",")[-1]
+
+
+def test_flat_or_missing_change_keeps_the_neutral_tone() -> None:
+    assert CoverGenerator._tints("flat", 0.0) is None
+    assert CoverGenerator._tints("flat", None) is None
+
+
+def test_tint_style_is_injected_into_the_cover_html() -> None:
+    """深浅变量要真的进 HTML 内联 style，模板里的固定值只是回退。"""
+    gen = make_generator(Path("/tmp"))
+    big = gen._html({**STOCK, "quote": {**STOCK["quote"], "change_pct": 6.5}}, SCRIPT,
+                    "601689", "portrait", 1080, 1440)
+    assert "--tint-a: rgba(255,90,120," in big and "--tint-chip: rgba(255,113,136," in big
+    tiny = gen._html({**STOCK, "quote": {**STOCK["quote"], "change_pct": 0.3}}, SCRIPT,
+                     "601689", "portrait", 1080, 1440)
+    assert "--tint-a: rgba(255,90,120," in tiny
+    assert float(tiny.split("--tint-a: rgba(255,90,120,")[1][:4]) < \
+           float(big.split("--tint-a: rgba(255,90,120,")[1][:4])
+    flat = gen._html({**STOCK, "quote": {**STOCK["quote"], "change_pct": 0.0}}, SCRIPT,
+                     "601689", "portrait", 1080, 1440)
+    assert 'style="--tint' not in flat  # 平盘不注入内联变量，退回模板固定蓝灰
+
+
 def test_sparkline_draws_only_real_closes() -> None:
     html = make_generator(Path("/tmp"))._html(STOCK, SCRIPT, "601689", "portrait", 1080, 1440)
     assert "spark-line" in html

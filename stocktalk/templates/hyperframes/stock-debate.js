@@ -12,7 +12,7 @@
   const DISSOLVE = .34;
   // z-index bands.  Each slot keeps its own band so a slot's layers can never
   // land on top of another slot's.
-  const SLOT_Z = { tint: 2000, kicker: 3000, keywords: 4000, visual: 5000, caption: 6000 };
+  const SLOT_Z = { tint: 2000, keywords: 4000, visual: 5000, caption: 6000 };
 
   // Preview-only aid: `#guides` in the URL reveals the bands each platform's
   // player UI will sit on, so the layout can be checked before publishing.
@@ -60,7 +60,32 @@
       tl.set(previous, { visibility: 'hidden' }, start + DISSOLVE + .02);
     });
   };
-  ['tint', 'kicker', 'keywords', 'visual'].forEach(wireSlot);
+  ['tint', 'keywords', 'visual'].forEach(wireSlot);
+
+  // ---- Keyword chips: stagger in when the topic changes --------------------
+  // 容器本身仍然原地溶解（上面的 wireSlot）；chips 再逐个上浮一小段，给换题
+  // 一个可感知的节奏。首版（start=0）保持完成态——海报帧不许有半途元素。
+  document.querySelectorAll('[data-slot="keywords"]').forEach(el => {
+    const at = Math.max(0, Number(el.dataset.start || 0));
+    const chips = el.querySelectorAll('span');
+    if (!chips.length || at === 0) return;
+    tl.fromTo(chips, { opacity: 0, y: 14 }, { opacity: 1, y: 0, stagger: .05, duration: .3, ease: 'power2.out' }, at + .06);
+  });
+
+  // ---- Panel sheen: in-page motion that moves no content -------------------
+  // 每块图板进场后扫一道高光；长图板（合并窗）每 7 秒再扫一次，页面静止时也
+  // 有呼吸感。sheen 平时停在面板外（CSS translateX），第 0 帧永远干净。
+  document.querySelectorAll('.visual-item').forEach(el => {
+    const sheen = el.querySelector('.sheen');
+    if (!sheen) return;
+    const start = Math.max(0, Number(el.dataset.start || 0));
+    const span = Math.max(0, Number(el.dataset.duration || 0));
+    for (let at = start + 1.0; at + 1.7 <= start + span; at += 7) {
+      tl.fromTo(sheen, { xPercent: -140 }, { xPercent: 480, duration: 1.6, ease: 'power1.inOut' }, at);
+      tl.fromTo(sheen, { opacity: 0 }, { opacity: .85, duration: .35 }, at)
+        .to(sheen, { opacity: 0, duration: .4 }, at + 1.2);
+    }
+  });
 
   // ---- Captions: one row at a time, swapped on the spoken word -------------
   document.querySelectorAll('.caption-line').forEach(el => {
