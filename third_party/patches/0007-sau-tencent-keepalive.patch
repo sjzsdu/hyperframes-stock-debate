@@ -1,0 +1,145 @@
+diff --git a/sau_cli.py b/sau_cli.py
+index 37805bf..5340c42 100644
+--- a/sau_cli.py
++++ b/sau_cli.py
+@@ -41,6 +41,7 @@ from uploader.tencent_uploader.main import (
+     TENCENT_PUBLISH_STRATEGY_SCHEDULED,
+     TencentVideo,
+     cookie_auth as tencent_cookie_auth,
++    tencent_keepalive,
+     tencent_setup,
+ )
+ from uploader.weibo_uploader.main import (
+@@ -372,6 +373,17 @@ async def check_tencent_account(account_name: str) -> bool:
+     return await tencent_cookie_auth(str(account_file))
+ 
+ 
++async def keepalive_tencent_account(account_name: str, retries: int = 1,
++                                    headless: bool = True) -> dict:
++    """探活并按需续期视频号 cookie；与 check 的区别是会回写 storage_state。
++
++    check 只回答"能不能用"，不适合挂定时任务：它不刷新任何东西，且失败即
++    退出码 1。keepalive 面向无人值守，默认复核一次压掉抖动假阳性。
++    """
++    account_file = resolve_account_file("tencent", account_name)
++    return await tencent_keepalive(str(account_file), retries=retries, headless=headless)
++
++
+ async def login_youtube_account(account_name: str, headless: bool = False) -> dict:
+     account_file = resolve_account_file("youtube", account_name)
+     return await youtube_setup(str(account_file), handle=True, return_detail=True, headless=headless)
+@@ -921,11 +933,18 @@ def build_parser() -> argparse.ArgumentParser:
+     tencent_parser = platform_parsers.add_parser("tencent", help="Tencent/WeChat Channels operations")
+     tencent_actions = tencent_parser.add_subparsers(dest="action", required=True)
+ 
+-    for action_name in ("login", "check"):
+-        action_parser = tencent_actions.add_parser(action_name, help=f"Tencent/WeChat Channels {action_name}")
++    for action_name in ("login", "check", "keepalive"):
++        action_help = ("probe the cookie and refresh it while still valid"
++                       if action_name == "keepalive" else action_name)
++        action_parser = tencent_actions.add_parser(
++            action_name, help=f"Tencent/WeChat Channels {action_help}")
+         action_parser.add_argument("--account", required=True, help="Tencent user-defined account_name")
+         if action_name == "login":
+             add_runtime_flags(action_parser)
++        if action_name == "keepalive":
++            add_runtime_flags(action_parser)
++            action_parser.add_argument("--retries", type=int, default=1,
++                                       help="Extra re-checks before declaring the cookie dead (default 1)")
+ 
+     tencent_upload_video_parser = tencent_actions.add_parser("upload-video", help="Upload one video to WeChat Channels")
+     tencent_upload_video_parser.add_argument("--account", required=True, help="Tencent user-defined account_name")
+@@ -1267,6 +1286,13 @@ async def dispatch(args: argparse.Namespace) -> int:
+             print("valid" if is_valid else "invalid")
+             return 0 if is_valid else 1
+ 
++        if args.action == "keepalive":
++            outcome = await keepalive_tencent_account(
++                args.account, retries=args.retries, headless=args.headless
++            )
++            print(f"{'alive' if outcome['ok'] else 'dead'}: {outcome['detail']}")
++            return 0 if outcome["ok"] else 1
++
+         publish_strategy = TENCENT_PUBLISH_STRATEGY_SCHEDULED if args.schedule else TENCENT_PUBLISH_STRATEGY_IMMEDIATE
+ 
+         if args.action == "upload-video":
+diff --git a/uploader/tencent_uploader/main.py b/uploader/tencent_uploader/main.py
+index 8348512..ed0178e 100644
+--- a/uploader/tencent_uploader/main.py
++++ b/uploader/tencent_uploader/main.py
+@@ -111,6 +111,75 @@ def format_str_for_short_title(origin_title: str) -> str:
+     return formatted_string
+ 
+ 
++async def _tencent_page_is_logged_in(page: Page) -> bool:
++    """cookie 有效判定：先等前端 JS 跳登录页，再看有没有扫码登录痕迹。
++
++    视频号 cookie 失效时页面先停在原地址, 随后由前端 JS 跳到登录页; 必须等待
++    跳转完成再判断, 否则会误报"cookie 有效"。keepalive 与 cookie_auth 共用这
++    一套判定, 避免两处阈值各自漂移。
++    """
++    try:
++        await page.wait_for_url("**/login.html**", timeout=8000)
++        tencent_logger.info(_msg("🥹", "cookie 已失效（页面跳转到登录页），得重新登录一下"))
++        return False
++    except Exception:
++        pass  # 8 秒内未跳转, 大概率已登录
++
++    # 双保险: 页面里出现微信扫码登录 iframe 也视为失效
++    for fr in page.frames:
++        if "open.weixin.qq.com/connect/qrconnect" in fr.url:
++            tencent_logger.info(_msg("🥹", "cookie 已失效（页面出现扫码登录框），得重新登录一下"))
++            return False
++
++    # 三保险: URL 里出现 login 说明已经被请出去了
++    if "login" in page.url:
++        tencent_logger.info(_msg("🥹", "cookie 已失效（当前地址就是登录页），得重新登录一下"))
++        return False
++    return True
++
++
++async def tencent_keepalive(account_file, retries: int = 1, headless: bool = True) -> dict:
++    """探活并按需续期：真实访问一次视频号后台, 有效则把 storage_state 回写。
++
++    为什么需要它: cookie 文件里 ``sessionid`` 的 expires 是 2027(本地不过期),
++    真正会死的是服务端的会话——按本站日志(2026-09-16~23), 它总在「最后一次
++    真实活动」之后 10~25 小时失效, 且没有固定规律。定时做一次真实活动, 一是
++    尽量把窗口往后推, 二是把失效发现提前到发布之前(发布时才撞上要赔掉一整次
++    渲染)。回写只在探活成功后进行, 顺带把服务端本次下发的 cookie 收进 jar。
++
++    单次失败未必是真死: 2026-09-18 23:46 报过一次失效, 次日 08:30 又是有效,
++    中间没有任何登录动作, 属抖动假阳性。所以默认再复核一次才判死。
++    """
++    account_file = _resolve_account_file(account_file)
++    if not os.path.exists(account_file):
++        return {"ok": False, "reason": "missing", "attempts": 0,
++                "detail": f"cookie 文件不存在: {account_file}"}
++
++    attempts = 0
++    detail = "探活未执行"
++    for attempt in range(max(0, retries) + 1):
++        attempts = attempt + 1
++        async with async_playwright() as playwright:
++            browser = await playwright.chromium.launch(**_build_launch_kwargs(headless=headless))
++            try:
++                context = await browser.new_context(storage_state=account_file)
++                context = await set_init_script(context)
++                page = await context.new_page()
++                await page.goto(TENCENT_HOME_URL, wait_until="domcontentloaded")
++                if await _tencent_page_is_logged_in(page):
++                    await context.storage_state(path=account_file)
++                    return {"ok": True, "reason": "alive", "attempts": attempts,
++                            "detail": f"cookie 有效，已回写 storage_state（{page.url}）"}
++                detail = "cookie 已失效（被跳转到登录页）"
++            except Exception as exc:
++                detail = f"探活出错，按失效处理: {exc}"
++            finally:
++                await browser.close()
++        if attempt < max(0, retries):
++            await asyncio.sleep(2)
++    return {"ok": False, "reason": "dead", "attempts": attempts, "detail": detail}
++
++
+ async def cookie_auth(account_file):
+     account_file = _resolve_account_file(account_file)
+     async with async_playwright() as playwright:

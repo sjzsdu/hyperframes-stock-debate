@@ -84,6 +84,50 @@ patches here so they survive an upgrade and can be sent upstream later:
     （`is_visible()`），等不到就换下一个入口选择器重试；全部失败才返回 None。
   - 配套修复在 stocktalk 侧：`templates/hyperframes/stock-debate.js` 把开场场景
     改为第 0 帧完成态（海报帧）——即使封面再被跳过，首帧也是完整排版。
+- `patches/0007-sau-tencent-keepalive.patch` (2026-09-23)
+  - 视频号会话无法长期保活，是「持续定时运行」的死结。实测：cookie 文件里
+    `sessionid` 的 expires 是 **2027**，本地根本不过期；真正会死的是**服务端会话**。
+  - **口径修正（2026-09-23 晚，用户澄清）**：过去每天都由人工在发布前跑一次
+    `sau tencent login`，把时钟重置了，所以日志里那些「失效」多数只是登录命令自己的
+    前置检查。可用的干净读数只有：
+    * 每次扫码后**确认可用**的最长记录 = **8.0h**（最后一次真实上传距登录）；
+    * 次日首次检查（扫码后 16.6 / 16.7 / 23.0 / 23.9 / 25.6 / 32.5h）**全部判失效**；
+    * 一次矛盾读数：09-19 08:30 判「有效」（距上次登录 41.3h，中间无登录），但当时
+      没有任何上传动作去证实它 → 更像 `cookie_auth` 的假阳性（它只等 8 秒跳转）。
+    结论：**会话能否撑过两次发布之间的间隔（08:30↔19:30 = 11h、19:30↔08:30 = 13h），
+    在人工每日登录的前提下根本测不出来**。故 0007 的 keepalive 现在连「会话年龄」
+    一起报（见下），先把这段空白测出来，再决定是否需要改成平台侧定时发表。
+  - 新增 `tencent_keepalive(account_file, retries=1)` 与 `sau tencent keepalive`：
+    无头真实访问一次视频号后台，仍然有效就**回写 `storage_state`**，输出
+    `alive|dead: <detail>` 并以 0/1 退出，供定时任务判断；`--retries` 默认 1，用于压
+    掉抖动假阳性（2026-09-18 23:46 报过一次失效、次日 08:30 又是有效，中间没有任何
+    登录动作）。stocktalk 侧还会从 `logs/tencent.log` 读最后一次「扫码成功」，
+    把**会话年龄**写进 `output/.session_state.json` 与心跳输出。
+  - 与 `check` 的分工：`check` 只回答能不能用、失败即 1，适合发布前预检；
+    `keepalive` 面向无人值守，负责保温 + 提前发现失效。
+  - 判定逻辑抽成 `_tencent_page_is_logged_in()`（跳转登录页 / 扫码 iframe /
+    URL 含 login 三重判定）；`cookie_auth` 保持原实现不动，避免回归风险。
+  - 失效后的补救不需要新命令：`sau tencent login` 本身就是无头 + 把二维码存成
+    `cookies/<account>_tencent_login_qrcode_<ts>.png` 并等待扫码约 5 分钟，定时任务
+    可以把这个 PNG 推给手机、扫码即恢复。
+  - 若心跳证明「活动不能续期」，退路是**平台侧定时发表**：`sau tencent upload-video
+    --schedule "YYYY-MM-DD HH:MM"`（至少提前 2 小时；stocktalk 侧对应
+    `tangulunjin --publish-at 19:30`，见 `publisher.parse_publish_at`）。把发布时刻搬进
+    「会话还活着的那一刻」，一次登录就能排好后面几条，不必让会话撑到发布点。
+- `patches/0008-sau-tencent-quick-login.patch` (2026-09-24)
+  - 让 `sau tencent login` **免扫码**：打开登录页后先找 qrconnect iframe 里的
+    「微信快捷登录」按钮（`.js_quick_login_btn`；页面自己会探测本机微信
+    `localhost.weixin.qq.com`，探测通过才渲染它），点一下并等跳转；成功就跳过
+    二维码，失败（微信没跑 / 点了没反应）自动 reload 回落扫码流程。
+  - **2026-09-24 15:19 实测通过**：点击后 **33 秒**静默完成授权并跳转，**微信客户端
+    全程无需点「允许」**（此前一直存疑的关键问题）。登录后 `cookie_auth` 复核有效。
+    这意味着只要 Mac 上微信已登录，视频号重新登录就是**零人工**的。
+  - 两个实现坑（已写进代码注释）：①按钮要等页面 JS 探测完本机微信才渲染、iframe
+    也是异步挂载 → 找按钮必须轮询等待（第一版 goto 完立刻扫，永远扫不到）；
+    ②iframe 里有**两个**同名按钮，`.first` 撞上的那个是隐藏副本（`visible=False`），
+    必须逐个挑可见的那个。
+  - 快捷登录成功后仍走原收尾路径（`storage_state` 回写 + `cookie_auth` 校验），
+    不另起一套登录代码。
 
 Re-apply after an upgrade (all patches are diffed against `0012d2c` and
 verified with `git apply --check`; apply in numeric order):
@@ -96,6 +140,18 @@ git apply ../patches/0003-sau-ai-content-declaration.patch
 git apply ../patches/0004-sau-baijiahao-navigation-race.patch
 git apply ../patches/0005-sau-baijiahao-system-chrome-title-panel.patch
 git apply ../patches/0006-sau-tencent-cover-dialog-visible.patch
+git apply ../patches/0007-sau-tencent-keepalive.patch
+git apply ../patches/0008-sau-tencent-quick-login.patch
+```
+
+注意补丁里的路径是 **vendored 目录相对**（`sau_cli.py`、`uploader/...`），所以上面这套
+只在「重新克隆的上游检出」里成立——那里该目录就是仓库根。在本仓里改 vendor 代码时，
+`third_party/social-auto-upload` 只是主仓的一个子目录，`git apply` 会把补丁路径当成
+**主仓根相对**、直接报 `Skipped patch 'sau_cli.py'` 且静默不落任何改动。这种场景用：
+
+```bash
+cd third_party/social-auto-upload
+patch -p1 < ../patches/0007-sau-tencent-keepalive.patch   # 先加 --dry-run 校验
 ```
 
 All patches together reproduce this directory exactly apart from the

@@ -41,6 +41,7 @@ from uploader.tencent_uploader.main import (
     TENCENT_PUBLISH_STRATEGY_SCHEDULED,
     TencentVideo,
     cookie_auth as tencent_cookie_auth,
+    tencent_keepalive,
     tencent_setup,
 )
 from uploader.weibo_uploader.main import (
@@ -370,6 +371,17 @@ async def check_tencent_account(account_name: str) -> bool:
     if not account_file.exists():
         return False
     return await tencent_cookie_auth(str(account_file))
+
+
+async def keepalive_tencent_account(account_name: str, retries: int = 1,
+                                    headless: bool = True) -> dict:
+    """探活并按需续期视频号 cookie；与 check 的区别是会回写 storage_state。
+
+    check 只回答"能不能用"，不适合挂定时任务：它不刷新任何东西，且失败即
+    退出码 1。keepalive 面向无人值守，默认复核一次压掉抖动假阳性。
+    """
+    account_file = resolve_account_file("tencent", account_name)
+    return await tencent_keepalive(str(account_file), retries=retries, headless=headless)
 
 
 async def login_youtube_account(account_name: str, headless: bool = False) -> dict:
@@ -921,11 +933,18 @@ def build_parser() -> argparse.ArgumentParser:
     tencent_parser = platform_parsers.add_parser("tencent", help="Tencent/WeChat Channels operations")
     tencent_actions = tencent_parser.add_subparsers(dest="action", required=True)
 
-    for action_name in ("login", "check"):
-        action_parser = tencent_actions.add_parser(action_name, help=f"Tencent/WeChat Channels {action_name}")
+    for action_name in ("login", "check", "keepalive"):
+        action_help = ("probe the cookie and refresh it while still valid"
+                       if action_name == "keepalive" else action_name)
+        action_parser = tencent_actions.add_parser(
+            action_name, help=f"Tencent/WeChat Channels {action_help}")
         action_parser.add_argument("--account", required=True, help="Tencent user-defined account_name")
         if action_name == "login":
             add_runtime_flags(action_parser)
+        if action_name == "keepalive":
+            add_runtime_flags(action_parser)
+            action_parser.add_argument("--retries", type=int, default=1,
+                                       help="Extra re-checks before declaring the cookie dead (default 1)")
 
     tencent_upload_video_parser = tencent_actions.add_parser("upload-video", help="Upload one video to WeChat Channels")
     tencent_upload_video_parser.add_argument("--account", required=True, help="Tencent user-defined account_name")
@@ -1266,6 +1285,13 @@ async def dispatch(args: argparse.Namespace) -> int:
             is_valid = await check_tencent_account(args.account)
             print("valid" if is_valid else "invalid")
             return 0 if is_valid else 1
+
+        if args.action == "keepalive":
+            outcome = await keepalive_tencent_account(
+                args.account, retries=args.retries, headless=args.headless
+            )
+            print(f"{'alive' if outcome['ok'] else 'dead'}: {outcome['detail']}")
+            return 0 if outcome["ok"] else 1
 
         publish_strategy = TENCENT_PUBLISH_STRATEGY_SCHEDULED if args.schedule else TENCENT_PUBLISH_STRATEGY_IMMEDIATE
 

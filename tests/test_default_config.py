@@ -94,6 +94,15 @@ def test_ai_content_label_is_configured_for_the_cli_platform() -> None:
     assert label["kuaishou"]
 
 
+def test_topic_rotation_defaults_survive_a_missed_run() -> None:
+    """定时任务的选题默认值：失败上限必须 > 1，否则一次抖动就把票废掉。"""
+    topics = _config()["topics"]
+    assert topics["executable"] == "tongstock"
+    assert topics["max_runs_per_topic"] >= 2        # 1 次失败可能只是抖动，要能重试
+    assert topics["timeout_seconds"] >= 60          # 榜单是抓取多个新闻源的活儿
+    assert topics["rotation_file"].startswith(".")  # 记忆文件跟渲染产物一起放 output/
+
+
 def test_baijiahao_spec_needs_a_wide_cover() -> None:
     """百家号上传器强制横版封面：spec 必须带 wide，缺失会导致上传直接失败。"""
     from stocktalk.modules.publisher import PLATFORM_SPECS, cover_sizes_for

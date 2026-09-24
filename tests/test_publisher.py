@@ -6,6 +6,7 @@ import subprocess
 import sys
 import time
 from dataclasses import dataclass
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -58,6 +59,7 @@ def _isolated_cooldown_state(monkeypatch: pytest.MonkeyPatch) -> None:
     test that publishes to bilibili silently "skip" instead of uploading.
     """
     monkeypatch.setattr(publisher_module, "DEFAULT_STATE_FILENAME", ".publish_state.test.json")
+    monkeypatch.setattr(publisher_module, "DEFAULT_SESSION_FILENAME", ".session_state.test.json")
 
 
 # ---------------------------------------------------------------------------
@@ -250,7 +252,10 @@ def test_unsupported_platform_is_reported_not_fatal(tmp_path: Path) -> None:
     assert report["failed"][0]["platform"] == "weibo"
 
 
-def test_require_sau_reports_actionable_error(tmp_path: Path) -> None:
+def test_require_sau_reports_actionable_error(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # 这台机器 PATH 上还有一个 `sau` 包装器（~/.local/bin/sau → 另一份检出），
+    # 不能让它把「vendored venv 没装好」这个场景伪装成正常。
+    monkeypatch.setattr(publisher_module.shutil, "which", lambda name: None)
     publisher = SauPublisher({"publish": {"sau_dir": str(tmp_path / "none")}}, runner=fake_runner_factory([]))
     with pytest.raises(PublishError, match="uv sync"):
         publisher._require_sau()
@@ -587,7 +592,9 @@ def test_a_broken_preflight_does_not_block_the_rest(tmp_path: Path) -> None:
     assert report["succeeded"] == ["kuaishou"]
 
 
-def test_environment_check_reports_every_tool(tmp_path: Path) -> None:
+def test_environment_check_reports_every_tool(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # 同上：断言的是「找不到 sau」时的报告内容，所以先把宿主 PATH 上的 sau 摘掉。
+    monkeypatch.setattr(publisher_module.shutil, "which", lambda name: None)
     publisher = SauPublisher({"publish": {"sau_dir": str(tmp_path)}})
     checks = check_environment({"publish": {"sau_dir": str(tmp_path)}}, publisher)
 
@@ -956,3 +963,393 @@ def test_prompt_steps_aside_for_a_live_progress_bar(tmp_path: Path, monkeypatch:
     assert publisher._ask_for_code("抖音") is True
     assert calls == ["pause", "resume"]
     assert (tmp_path / "verify_code.txt").read_text(encoding="utf-8") == "123456"
+
+
+# ---------------------------------------------------------------------------
+# Session keep-alive (--keepalive)
+#
+# 视频号的登录态是「最后一次真实活动后 10~25 小时」失效的服务端会话，本地 cookie
+# 永不过期。定时心跳是全自动发布的命门，所以它的行为要钉住：视频号必须走
+# keepalive（不是 check），判定结果必须带时间戳落盘，失败不许抛异常打断整轮。
+# ---------------------------------------------------------------------------
+
+def _keepalive_publisher(tmp_path: Path, runner: Any, **publish: Any) -> SauPublisher:
+    config = {
+        "output": {"dir": str(tmp_path)},
+        "publish": {"sau_dir": str(tmp_path), "accounts": {"tencent": "default", "douyin": "default"}, **publish},
+    }
+    return SauPublisher(config, runner=runner, sau_bin="/fake/sau")
+
+
+def _write_tencent_log(tmp_path: Path, *login_times: str) -> Path:
+    """Fake uploader log holding one 扫码成功 line per supplied timestamp."""
+    log = tmp_path / "logs" / "tencent.log"
+    log.parent.mkdir(parents=True, exist_ok=True)
+    lines = ["2026-09-20 10:00:00.123 | INFO | x:cookie_auth:1 - 🥳 cookie 有效"]
+    for stamp in login_times:
+        lines.append(f"{stamp}.456 | SUCCESS | x:_wait_for_tencent_login:9 - 🥳 扫码成功，已经跳转到登录后页面")
+    log.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return log
+
+
+def test_tencent_session_start_comes_from_the_latest_login_marker(tmp_path: Path) -> None:
+    rotated = _write_tencent_log(tmp_path, "2026-09-22 16:22:50", "2026-09-23 09:07:41")
+
+    assert publisher_module.last_tencent_login(tmp_path) == datetime(2026, 9, 23, 9, 7, 41)
+    assert rotated.is_file()
+
+
+def test_a_quick_login_also_resets_the_session_age(tmp_path: Path) -> None:
+    """免扫码快捷登录（补丁 0008）写的是「快捷登录成功」，不带「扫码成功」二字。
+
+    只认扫码的话，一次快捷重登之后会话年龄仍按上次扫码算 —— 而「24h 绝对过期」
+    的整个排期判断都读这个数，报旧了就会把人引向错误的结论。
+    """
+    _write_tencent_log(tmp_path, "2026-09-23 09:07:41")
+    log = tmp_path / "logs" / "tencent.log"
+    log.write_text(
+        log.read_text(encoding="utf-8")
+        + "2026-09-24 15:19:41.356 | INFO     | x:_try_tencent_quick_login:483 - 🥳 快捷登录成功，已进入登录后页面\n",
+        encoding="utf-8",
+    )
+
+    assert publisher_module.last_tencent_login(tmp_path) == datetime(2026, 9, 24, 15, 19, 41)
+
+
+def test_tencent_session_start_is_unknown_without_a_readable_log(tmp_path: Path) -> None:
+    assert publisher_module.last_tencent_login(tmp_path) is None
+
+    (tmp_path / "logs").mkdir()
+    (tmp_path / "logs" / "tencent.log").write_text("no markers here\n", encoding="utf-8")
+    assert publisher_module.last_tencent_login(tmp_path) is None
+
+
+def test_session_age_hours_needs_a_start_and_measures_hours() -> None:
+    assert publisher_module.session_age_hours(None) is None
+    start = datetime(2026, 9, 23, 9, 7, 41)
+    assert publisher_module.session_age_hours(start, datetime(2026, 9, 23, 21, 7, 41)) == 12.0
+
+
+def test_keepalive_reports_how_old_the_tencent_session_is(tmp_path: Path) -> None:
+    # The age is the whole point of the metric: a stream of "alive" verdicts is
+    # meaningless without knowing how old the session was when it answered.
+    started = datetime.now() - timedelta(hours=13, minutes=30)
+    _write_tencent_log(tmp_path, started.strftime("%Y-%m-%d %H:%M:%S"))
+    publisher = _keepalive_publisher(tmp_path, fake_runner_factory([]))
+
+    results = publisher.keepalive_platforms(["tencent", "douyin"])
+
+    assert 13.4 < results["tencent"]["session_age_hours"] < 13.6
+    assert results["tencent"]["session_started_at"] == started.isoformat(timespec="seconds")
+    # 其余平台没有可读的会话起点：报 None，而不是编一个数字。
+    assert results["douyin"]["session_age_hours"] is None
+    record = publisher.session_state()["tencent"]
+    assert record["session_age_hours"] == results["tencent"]["session_age_hours"]
+    assert record["session_started_at"] == results["tencent"]["session_started_at"]
+
+
+def test_keepalive_without_a_login_log_still_reports_the_verdict(tmp_path: Path) -> None:
+    publisher = _keepalive_publisher(tmp_path, fake_runner_factory([]))
+
+    results = publisher.keepalive_platforms(["tencent"])
+
+    assert results["tencent"]["ok"] is True
+    assert results["tencent"]["session_age_hours"] is None
+    assert "session_started_at" not in publisher.session_state()["tencent"]
+
+
+def test_keepalive_asks_tencent_for_keepalive_and_the_rest_for_check(tmp_path: Path) -> None:
+    commands: list[list[str]] = []
+    publisher = _keepalive_publisher(tmp_path, fake_runner_factory(commands))
+
+    results = publisher.keepalive_platforms(["tencent", "douyin"])
+
+    assert commands[0][1:3] == ["tencent", "keepalive"]
+    assert commands[1][1:3] == ["douyin", "check"]
+    assert results["tencent"]["action"] == "keepalive"
+    assert results["douyin"]["action"] == "check"
+    assert all(r["ok"] for r in results.values())
+
+
+def test_keepalive_writes_timestamped_state_and_keeps_last_ok_on_failure(tmp_path: Path) -> None:
+    outcomes = iter([FakeCompleted(0, "alive: cookie 有效"), FakeCompleted(1, "dead: cookie 已失效")])
+    publisher = _keepalive_publisher(tmp_path, lambda command, cwd: next(outcomes))
+
+    first = publisher.keepalive_platforms(["tencent"])
+    record = publisher.session_state()["tencent"]
+    assert first["tencent"]["ok"] is True
+    assert record["status"] == "alive"
+    assert record["checked_at"] and record["last_ok"]
+    assert (tmp_path / publisher_module.DEFAULT_SESSION_FILENAME).is_file()
+
+    second = publisher.keepalive_platforms(["tencent"])
+    record = publisher.session_state()["tencent"]
+    assert second["tencent"]["ok"] is False
+    assert record["status"] == "dead"
+    # 失效不清空「最后有效时间」：运维要看到的是它曾经活到什么时候。
+    assert record["last_ok"] == first["tencent"]["last_ok"]
+    assert [entry["ok"] for entry in record["history"]] == [True, False]
+
+
+def test_keepalive_timeout_is_reported_not_raised(tmp_path: Path) -> None:
+    def runner(command: list[str], cwd: Path) -> Any:
+        raise subprocess.TimeoutExpired(cmd=list(command), timeout=1)
+
+    publisher = _keepalive_publisher(tmp_path, runner)
+
+    results = publisher.keepalive_platforms(["tencent", "douyin"])
+
+    assert results["tencent"]["ok"] is False
+    assert "超时" in results["tencent"]["detail"]
+    assert "超时" in results["douyin"]["detail"]
+
+
+# ---------------------------------------------------------------------------
+# 自动重新登录（--auto-login）
+#
+# 视频号会话是「扫码后固定 ~24h 绝对过期」，第二天必然失效；但它登录页有
+# 「微信快捷登录」，本机微信在跑就能静默重登（免扫码）。这条链路是无人值守发布
+# 唯一的自愈手段，所以三件事要钉住：没有微信时不许白等、只对做得到的平台动手、
+# 超时是「没成」而不是异常。
+# ---------------------------------------------------------------------------
+
+def _auto_publisher(tmp_path: Path, runner: Any, **publish: Any) -> SauPublisher:
+    config = {
+        "output": {"dir": str(tmp_path)},
+        "publish": {"sau_dir": str(tmp_path), "accounts": {"tencent": "default", "douyin": "default"},
+                    **publish},
+    }
+    return SauPublisher(config, runner=runner, sau_bin="/fake/sau")
+
+
+def _connect_only(*open_ports: int):
+    """把 socket.connect 换成「只有这些端口有人听」。"""
+    def connect(address, timeout):  # noqa: ARG001
+        if address[1] not in open_ports:
+            raise ConnectionRefusedError(61, "Connection refused")
+        return FakeSocket()
+    return connect
+
+
+class FakeSocket:
+    def __init__(self) -> None:
+        self.closed = False
+
+    def close(self) -> None:
+        self.closed = True
+
+
+def test_wechat_probe_stops_at_the_first_listening_port() -> None:
+    tried: list[int] = []
+
+    def connect(address, timeout):  # noqa: ARG001
+        tried.append(address[1])
+        if address[1] == 14014:
+            return FakeSocket()
+        raise ConnectionRefusedError(61, "Connection refused")
+
+    assert publisher_module.wechat_desktop_reachable(connect=connect) is True
+    assert tried == [14013, 14014]      # 找到就停，不白探后面的端口
+
+
+def test_wechat_probe_is_false_when_nothing_listens() -> None:
+    # 微信没跑时端口是立刻 refused 的，整轮探测应该是毫秒级（这里顺便断言它探完了
+    # 清单里的每个端口才放弃）。
+    assert publisher_module.wechat_desktop_reachable(connect=_connect_only()) is False
+
+
+def test_auto_login_does_not_touch_platforms_that_need_a_human(tmp_path: Path) -> None:
+    """抖音/B站/快手/百家号的 login 都在等一次扫码 —— 没人扫的时候不该去试。"""
+    commands: list[list[str]] = []
+    publisher = _auto_publisher(tmp_path, fake_runner_factory(commands))
+
+    outcome = publisher.auto_login("douyin")
+
+    assert outcome["ok"] is False and outcome["attempted"] is False
+    assert "人工扫码" in outcome["detail"]
+    assert commands == []               # 一条命令都没发出去
+
+
+def test_auto_login_skips_tencent_when_wechat_is_not_running(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(publisher_module, "wechat_desktop_reachable", lambda *a, **k: False)
+    commands: list[list[str]] = []
+    publisher = _auto_publisher(tmp_path, fake_runner_factory(commands))
+
+    outcome = publisher.auto_login("tencent")
+
+    assert outcome["attempted"] is False and outcome["ok"] is False
+    assert "微信" in outcome["detail"]
+    assert commands == []               # 不把 180s 花在一次注定回落扫码的登录上
+
+
+def test_auto_login_runs_sau_login_with_its_own_budget(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(publisher_module, "wechat_desktop_reachable", lambda *a, **k: True)
+    commands: list[list[str]] = []
+    publisher = _auto_publisher(tmp_path, fake_runner_factory(commands),
+                                auto_login_timeout_seconds=42, timeout_seconds=900)
+
+    outcome = publisher.auto_login("tencent")
+
+    assert commands == [["/fake/sau", "tencent", "login", "--account", "default"]]
+    assert outcome["attempted"] is True and outcome["ok"] is True
+    # 预算用完必须还原：登录用的是自动登录预算（42s），不能把上传的 900s 带出去。
+    assert publisher.timeout == 900
+
+
+def test_auto_login_timeout_is_a_verdict_not_an_exception(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(publisher_module, "wechat_desktop_reachable", lambda *a, **k: True)
+
+    def timing_out(command, cwd):  # noqa: ARG001
+        raise subprocess.TimeoutExpired(cmd=list(command), timeout=180)
+
+    outcome = _auto_publisher(tmp_path, timing_out).auto_login("tencent")
+
+    assert outcome["attempted"] is True and outcome["ok"] is False
+    assert "超时" in outcome["detail"]
+    assert "扫码" in outcome["detail"]      # 超时的通常成因：回落到等扫码了
+
+
+def test_auto_login_reports_a_failed_flow_as_failed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(publisher_module, "wechat_desktop_reachable", lambda *a, **k: True)
+
+    def failing(command, cwd):  # noqa: ARG001
+        return FakeCompleted(returncode=1, stdout="", stderr="快捷登录失败")
+
+    outcome = _auto_publisher(tmp_path, failing).auto_login("tencent")
+
+    assert outcome["attempted"] is True and outcome["ok"] is False
+    assert "快捷登录失败" in outcome["detail"]
+
+
+def test_auto_login_platforms_covers_the_requested_ones(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(publisher_module, "wechat_desktop_reachable", lambda *a, **k: True)
+    commands: list[list[str]] = []
+    publisher = _auto_publisher(tmp_path, fake_runner_factory(commands))
+
+    outcomes = publisher.auto_login_platforms(["tencent", "douyin", "weibo"])
+
+    assert set(outcomes) == {"tencent", "douyin"}   # weibo 不是本项目平台
+    assert outcomes["tencent"]["ok"] is True
+    assert outcomes["douyin"]["attempted"] is False
+    assert len(commands) == 1
+
+
+def test_check_retries_a_timeout_before_calling_it_a_failure(tmp_path: Path) -> None:
+    """一次卡顿不该让健康平台变成「需要重新登录」。
+
+    2026-09-24 实测：快手 ``check`` 单独跑 8 秒返回 ``cookie 有效``，同样一条命令在
+    串行预检里却吃满 120 秒预算。重试一次就能问出真相，而成本只有几秒。
+    """
+    calls: list[list[str]] = []
+
+    def runner(command: list[str], cwd: Path) -> Any:
+        calls.append(list(command))
+        if len(calls) == 1:
+            raise subprocess.TimeoutExpired(cmd=list(command), timeout=1)
+        return FakeCompleted()
+
+    publisher = _keepalive_publisher(tmp_path, runner, check_timeout_seconds=1)
+
+    results = publisher.check_platforms(["kuaishou"])
+
+    assert len(calls) == 2                    # 超时确实重试了
+    assert results["kuaishou"]["ok"] is True
+    assert results["kuaishou"]["timed_out"] is False
+
+
+def test_check_marks_a_double_timeout_as_unknown_rather_than_dead(tmp_path: Path) -> None:
+    def runner(command: list[str], cwd: Path) -> Any:
+        raise subprocess.TimeoutExpired(cmd=list(command), timeout=1)
+
+    publisher = _keepalive_publisher(tmp_path, runner, check_timeout_seconds=1)
+
+    results = publisher.check_platforms(["kuaishou"])
+
+    assert results["kuaishou"]["ok"] is False
+    assert results["kuaishou"]["timed_out"] is True       # 调用方靠这个区分措辞
+    assert "不等于失效" in results["kuaishou"]["detail"]
+
+
+def test_keepalive_uses_its_own_budget_and_restores_the_upload_one(tmp_path: Path) -> None:
+    seen: dict[str, float] = {}
+
+    def runner(command: list[str], cwd: Path) -> Any:
+        seen["budget"] = publisher.timeout
+        return FakeCompleted()
+
+    publisher = _keepalive_publisher(tmp_path, runner, timeout_seconds=900, keepalive_timeout_seconds=240)
+    publisher.keepalive_platforms(["tencent", "douyin"])
+
+    # keepalive 与 check 各自有预算，都不许继承 15 分钟的上传预算。
+    assert seen["budget"] in (240.0, 120.0)
+    assert publisher.timeout == 900.0
+
+
+def test_keepalive_marks_unknown_platforms_without_calling_sau(tmp_path: Path) -> None:
+    commands: list[list[str]] = []
+    publisher = _keepalive_publisher(tmp_path, fake_runner_factory(commands))
+
+    results = publisher.keepalive_platforms(["myspace"])
+
+    assert commands == []
+    assert results["myspace"]["ok"] is False
+    assert results["myspace"]["detail"] == "unsupported platform"
+
+
+# ---------------------------------------------------------------------------
+# --publish-at：把发布时刻搬进新鲜会话（平台侧定时发表）
+# ---------------------------------------------------------------------------
+
+_NOW = datetime(2026, 9, 23, 9, 0)
+
+
+def test_publish_at_accepts_the_three_shapes_the_cron_writes() -> None:
+    assert publisher_module.parse_publish_at("2026-09-24 19:30", _NOW) == "2026-09-24 19:30"
+    assert publisher_module.parse_publish_at("+11h", _NOW) == "2026-09-23 20:00"
+    assert publisher_module.parse_publish_at("+150m", _NOW) == "2026-09-23 11:30"
+    # 裸时刻 = 下一个该时刻：今天还没到就用今天。
+    assert publisher_module.parse_publish_at("19:30", _NOW) == "2026-09-23 19:30"
+
+
+def test_bare_time_rolls_to_tomorrow_when_today_is_too_late() -> None:
+    # 09:00 之后再看 09:30 只剩 30 分钟，短于平台要求的 2 小时提前量 → 顺延到明天，
+    # 而不是让上传走到一半才发现排期不合法。
+    assert publisher_module.parse_publish_at("09:30", _NOW) == "2026-09-24 09:30"
+
+
+def test_publish_at_refuses_times_inside_the_platform_lead_time() -> None:
+    with pytest.raises(publisher_module.ScheduleError, match="2 小时"):
+        publisher_module.parse_publish_at("2026-09-23 10:30", _NOW)  # 只有 1.5h
+    with pytest.raises(publisher_module.ScheduleError, match="2 小时"):
+        publisher_module.parse_publish_at("+90m", _NOW)
+
+
+def test_publish_at_reports_unparseable_and_out_of_range_times() -> None:
+    for bad, expected in (("", "不能为空"), ("下周一下午", "看不懂"),
+                          ("25:00", "时间不合法"), ("2026/09/24 19:30", "看不懂")):
+        with pytest.raises(publisher_module.ScheduleError, match=expected):
+            publisher_module.parse_publish_at(bad, _NOW)
+
+
+def test_schedule_reaches_the_upload_command(tmp_path: Path) -> None:
+    """--publish-at 的最终落点：sau 命令行里的 --schedule。"""
+    commands: list[list[str]] = []
+    config = {"output": {"dir": str(tmp_path)}, "publish": {"platforms": ["tencent"]}}
+    metadata = publisher_module.PublishMetadata(title="标题", description="描述", tags=("A股",))
+    video = tmp_path / "x.mp4"
+    video.write_bytes(b"v")
+    publisher = SauPublisher(config, runner=fake_runner_factory(commands), sau_bin="/fake/sau")
+
+    publisher._publish_one("tencent", video, metadata, "2026-09-24 19:30")
+
+    assert commands[0][commands[0].index("--schedule") + 1] == "2026-09-24 19:30"

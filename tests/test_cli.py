@@ -11,6 +11,7 @@ from unittest.mock import patch
 import pytest
 
 from stocktalk import cli
+from stocktalk.modules.topic_picker import HotTopic
 from stocktalk.pipeline import PipelineError
 
 
@@ -256,6 +257,30 @@ def test_check_fails_when_a_required_tool_is_missing(capsys: pytest.CaptureFixtu
 
     assert excinfo.value.code == 1
     assert "必需工具缺失" in capsys.readouterr().out
+
+
+def test_check_separates_a_timed_out_probe_from_a_dead_cookie(capsys: pytest.CaptureFixture[str]) -> None:
+    """超时是「没问出来」，不是「失效」，提示必须不一样。
+
+    2026-09-24 实测：快手 ``check`` 单独跑 8 秒就返回 ``cookie 有效``，却在一次串行
+    预检里吃满 120 秒预算。当时 ``--check`` 照着「需要重新登录」把它列了出来 ——
+    而照着那句去 ``login`` 会覆盖掉本来有效的 cookie，把一个能发的平台弄成真的
+    需要重登。
+    """
+    fake = FakeCheckPublisher({"douyin": {"ok": True, "detail": "ok"},
+                               "kuaishou": {"ok": False, "timed_out": True, "detail": "探活超时"}})
+    with patch.multiple(cli, Pipeline=fake, load_config=lambda path=None: {"publish": {"platforms": ["douyin", "kuaishou"]}}), \
+         patch.object(cli, "SauPublisher", lambda config: fake), \
+         patch.object(cli, "check_environment", lambda config, publisher=None: _env()):
+        with pytest.raises(SystemExit) as excinfo:
+            cli.main(["--check"])
+
+    assert excinfo.value.code == 1
+    out = capsys.readouterr().out
+    assert "sau kuaishou login" not in out      # 不许催人去重新登录
+    assert "探活超时" in out
+    assert "别急着重新登录" in out
+    assert "sau kuaishou check --account default" in out  # 该做的是重试探活
 
 
 # ---------------------------------------------------------------------------
@@ -530,3 +555,402 @@ def test_no_interactive_is_applied_after_the_config_loads(tmp_path: Path) -> Non
         cli.main(["601689", "--no-interactive", "--no-render"])
 
     assert fake.calls == ["601689"]
+
+
+# ---------------------------------------------------------------------------
+# Session keep-alive
+# ---------------------------------------------------------------------------
+
+class _StubKeepalivePublisher:
+    """Records which platforms were heartbeaten and reports a fixed verdict."""
+
+    # 子类改这个就能设定哪些平台「失效」。
+    DEAD: tuple[str, ...] = ()
+
+    def __init__(self, config: dict[str, Any]) -> None:
+        self.config = config
+        self.dead = list(self.DEAD)
+        self.session_path = Path("output/.session_state.json")
+        self.workdir = Path("third_party/social-auto-upload")
+        self.seen: list[list[str]] = []
+
+    def keepalive_platforms(self, platforms: list[str]) -> dict[str, dict[str, Any]]:
+        self.seen.append(list(platforms))
+        out: dict[str, dict[str, Any]] = {}
+        for platform in platforms:
+            ok = platform not in self.dead
+            out[platform] = {
+                "ok": ok,
+                "detail": "alive" if ok else "dead: cookie 已失效（被跳转到登录页）",
+                "action": "keepalive" if platform == "tencent" else "check",
+                "checked_at": "2026-09-23T14:31:08+08:00",
+                "last_ok": "2026-09-23T14:31:08+08:00" if ok else "2026-09-23T09:07:54+08:00",
+            }
+        return out
+
+
+class _DeadTencentStub(_StubKeepalivePublisher):
+    DEAD = ("tencent",)
+
+
+def test_keepalive_covers_every_configured_platform_and_reports_dead_ones(capsys: Any) -> None:
+    config = {"publish": {"platforms": ["tencent", "douyin"], "accounts": {"tencent": "default"}}}
+    with patch.object(cli, "SauPublisher", _DeadTencentStub):
+        code = cli._keepalive(config)
+
+    assert code == 1
+    out = capsys.readouterr().out
+    assert "视频号(tencent)" in out and "keepalive" in out
+    assert "sau tencent login --account default" in out   # 失效时的补救要写在脸上
+    assert "output/.session_state.json" in out
+
+
+def test_keepalive_exits_zero_when_every_platform_is_alive(capsys: Any) -> None:
+    config = {"publish": {"platforms": ["tencent"]}}
+    with patch.object(cli, "SauPublisher", _StubKeepalivePublisher):
+        assert cli._keepalive(config) == 0
+
+    assert "✓ 视频号(tencent)" in capsys.readouterr().out
+
+
+def test_keepalive_without_platforms_fails_loudly(capsys: Any) -> None:
+    with patch.object(cli, "SauPublisher", _StubKeepalivePublisher):
+        assert cli._keepalive({"publish": {"platforms": []}}) == 1
+
+    assert "未配置任何平台" in capsys.readouterr().out
+
+
+# ---------------------------------------------------------------------------
+# Subject picking (--auto-pick)
+# ---------------------------------------------------------------------------
+
+RANKING = [HotTopic(rank=1, code="000910", name="大亚圣象", mentions=12, hot_score=25),
+           HotTopic(rank=2, code="605058", name="澳弘电子", mentions=4, hot_score=75)]
+
+
+class _StubPicker:
+    """Feeds a fixed ranking and remembers what was recorded."""
+
+    max_runs = 2
+    picks: list[Any] = []
+    recorded: list[tuple[str, bool]] = []
+
+    def __init__(self, config: dict[str, Any]) -> None:
+        self.rotation_path = Path("output/.topic_rotation.json")
+
+    def topics(self, date: str | None = None, top: int = 10) -> list[HotTopic]:
+        return list(RANKING)
+
+    def select(self, topics: list[HotTopic]) -> HotTopic | None:
+        return self.picks[0] if self.picks else topics[1]
+
+    def record(self, topic: HotTopic, ok: bool) -> dict[str, Any]:
+        type(self).recorded.append((topic.code, ok))
+        return {"published": ok, "runs": 1}
+
+
+def _pick_args(**overrides: Any) -> argparse.Namespace:
+    base = {"auto_pick": True, "topic_top": 10, "stock_codes": [], "watchlist": None, "name": None}
+    base.update(overrides)
+    return argparse.Namespace(**base)
+
+
+def test_auto_pick_fills_the_subject_for_the_run(capsys: Any) -> None:
+    args = _pick_args()
+    parser = argparse.ArgumentParser()
+    with patch.object(cli, "TopicPicker", _StubPicker):
+        topic = cli._auto_pick({"publish": {}}, args, parser)
+
+    assert topic is not None and topic.code == "605058"
+    assert args.stock_codes == ["605058"]      # 选题结果变成这次运行的唯一目标
+    assert args.name == "澳弘电子"              # 名称直接带进 pipeline，省一次查询
+    assert "热门榜" in capsys.readouterr().out
+
+
+def test_auto_pick_is_inert_without_the_flag() -> None:
+    args = _pick_args(auto_pick=False)
+    assert cli._auto_pick({}, args, argparse.ArgumentParser()) is None
+    assert args.stock_codes == []
+
+
+def test_auto_pick_refuses_to_share_with_an_explicit_code() -> None:
+    args = _pick_args(stock_codes=["601689"])
+    with pytest.raises(SystemExit):
+        cli._auto_pick({}, args, argparse.ArgumentParser())
+
+
+def test_auto_pick_exits_when_the_ranking_is_spent(capsys: Any) -> None:
+    args = _pick_args()
+    with patch.object(cli, "TopicPicker", type("_Empty", (_StubPicker,), {"picks": [None]})):
+        with pytest.raises(SystemExit) as excinfo:
+            cli._auto_pick({"publish": {}}, args, argparse.ArgumentParser())
+
+    assert excinfo.value.code == 1
+    assert "都已发过" in capsys.readouterr().err
+
+
+def test_record_pick_marks_success_and_failure(capsys: Any) -> None:
+    _StubPicker.recorded = []
+    with patch.object(cli, "TopicPicker", _StubPicker):
+        cli._record_pick({}, RANKING[0], ok=True)
+        cli._record_pick({}, RANKING[1], ok=False)
+
+    assert _StubPicker.recorded == [("000910", True), ("605058", False)]
+    out = capsys.readouterr().out
+    assert "已发布" in out and "第 1 次" in out
+
+
+# ---------------------------------------------------------------------------
+# --publish-at：把发布时刻挪进「会话还活着的那一刻」
+# ---------------------------------------------------------------------------
+
+class _ConfigCapturingPipeline:
+    """Records the config the CLI handed to the pipeline, then plays one run."""
+
+    seen: dict[str, Any] = {}
+
+    def __init__(self, config: dict[str, Any]) -> None:
+        type(self).seen = config
+
+    def run(self, code: str, stock_name: str | None = None, *, render: bool = True,
+            preview: bool = False, publish: bool = False) -> dict[str, Any]:
+        return _result(code)
+
+
+def test_publish_at_is_resolved_and_written_into_the_config() -> None:
+    _ConfigCapturingPipeline.seen = {}
+    with patch.multiple(cli, Pipeline=_ConfigCapturingPipeline, load_config=lambda path=None: {"publish": {}}):
+        cli.main(["601689", "--no-render", "--publish-at", "+5h"])
+
+    # 三条发布路径（主流程 / --publish-only / --republish）都从 config 读 schedule，
+    # 所以写回 config 才是唯一不会漏的接法。
+    assert cli.parse_publish_at(_ConfigCapturingPipeline.seen["publish"]["schedule"]) \
+        == _ConfigCapturingPipeline.seen["publish"]["schedule"]
+
+
+def test_publish_at_rejects_a_time_inside_the_two_hour_lead(capsys: Any) -> None:
+    with patch.multiple(cli, Pipeline=FakePipeline, load_config=lambda path=None: {"publish": {}}):
+        with pytest.raises(SystemExit) as excinfo:
+            cli.main(["601689", "--no-render", "--publish-at", "+30m"])
+
+    assert excinfo.value.code == 2
+    assert "2 小时" in capsys.readouterr().err
+
+
+def test_publish_at_ignores_config_when_absent() -> None:
+    _ConfigCapturingPipeline.seen = {}
+    with patch.multiple(cli, Pipeline=_ConfigCapturingPipeline,
+                        load_config=lambda path=None: {"publish": {"schedule": "2026-09-24 09:30"}}):
+        cli.main(["601689", "--no-render"])
+
+    # 没给 --publish-at 就保留配置里的值（显式配置优先于默认空）。
+    assert _ConfigCapturingPipeline.seen["publish"]["schedule"] == "2026-09-24 09:30"
+
+
+# ---------------------------------------------------------------------------
+# 降级发布（--continue-anyway）与守护进程
+# ---------------------------------------------------------------------------
+
+
+def test_publish_gate_continues_when_continue_anyway_is_given(capsys: pytest.CaptureFixture[str]) -> None:
+    """无人值守那一档：有平台掉线也照发其余平台，而不是整条放弃。
+
+    2026-09-24 早班的实际损失就是这么来的 —— 视频号掉线导致「一个平台都没发」，
+    而当时另外四个平台都是好的。
+    """
+    fake = FakePipeline()
+    fake_pub = FakeCheckPublisher({"douyin": {"ok": True, "detail": "ok"},
+                                   "tencent": {"ok": False, "detail": "cookie 已失效"}})
+    with _patch_pipeline(fake, _GATE_CONFIG), \
+         patch.object(cli, "SauPublisher", lambda config: fake_pub), \
+         patch.object(cli.sys, "stdin", None, create=True):
+        cli.main(["601689", "--publish", "--continue-anyway"])
+
+    out = capsys.readouterr().out
+    assert "--continue-anyway" in out
+    assert "1/2" in out  # 明确报出只发了几个平台，别让人以为 5 个都发了
+    assert "uv run sau tencent login --account default" in out
+    assert fake.calls == ["601689"]  # 渲染照跑，没有整条退出
+
+
+def test_publish_gate_does_not_block_or_prompt_on_a_timed_out_probe(capsys: pytest.CaptureFixture[str]) -> None:
+    """探活超时不该拦下整条命令 —— 那是用「不知道」冒充「不能发」。
+
+    这里**没有** ``--continue-anyway``：如果超时被当成失效，就会打印登录提示并
+    在非交互环境直接退出（或交互地追问一句）。两个后果都不对：发布本身照试才是
+    正确的默认，真发不出去会在发布阶段记进 sidecar，代价是一次上传而非一次渲染。
+    """
+    fake = FakePipeline()
+    fake_pub = FakeCheckPublisher({"douyin": {"ok": True, "detail": "ok"},
+                                   "tencent": {"ok": False, "timed_out": True, "detail": "探活超时"}})
+    with _patch_pipeline(fake, _GATE_CONFIG), \
+         patch.object(cli, "SauPublisher", lambda config: fake_pub), \
+         patch.object(cli.sys, "stdin", None, create=True):
+        cli.main(["601689", "--publish"])
+
+    out = capsys.readouterr().out
+    assert fake.calls == ["601689"]              # 没有 SystemExit，渲染照跑
+    assert "探活超时" in out and "照发" in out
+    assert "uv run sau tencent login" not in out  # 没催人重新登录
+
+
+# ---------------------------------------------------------------------------
+# 自动重新登录（--auto-login / --auto）
+#
+# 早班那次「视频号失效 → 整条不发」的下一步：让命令自己把登录补上。只有视频号
+# 做得到（微信快捷登录，免扫码）；关键是登录之后必须**复核**，以及退不回时
+# 仍然走原来那套（不静默把失效平台当健康平台发出去）。
+# ---------------------------------------------------------------------------
+
+class FakeAutoLoginPublisher:
+    """预检 + 自动重新登录的可编程替身：第一次探活读 ``gate``，登录后复核读 ``after``。"""
+
+    def __init__(self, gate: dict[str, dict[str, Any]], after: dict[str, dict[str, Any]] | None = None,
+                 *, login_ok: bool = True, attempted: bool = True, detail: str = "登录流程已跑完") -> None:
+        self.gate = gate
+        self.after = after if after is not None else {}
+        self.login_ok = login_ok
+        self.attempted = attempted
+        self.detail = detail
+        self.login_calls: list[list[str]] = []
+        self.probed: list[list[str]] = []
+
+    def check_platforms(self, platforms: list[str]) -> dict[str, dict[str, Any]]:
+        self.probed.append(list(platforms))
+        source = self.after if self.login_calls else self.gate
+        return {p: dict(source.get(p, {"ok": True, "detail": "ok"})) for p in platforms}
+
+    def auto_login_platforms(self, platforms: list[str]) -> dict[str, dict[str, Any]]:
+        self.login_calls.append(list(platforms))
+        return {p: {"platform": p, "ok": self.login_ok, "attempted": self.attempted,
+                    "detail": self.detail} for p in platforms}
+
+
+def test_auto_login_recovers_the_platform_and_publishing_continues(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    fake = FakePipeline()
+    fake_pub = FakeAutoLoginPublisher({"douyin": {"ok": True, "detail": "ok"},
+                                       "tencent": {"ok": False, "detail": "cookie 已失效（页面跳转到登录页）"}},
+                                      after={"tencent": {"ok": True, "detail": "valid"}})
+    with _patch_pipeline(fake, _GATE_CONFIG), \
+         patch.object(cli, "SauPublisher", lambda config: fake_pub), \
+         patch.object(cli.sys, "stdin", None, create=True):
+        cli.main(["601689", "--publish", "--auto"])
+
+    out = capsys.readouterr().out
+    assert fake_pub.login_calls == [["tencent"]]        # 只对做得到的平台动手
+    assert "自动重新登录" in out and "2/2" in out
+    assert fake.calls == ["601689"]                    # 渲染照跑，没有退出
+
+
+def test_auto_login_flag_is_opt_in(capsys: pytest.CaptureFixture[str]) -> None:
+    """没有 --auto-login 时行为不变：还是打印补救并退出（失败那次的老路径）。"""
+    fake_pub = FakeAutoLoginPublisher({"douyin": {"ok": True, "detail": "ok"},
+                                       "tencent": {"ok": False, "detail": "cookie 已失效"}})
+    fake = FakePipeline()
+    with _patch_pipeline(fake, _GATE_CONFIG), \
+         patch.object(cli, "SauPublisher", lambda config: fake_pub), \
+         patch.object(cli.sys, "stdin", None, create=True):
+        with pytest.raises(SystemExit) as excinfo:
+            cli.main(["601689", "--publish"])
+
+    assert excinfo.value.code == 1
+    assert fake_pub.login_calls == []
+    assert fake.calls == []
+
+
+def test_auto_login_still_blocks_when_the_recheck_fails(capsys: pytest.CaptureFixture[str]) -> None:
+    """登录动作成功 ≠ 会话可用：复核没过就必须照旧拦下，不能当它已经好了。"""
+    fake_pub = FakeAutoLoginPublisher({"douyin": {"ok": True, "detail": "ok"},
+                                       "tencent": {"ok": False, "detail": "cookie 已失效"}},
+                                      after={"tencent": {"ok": False, "detail": "仍是登录页"}})
+    fake = FakePipeline()
+    with _patch_pipeline(fake, _GATE_CONFIG), \
+         patch.object(cli, "SauPublisher", lambda config: fake_pub), \
+         patch.object(cli.sys, "stdin", None, create=True):
+        with pytest.raises(SystemExit) as excinfo:
+            cli.main(["601689", "--publish", "--auto"])
+
+    assert excinfo.value.code == 1
+    out = capsys.readouterr().out
+    assert "自动重新登录" in out and "仍未恢复" in out
+    assert "uv run sau tencent login --account default" in out
+    assert fake.calls == []
+
+
+def test_auto_login_explains_when_wechat_is_not_running(capsys: pytest.CaptureFixture[str]) -> None:
+    """微信没跑 → 没尝试，不是「试了失败」；措辞要如实，并照旧给出人工补救。"""
+    fake_pub = FakeAutoLoginPublisher({"douyin": {"ok": True, "detail": "ok"},
+                                       "tencent": {"ok": False, "detail": "cookie 已失效"}},
+                                      attempted=False, login_ok=False,
+                                      detail="本机微信客户端未运行（快捷登录按钮不会出现）")
+    fake = FakePipeline()
+    with _patch_pipeline(fake, _GATE_CONFIG), \
+         patch.object(cli, "SauPublisher", lambda config: fake_pub), \
+         patch.object(cli.sys, "stdin", None, create=True):
+        with pytest.raises(SystemExit) as excinfo:
+            cli.main(["601689", "--publish", "--auto"])
+
+    assert excinfo.value.code == 1
+    out = capsys.readouterr().out
+    assert "本机微信客户端未运行" in out
+    assert "uv run sau tencent login --account default" in out            # 该人工做的那步还在
+    assert fake_pub.probed == [_GATE_CONFIG["publish"]["platforms"]]      # 没复核（没登录过）
+
+
+def test_auto_login_reports_platforms_that_need_a_scan(capsys: pytest.CaptureFixture[str]) -> None:
+    """抖音失效时不该被"自动登录"碰，但要明确告诉人它需要扫码。"""
+    config = {"publish": {"platforms": ["douyin", "tencent"]}}
+    fake_pub = FakeAutoLoginPublisher({"douyin": {"ok": False, "detail": "cookie 已失效"},
+                                       "tencent": {"ok": False, "detail": "cookie 已失效"}},
+                                      after={"tencent": {"ok": True, "detail": "valid"}})
+    fake = FakePipeline()
+    with _patch_pipeline(fake, config), \
+         patch.object(cli, "SauPublisher", lambda config: fake_pub), \
+         patch.object(cli.sys, "stdin", None, create=True):
+        with pytest.raises(SystemExit) as excinfo:
+            cli.main(["601689", "--publish", "--auto"])
+
+    assert excinfo.value.code == 1        # 抖音仍失效 → 照旧拦下
+    out = capsys.readouterr().out
+    assert "需要人工扫码登录" in out and "抖音" in out
+    assert fake_pub.login_calls == [["tencent"]]
+    assert fake.calls == []
+
+
+def test_daemon_status_prints_the_schedule(capsys: pytest.CaptureFixture[str], tmp_path: Path) -> None:
+    config = {"output": {"dir": str(tmp_path)},
+              "daemon": {"windows": ["07:30-09:30", "18:30-21:00"]}}
+    with patch.multiple(cli, load_config=lambda path=None: dict(config)), \
+         patch.object(cli, "launchd_state", lambda: "launchd: 未加载"):
+        with pytest.raises(SystemExit) as excinfo:
+            cli.main(["--daemon-status"])
+
+    assert excinfo.value.code == 0
+    out = capsys.readouterr().out
+    assert "07:30-09:30" in out and "18:30-21:00" in out
+    assert "launchd: 未加载" in out
+
+
+def test_daemon_reports_a_broken_window_instead_of_crashing(
+        capsys: pytest.CaptureFixture[str], tmp_path: Path) -> None:
+    """窗口写错要在启动时讲人话，而不是等到了三点该发的时候才炸。"""
+    config = {"output": {"dir": str(tmp_path)}, "daemon": {"windows": ["23:00-01:00"]}}
+    with patch.multiple(cli, load_config=lambda path=None: dict(config)):
+        with pytest.raises(SystemExit) as excinfo:
+            cli.main(["--daemon-status"])
+
+    assert excinfo.value.code == 1
+    assert "跨了午夜" in capsys.readouterr().err
+
+
+def test_daemon_refuses_to_run_without_any_window(
+        capsys: pytest.CaptureFixture[str], tmp_path: Path) -> None:
+    config = {"output": {"dir": str(tmp_path)}, "daemon": {"windows": []}}
+    with patch.multiple(cli, load_config=lambda path=None: dict(config)):
+        with pytest.raises(SystemExit) as excinfo:
+            cli.main(["--daemon"])
+
+    assert excinfo.value.code == 1
+    assert "发布窗口" in capsys.readouterr().err

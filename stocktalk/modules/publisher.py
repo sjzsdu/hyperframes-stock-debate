@@ -13,9 +13,13 @@ one-time interactive login that persists a cookie file:
     sau douyin login --account main
 
 The publisher only ever invokes ``upload-video``, ``check``; logins are
-deliberately left to the operator.  Bilibili is the odd one out: it drives the
-external ``biliup`` binary (downloaded on first use) instead of a browser, so
-its CLI has no ``--headless`` flag and its ``--desc``/``--tid`` are required.
+deliberately left to the operator — with one exception, 视频号, whose login page
+offers 「微信快捷登录」: with the WeChat client running on this machine the
+authorisation is silent, so an unattended run can repair its own session
+(``--auto-login``, see :data:`AUTO_LOGIN_PLATFORMS`).  Bilibili is the odd one
+out: it drives the external ``biliup`` binary (downloaded on first use) instead
+of a browser, so its CLI has no ``--headless`` flag and its ``--desc``/``--tid``
+are required.
 """
 
 from __future__ import annotations
@@ -25,14 +29,118 @@ import queue
 import re
 import select
 import shutil
+import socket
 import subprocess
 import sys
 import threading
 import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
+
+
+def _now_iso() -> str:
+    """Local wall-clock timestamp for state files (the operator reads these)."""
+    return datetime.now().astimezone().isoformat(timespec="seconds")
+
+
+# The uploader logs one of these the moment a login succeeds.  It is the only
+# honest record of when the current session was issued: the cookie file's own
+# ``expires`` is years out and says nothing about the server-side session.
+#
+# 两个都要认（2026-09-24）：快捷登录（补丁 0008）成功时写的是「快捷登录成功」，
+# 不含「扫码成功」二字。只认扫码的话，一次免扫码重登之后会话年龄仍按**上次扫码**
+# 算，越报越旧；而会话年龄正是判断「24h 绝对过期」的唯一读数，报错了会把整个
+# 排期判断带偏。
+TENCENT_SESSION_LOG = "logs/tencent.log"
+TENCENT_LOGIN_MARKERS: tuple[str, ...] = ("扫码成功", "快捷登录成功")
+
+
+def last_tencent_login(root: Path) -> datetime | None:
+    """Timestamp of the most recent successful Channels login, if logged.
+
+    Returns naive local time (that is how the uploader writes its file) or None
+    when the log is missing/unreadable — the caller treats that as "unknown",
+    never as an error.  Both a QR scan and the silent WeChat quick login count:
+    either one issues a new server-side session, which is what the age measures.
+    """
+    try:
+        text = (root / TENCENT_SESSION_LOG).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    found: datetime | None = None
+    for line in text.splitlines():
+        if not any(marker in line for marker in TENCENT_LOGIN_MARKERS):
+            continue
+        try:
+            found = datetime.strptime(line[:19], "%Y-%m-%d %H:%M:%S")
+        except ValueError:
+            continue  # Traceback lines / wrapped messages: not a log header.
+    return found
+
+
+def session_age_hours(started_at: datetime | None, now: datetime | None = None) -> float | None:
+    """Hours elapsed since ``started_at``; None when there is nothing to age."""
+    if started_at is None:
+        return None
+    now = now or datetime.now()
+    return round((now - started_at).total_seconds() / 3600.0, 1)
+
+
+# sau's own format for --schedule, and the platform rule it enforces: a scheduled
+# publish must be at least 2 hours out (uploader/base_video.py).  Mirrored here so
+# a bad time fails at argument parsing instead of after a 15-minute render.
+SCHEDULE_FORMAT = "%Y-%m-%d %H:%M"
+SCHEDULE_MIN_LEAD = timedelta(hours=2)
+
+
+class ScheduleError(ValueError):
+    """Raised when a requested publish time cannot be used."""
+
+
+def parse_publish_at(raw: str, now: datetime | None = None) -> str:
+    """Turn ``--publish-at`` into sau's ``%Y-%m-%d %H:%M`` string.
+
+    三种写法，都是为了定时任务里能写死的常量：
+
+    * ``19:30``   —— 下一个 19:30（已过则顺延到明天），发布节奏最自然的写法
+    * ``+11h``    —— 相对当前时刻（``+90m`` / ``+1.5h`` 同理）
+    * ``2026-09-24 19:30`` —— 绝对时间
+
+    校验与平台一致（至少提前 2 小时），不合格直接抛：让参数解析阶段报错，
+    而不是渲染完 15 分钟才发现排期不接受。
+    """
+    text = str(raw or "").strip()
+    now = now or datetime.now()
+    if not text:
+        raise ScheduleError("发布时间不能为空")
+
+    match = re.fullmatch(r"\+(\d+(?:\.\d+)?)([hm])", text)
+    if match:
+        amount = float(match.group(1))
+        target = now + (timedelta(hours=amount) if match.group(2) == "h" else timedelta(minutes=amount))
+    elif re.fullmatch(r"\d{1,2}:\d{2}", text):
+        hour, minute = (int(part) for part in text.split(":"))
+        if not (0 <= hour <= 23 and 0 <= minute <= 59):
+            raise ScheduleError(f"时间不合法：{text!r}（小时 0-23，分钟 0-59）")
+        target = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+        if target < now + SCHEDULE_MIN_LEAD:
+            target += timedelta(days=1)  # 今天的这一班已经来不及了 → 明天同一时刻
+    else:
+        try:
+            target = datetime.strptime(text, SCHEDULE_FORMAT)
+        except ValueError as exc:
+            raise ScheduleError(
+                f"看不懂的发布时间：{text!r}（用 19:30、+11h 或 '2026-09-24 19:30'）"
+            ) from exc
+
+    if target < now + SCHEDULE_MIN_LEAD:
+        raise ScheduleError(
+            f"定时发布必须晚于当前时间 2 小时：{target.strftime(SCHEDULE_FORMAT)} 距今不足 2h"
+        )
+    return target.strftime(SCHEDULE_FORMAT)
 
 
 class PublishError(RuntimeError):
@@ -51,6 +159,58 @@ BILIBILI_FINANCE_TID = 207
 # and gitignored, and a cooldown is a property of "this machine right now",
 # not of the code.
 DEFAULT_STATE_FILENAME = ".publish_state.json"
+
+# Where each platform's session health is remembered.  Same reasoning as the
+# cooldown file: it describes this machine right now, not the code.  视频号 is
+# the reason this file exists at all — its cookie file never expires locally
+# (`sessionid` says 2027) while the *server-side* session dies on its own
+# schedule (2026-09-16~23 log evidence: confirmed-good up to 8.0h after a scan,
+# dead by the next day's check), so a scheduled run needs a timestamped record
+# of when each platform was last known good.
+DEFAULT_SESSION_FILENAME = ".session_state.json"
+
+# Platforms whose uploader implements a real keep-alive action.  Everything else
+# falls back to `check`, which is honest but does not refresh anything.
+KEEPALIVE_ACTIONS = {"tencent": "keepalive"}
+
+# Platforms whose `login` can complete with nobody standing at the machine.
+# 视频号 is the only one: its login page renders a 「微信快捷登录」button as soon as
+# it can see the WeChat client running on this machine (vendor patch 0008), and
+# clicking it authorises silently —实测 33s，微信端无需确认.  Every other platform's
+# ``login`` sits and waits for somebody to scan a QR code with a phone, so
+# attempting one unattended only burns the budget on a code nobody scans.
+AUTO_LOGIN_PLATFORMS: frozenset[str] = frozenset({"tencent"})
+
+# The ports WeChat's desktop client listens on; the login page enumerates exactly
+# these (``localhost.weixin.qq.com``) before it decides to show the quick-login
+# button.  Probing them first is what keeps us from spending three minutes on a
+# login that was never able to work — with WeChat closed, the flow falls back to
+# the QR code, and no QR code gets scanned by itself.
+WECHAT_CLIENT_PORTS: tuple[int, ...] = (14013, 14014, 14015, 13013, 13014, 13015)
+
+
+def wechat_desktop_reachable(ports: Sequence[int] = WECHAT_CLIENT_PORTS, timeout: float = 0.4,
+                             connect: Callable[..., Any] | None = None) -> bool:
+    """Is the WeChat desktop client running on this machine?
+
+    A refused connection is the common, cheap answer (nothing listening →
+    immediate ECONNREFUSED), so the whole probe costs milliseconds when WeChat
+    is closed.  Anything unexpected counts as "not reachable": the caller only
+    uses this to decide whether to *try* the silent login, and a wrong "no" just
+    means the operator logs in by hand, exactly as before.
+    """
+    connector = connect or socket.create_connection
+    for port in ports:
+        sock = None
+        try:
+            sock = connector(("localhost", port), timeout)
+        except OSError:
+            continue
+        finally:
+            if sock is not None:
+                sock.close()
+        return True
+    return False
 
 # Douyin can gate the final publish click behind an SMS challenge.  sau detects
 # the popup, clicks 「获取验证码」 and then polls ``verify_code.txt`` (or stdin)
@@ -494,6 +654,18 @@ class SauPublisher:
         self.headless = bool(publish.get("headless", True))
         self.timeout = float(publish.get("timeout_seconds", 900))
         self.check_timeout = float(publish.get("check_timeout_seconds", 120))
+        # A keep-alive is a browser run (cold launch + one backend visit, plus a
+        # re-check when the first verdict is "dead"), so it needs a longer
+        # budget than `check` — but it still must not inherit the 15-minute
+        # upload budget, or a hung heartbeat would block the next one.
+        self.keepalive_timeout = float(publish.get("keepalive_timeout_seconds", 240))
+        # A silent 视频号 login is a browser cold start plus a page visit plus the
+        # authorisation round-trip — measured ~33s end to end, so 180s is the
+        # generous ceiling.  It must stay well under the upload budget: when the
+        # quick-login button does not appear, the vendor flow falls back to
+        # waiting for a QR scan, and that wait has to be cut short here rather
+        # than inherited.
+        self.auto_login_timeout = float(publish.get("auto_login_timeout_seconds", 180))
         self.preflight = bool(publish.get("preflight", True))
         # Unattended runs get transient failures (network blips, one browser
         # timing out) for free; retrying only the failed platforms in the same
@@ -513,6 +685,9 @@ class SauPublisher:
         output_dir = Path((self.config.get("output", {}) or {}).get("dir", "output"))
         state_file = str(publish.get("state_file") or DEFAULT_STATE_FILENAME)
         self.state_path = Path(state_file) if Path(state_file).is_absolute() else output_dir / state_file
+        session_file = str(publish.get("session_state_file") or DEFAULT_SESSION_FILENAME)
+        self.session_path = (Path(session_file) if Path(session_file).is_absolute()
+                             else output_dir / session_file)
         # Ask for the SMS code in the terminal when there is one; cron/CI falls
         # back to dropping it into verify_code.txt by hand.
         self.interactive_verify_code = bool(publish.get("interactive_verify_code", True))
@@ -696,30 +871,197 @@ class SauPublisher:
     def check_platforms(self, platforms: Sequence[str]) -> dict[str, dict[str, Any]]:
         """Verify each platform's cookie via ``sau <platform> check``.
 
-        Returns ``{platform: {"ok": bool, "detail": str}}``; never raises.
+        Returns ``{platform: {"ok": bool, "timed_out": bool, "detail": str}}``;
+        never raises.
+
+        **超时是「没问出来」，不是「失效」** —— 两者指向的动作正好相反（前者重试，
+        后者重新登录），所以这里对超时重试一次，仍超时才如实标记 ``timed_out``，
+        让调用方把两类分开措辞。
+
+        2026-09-24 实测：快手 ``check`` 单独跑只要 8 秒（``cookie 有效``），却在一次
+        串行预检里吃满 120 秒预算。偶发卡顿足以把健康平台写成「需要重新登录」，而
+        照着那句提示去 ``login`` 会**覆盖掉本来有效的 cookie** —— 白扫一次码，还把
+        一个原本能发的平台弄成真的需要重登。
         """
         results: dict[str, dict[str, Any]] = {}
         for platform in platforms:
             if platform not in PLATFORM_SPECS:
-                results[platform] = {"ok": False, "detail": "unsupported platform"}
+                results[platform] = {"ok": False, "timed_out": False,
+                                     "detail": "unsupported platform"}
                 continue
-            command = [self._require_sau(), platform, "check", "--account", self.accounts.get(platform, "default")]
-            # The shared runner reads self.timeout at call time; checks must not
-            # inherit the 15-minute upload budget.
-            saved, self.timeout = self.timeout, self.check_timeout
+            results[platform] = self._check_one(platform)
+        return results
+
+    def _check_one(self, platform: str, *, attempts: int = 2) -> dict[str, Any]:
+        """单平台探活，超时重试 ``attempts`` 次。"""
+        command = [self._require_sau(), platform, "check",
+                   "--account", self.accounts.get(platform, "default")]
+        # The shared runner reads self.timeout at call time; checks must not
+        # inherit the 15-minute upload budget.
+        saved, self.timeout = self.timeout, self.check_timeout
+        try:
+            for attempt in range(1, attempts + 1):
+                try:
+                    completed = self._runner(command, self.workdir)
+                except subprocess.TimeoutExpired:
+                    if attempt < attempts:
+                        continue
+                    return {"ok": False, "timed_out": True,
+                            "detail": f"探活超时（{self.check_timeout:g}s × {attempts} 次都没返回）"
+                                      " —— 状态未知，不等于失效"}
+                except (OSError, subprocess.SubprocessError) as exc:
+                    return {"ok": False, "timed_out": False, "detail": str(exc)}
+                ok = completed.returncode == 0
+                detail = ((completed.stdout or "") + (completed.stderr or "")).strip()
+                return {"ok": ok, "timed_out": False,
+                        "detail": detail[-300:] or ("ok" if ok else "check failed")}
+            return {"ok": False, "timed_out": True, "detail": "探活超时 —— 状态未知"}
+        finally:
+            self.timeout = saved
+
+    def auto_login(self, platform: str) -> dict[str, Any]:
+        """Repair one dead session without a human.  Never raises.
+
+        Returns ``{platform, ok, attempted, detail}``: ``attempted`` is False when
+        this platform cannot be logged into unattended (everything except
+        视频号) or when the precondition for the silent path is missing (WeChat
+        not running), so the caller can tell "we chose not to" apart from "we
+        tried and it still failed" — two states that need different wording and
+        different next steps.
+
+        ``ok`` only says the login flow exited 0; the caller still has to
+        re-probe, because a completed flow is not the same claim as a usable
+        session.
+        """
+        account = self.accounts.get(platform, "default")
+        if platform not in AUTO_LOGIN_PLATFORMS:
+            return {"platform": platform, "ok": False, "attempted": False,
+                    "detail": "该平台登录需要人工扫码（自动登录不适用）"}
+        if platform == "tencent" and not wechat_desktop_reachable():
+            return {"platform": platform, "ok": False, "attempted": False,
+                    "detail": "本机微信客户端未运行（登录页探测不到微信，快捷登录按钮不会出现）"
+                              " —— 启动并登录微信后重跑，或手动扫码登录"}
+        command = [self._require_sau(), platform, "login", "--account", account]
+        saved, self.timeout = self.timeout, self.auto_login_timeout
+        try:
+            completed = self._runner(command, self.workdir)
+        except subprocess.TimeoutExpired:
+            return {"platform": platform, "ok": False, "attempted": True,
+                    "detail": f"自动登录超时（{self.auto_login_timeout:g}s）—— 快捷登录没等到跳转，"
+                              "很可能回落到了扫码；请手动完成一次登录"}
+        except (OSError, subprocess.SubprocessError) as exc:
+            return {"platform": platform, "ok": False, "attempted": True, "detail": str(exc)}
+        finally:
+            self.timeout = saved
+        ok = completed.returncode == 0
+        detail = ((completed.stdout or "") + (completed.stderr or "")).strip()
+        return {"platform": platform, "ok": ok, "attempted": True,
+                "detail": detail[-300:] or ("重新登录成功" if ok else "重新登录失败")}
+
+    def auto_login_platforms(self, platforms: Sequence[str]) -> dict[str, dict[str, Any]]:
+        """Run :meth:`auto_login` over ``platforms``, one verdict each."""
+        return {platform: self.auto_login(platform)
+                for platform in platforms if platform in PLATFORM_SPECS}
+
+    def keepalive_platforms(self, platforms: Sequence[str]) -> dict[str, dict[str, Any]]:
+        """Refresh each platform's session, then record the verdict with a timestamp.
+
+        ``check`` answers "is this cookie usable right now" and exits 1 when it
+        is not — right before a render, wrong as a heartbeat.  视频号 gets
+        ``sau tencent keepalive`` instead: a real visit to the Channels backend
+        that rewrites the cookie file while the session is still alive, which is
+        the only lever we have against a server-side session that expires on its
+        own schedule (see ``third_party/README.md`` 0007).  Platforms whose
+        uploader has no keep-alive action fall back to ``check``; running them at
+        all is what turns "unknown" into a timestamped answer.
+
+        For 视频号 the verdict also carries the **session age** — hours since the
+        last successful QR login, read from the uploader's own log.  That is the
+        measurement that decides the whole design question: if old sessions keep
+        reading ``alive``, activity extends them and the heartbeat alone is
+        enough; if they die at a fixed age regardless, then no amount of poking
+        keeps them and publishing has to be scheduled *inside* a fresh session
+        instead.  Without the age, a stream of ``alive`` verdicts cannot tell
+        those two worlds apart.
+
+        Never raises.  Returns ``{platform: {ok, detail, action, checked_at,
+        last_ok}}`` (plus ``session_started_at``/``session_age_hours`` where the
+        platform reports one) and appends the verdict to the session state file,
+        so the history survives across runs.
+        """
+        sessions = self.session_state()
+        results: dict[str, dict[str, Any]] = {}
+        for platform in platforms:
+            if platform not in PLATFORM_SPECS:
+                results[platform] = {"ok": False, "detail": "unsupported platform",
+                                     "action": None, "checked_at": _now_iso(), "last_ok": None}
+                continue
+            action = KEEPALIVE_ACTIONS.get(platform, "check")
+            account = self.accounts.get(platform, "default")
+            command = [self._require_sau(), platform, action, "--account", account]
+            budget = self.keepalive_timeout if action == "keepalive" else self.check_timeout
+            saved, self.timeout = self.timeout, budget
             try:
                 completed = self._runner(command, self.workdir)
             except subprocess.TimeoutExpired:
-                results[platform] = {"ok": False, "detail": f"check timed out after {self.check_timeout:g}s"}
+                # 超时是「没问出来」，不是「失效」：记成 unknown 而不是 dead，否则
+                # --keepalive 会催人去重新登录，而那样会覆盖掉可能还有效的 cookie。
+                ok, timed_out = False, True
+                detail = f"{action} 超时（{budget:g}s）—— 状态未知，不等于失效"
             except (OSError, subprocess.SubprocessError) as exc:
-                results[platform] = {"ok": False, "detail": str(exc)}
+                ok, timed_out = False, False
+                detail = str(exc)
             else:
+                timed_out = False
                 ok = completed.returncode == 0
                 detail = ((completed.stdout or "") + (completed.stderr or "")).strip()
-                results[platform] = {"ok": ok, "detail": detail[-300:] or ("ok" if ok else "check failed")}
+                detail = detail[-300:] or ("ok" if ok else f"{action} failed")
             finally:
                 self.timeout = saved
+
+            previous = sessions.get(platform)
+            previous = previous if isinstance(previous, dict) else {}
+            history = list(previous.get("history") or [])
+            checked_at = _now_iso()
+            history.append({"at": checked_at, "ok": bool(ok), "action": action})
+            entry: dict[str, Any] = {
+                "action": action,
+                # 三态：alive / dead（问出来了，明确失效）/ unknown（超时，没问出来）。
+                "status": "alive" if ok else ("unknown" if timed_out else "dead"),
+                "checked_at": checked_at,
+                "last_ok": checked_at if ok else previous.get("last_ok"),
+                "last_detail": detail,
+                # ~4 days at a 4-hour heartbeat: enough to see whether the
+                # session is actually being extended, small enough to read.
+                "history": history[-24:],
+            }
+            started_at = self._session_started_at(platform) if platform == "tencent" else None
+            if started_at is not None:
+                entry["session_started_at"] = started_at.isoformat(timespec="seconds")
+                entry["session_age_hours"] = session_age_hours(started_at)
+            sessions[platform] = entry
+            results[platform] = {
+                "ok": ok, "detail": detail, "action": action,
+                "timed_out": timed_out,
+                "checked_at": checked_at,
+                "last_ok": entry["last_ok"],
+                "session_started_at": entry.get("session_started_at"),
+                "session_age_hours": entry.get("session_age_hours"),
+            }
+        self._write_json(self.session_path, {"sessions": sessions})
         return results
+
+    def _session_started_at(self, platform: str) -> datetime | None:
+        """When the platform's current session was issued, as far as we can tell.
+
+        Every platform's staleness is currently knowable only from its own
+        uploader: 视频号 records each QR login in ``logs/tencent.log``.  Anything
+        we cannot date returns None rather than guessing — an invented age would
+        be worse than no age, because the batch decision reads it.
+        """
+        if platform == "tencent":
+            return last_tencent_login(self.sau_dir)
+        return None
 
     # ------------------------------------------------------------------
     # Failure triage, waiting, prompting
@@ -787,21 +1129,34 @@ class SauPublisher:
         return min(self.rate_limit_wait * (2 ** max(0, attempt - 1)), self.rate_limit_max_wait)
 
     # ------------------------------------------------------------------
-    # Rate-limit cooldown, remembered between runs
+    # Small JSON state files, remembered between runs
     # ------------------------------------------------------------------
-    def _read_state(self) -> dict[str, Any]:
+    @staticmethod
+    def _read_json(path: Path) -> dict[str, Any]:
         try:
-            data = json.loads(self.state_path.read_text(encoding="utf-8"))
+            data = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             return {}
         return data if isinstance(data, dict) else {}
 
-    def _write_state(self, state: Mapping[str, Any]) -> None:
+    @staticmethod
+    def _write_json(path: Path, data: Mapping[str, Any]) -> None:
         try:
-            self.state_path.parent.mkdir(parents=True, exist_ok=True)
-            self.state_path.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
-        except OSError:  # A cooldown we cannot record just costs one extra try.
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+        except OSError:  # State we cannot record just costs one extra try.
             pass
+
+    def _read_state(self) -> dict[str, Any]:
+        return self._read_json(self.state_path)
+
+    def _write_state(self, state: Mapping[str, Any]) -> None:
+        self._write_json(self.state_path, state)
+
+    def session_state(self) -> dict[str, Any]:
+        """Per-platform session records: last_ok / last_checked / history."""
+        sessions = self._read_json(self.session_path).get("sessions")
+        return sessions if isinstance(sessions, dict) else {}
 
     def cooldown_left(self, platform: str) -> float:
         """Seconds until this platform's window reopens; 0 means free to try."""

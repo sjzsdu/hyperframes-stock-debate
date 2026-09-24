@@ -111,6 +111,75 @@ def format_str_for_short_title(origin_title: str) -> str:
     return formatted_string
 
 
+async def _tencent_page_is_logged_in(page: Page) -> bool:
+    """cookie 有效判定：先等前端 JS 跳登录页，再看有没有扫码登录痕迹。
+
+    视频号 cookie 失效时页面先停在原地址, 随后由前端 JS 跳到登录页; 必须等待
+    跳转完成再判断, 否则会误报"cookie 有效"。keepalive 与 cookie_auth 共用这
+    一套判定, 避免两处阈值各自漂移。
+    """
+    try:
+        await page.wait_for_url("**/login.html**", timeout=8000)
+        tencent_logger.info(_msg("🥹", "cookie 已失效（页面跳转到登录页），得重新登录一下"))
+        return False
+    except Exception:
+        pass  # 8 秒内未跳转, 大概率已登录
+
+    # 双保险: 页面里出现微信扫码登录 iframe 也视为失效
+    for fr in page.frames:
+        if "open.weixin.qq.com/connect/qrconnect" in fr.url:
+            tencent_logger.info(_msg("🥹", "cookie 已失效（页面出现扫码登录框），得重新登录一下"))
+            return False
+
+    # 三保险: URL 里出现 login 说明已经被请出去了
+    if "login" in page.url:
+        tencent_logger.info(_msg("🥹", "cookie 已失效（当前地址就是登录页），得重新登录一下"))
+        return False
+    return True
+
+
+async def tencent_keepalive(account_file, retries: int = 1, headless: bool = True) -> dict:
+    """探活并按需续期：真实访问一次视频号后台, 有效则把 storage_state 回写。
+
+    为什么需要它: cookie 文件里 ``sessionid`` 的 expires 是 2027(本地不过期),
+    真正会死的是服务端的会话——按本站日志(2026-09-16~23), 它总在「最后一次
+    真实活动」之后 10~25 小时失效, 且没有固定规律。定时做一次真实活动, 一是
+    尽量把窗口往后推, 二是把失效发现提前到发布之前(发布时才撞上要赔掉一整次
+    渲染)。回写只在探活成功后进行, 顺带把服务端本次下发的 cookie 收进 jar。
+
+    单次失败未必是真死: 2026-09-18 23:46 报过一次失效, 次日 08:30 又是有效,
+    中间没有任何登录动作, 属抖动假阳性。所以默认再复核一次才判死。
+    """
+    account_file = _resolve_account_file(account_file)
+    if not os.path.exists(account_file):
+        return {"ok": False, "reason": "missing", "attempts": 0,
+                "detail": f"cookie 文件不存在: {account_file}"}
+
+    attempts = 0
+    detail = "探活未执行"
+    for attempt in range(max(0, retries) + 1):
+        attempts = attempt + 1
+        async with async_playwright() as playwright:
+            browser = await playwright.chromium.launch(**_build_launch_kwargs(headless=headless))
+            try:
+                context = await browser.new_context(storage_state=account_file)
+                context = await set_init_script(context)
+                page = await context.new_page()
+                await page.goto(TENCENT_HOME_URL, wait_until="domcontentloaded")
+                if await _tencent_page_is_logged_in(page):
+                    await context.storage_state(path=account_file)
+                    return {"ok": True, "reason": "alive", "attempts": attempts,
+                            "detail": f"cookie 有效，已回写 storage_state（{page.url}）"}
+                detail = "cookie 已失效（被跳转到登录页）"
+            except Exception as exc:
+                detail = f"探活出错，按失效处理: {exc}"
+            finally:
+                await browser.close()
+        if attempt < max(0, retries):
+            await asyncio.sleep(2)
+    return {"ok": False, "reason": "dead", "attempts": attempts, "detail": detail}
+
+
 async def cookie_auth(account_file):
     account_file = _resolve_account_file(account_file)
     async with async_playwright() as playwright:
@@ -342,6 +411,95 @@ async def _refresh_tencent_qrcode(page: Page) -> None:
     raise RuntimeError("未找到可点击的视频号二维码刷新区域")
 
 
+# 新版登录页（open.weixin.qq.com/connect/qrconnect iframe）里有个「微信快捷登录」按钮：
+# 页面自己会先探测本机微信（localhost.weixin.qq.com，端口 14013-14015/13013-13015），
+# 探测通过才把这个按钮显示出来。点它 = 让页面向微信客户端请求一次授权，本机微信已登录
+# 就不用扫码。**按钮不存在/不可见本身就说明前置条件不满足**（微信没跑、没登录、被锁屏），
+# 这时安静回落到扫码流程即可，不要报错。
+QUICK_LOGIN_SELECTORS: tuple[str, ...] = (
+    ".js_quick_login_btn",
+    'a:has-text("微信快捷登录")',
+    'button:has-text("微信快捷登录")',
+    'div:has-text("微信快捷登录")',
+)
+
+
+async def _find_tencent_quick_login_button(page: Page, wait_seconds: int = 10):
+    """在登录页的各个 frame 里找「微信快捷登录」按钮；找不到返回 None。
+
+    两个时序事实决定了这里**必须等一会儿**（第一版 goto 完立刻扫，结果永远扫不到）：
+    - qrconnect iframe（按钮的宿主）是 goto 之后才异步挂上的；
+    - 按钮要等页面 JS 探测完本机微信（枚举 localhost.weixin.qq.com 的端口）才渲染出来，
+      这一步本身就要几秒。
+
+    用 ``page.frames`` 遍历而不是 ``frame_locator``：后者在 frame 还没出现时会等默认
+    超时（30s）；而 ``locator.count()`` 对不存在的元素是立即返回 0 的，所以轮询安全。
+    整段最多花 ``wait_seconds``，找不到就安静回落到扫码。
+    """
+    checks = max(1, int(wait_seconds / 0.5))
+    for attempt in range(checks):
+        for frame in getattr(page, "frames", []):
+            for selector in QUICK_LOGIN_SELECTORS:
+                try:
+                    # 坑：qrconnect iframe 里有**两个**同名按钮，.first 撞上的那个是
+                    # 隐藏副本（visible=False），直接拿它判断会把活按钮漏掉 —— 必须
+                    # 逐个挑可见的那个。
+                    locator = frame.locator(selector)
+                    for i in range(await locator.count()):
+                        candidate = locator.nth(i)
+                        if await candidate.is_visible():
+                            return candidate
+                except Exception:
+                    continue
+        if attempt < checks - 1:
+            await asyncio.sleep(0.5)
+    return None
+
+
+async def _try_tencent_quick_login(page: Page, wait_seconds: int = 45) -> bool:
+    """点一下「微信快捷登录」并等跳转；成功返回 True，任何不确定都返回 False。
+
+    只负责「点 + 等」，不写 cookie —— 保存 storage_state 与 cookie_auth 校验仍旧只走
+    ``tencent_cookie_gen`` 里那一条路径，避免两套代码各自漂移。
+
+    失败时会 reload 回干净登录页：点击后页面可能已经切到快捷登录视图（二维码没了），
+    直接回落扫码会提取不到二维码。
+    """
+    button = await _find_tencent_quick_login_button(page)
+    if button is None:
+        return False
+
+    tencent_logger.info(_msg("⚡️", "发现「微信快捷登录」按钮，尝试免扫码登录"))
+    try:
+        await button.click(timeout=5000)
+    except Exception as exc:
+        tencent_logger.warning(_msg("⚠️", f"点击快捷登录失败({exc})，回落到扫码"))
+        await _reload_tencent_login_page(page)
+        return False
+
+    checks = max(1, int(wait_seconds / 2))
+    for _ in range(checks):
+        if await _is_tencent_login_completed(page):
+            tencent_logger.info(_msg("🥳", f"快捷登录成功，已进入登录后页面: {page.url}"))
+            return True
+        await asyncio.sleep(2)
+
+    tencent_logger.warning(
+        _msg("🤔", f"点过快捷登录但 {wait_seconds}s 内没等到跳转（可能微信端还差一次确认），回落到扫码")
+    )
+    await _reload_tencent_login_page(page)
+    return False
+
+
+async def _reload_tencent_login_page(page: Page) -> None:
+    """把登录页恢复成「刚打开」的样子，好让扫码流程照常提取二维码。"""
+    try:
+        await page.reload()
+        await asyncio.sleep(1)
+    except Exception as exc:
+        tencent_logger.warning(_msg("⚠️", f"重新加载登录页失败({exc})"))
+
+
 async def _wait_for_tencent_login(
     page: Page,
     account_file: str,
@@ -399,24 +557,33 @@ async def tencent_cookie_gen(
         try:
             page = await context.new_page()
             await page.goto(TENCENT_LOGIN_URL)
-            try:
-                qrcode_info = await _save_tencent_qrcode(page, account_file, qrcode_callback=qrcode_callback)
-                qrcode_path = Path(qrcode_info["image_path"])
-            except Exception as exc:
-                tencent_logger.warning(
-                    _msg("⚠️", f"提取二维码图片失败({exc})，请直接在弹出的浏览器窗口中扫码，登录流程不受影响")
-                )
+            if await _try_tencent_quick_login(page):
+                # 快捷登录（免扫码）成功：二维码那套跳过，storage_state 与校验
+                # 仍走下面同一条收尾路径。
                 qrcode_info = None
                 qrcode_path = None
-            tencent_logger.info(_msg("🧍", "请扫码，小人正在耐心等待登录完成"))
-            result = await _wait_for_tencent_login(
-                page,
-                account_file,
-                qrcode_info,
-                qrcode_callback=qrcode_callback,
-                poll_interval=poll_interval,
-                max_checks=max_checks,
-            )
+                result = _build_login_result(
+                    True, "success", "视频号快捷登录成功（免扫码）", account_file, None, page.url
+                )
+            else:
+                try:
+                    qrcode_info = await _save_tencent_qrcode(page, account_file, qrcode_callback=qrcode_callback)
+                    qrcode_path = Path(qrcode_info["image_path"])
+                except Exception as exc:
+                    tencent_logger.warning(
+                        _msg("⚠️", f"提取二维码图片失败({exc})，请直接在弹出的浏览器窗口中扫码，登录流程不受影响")
+                    )
+                    qrcode_info = None
+                    qrcode_path = None
+                tencent_logger.info(_msg("🧍", "请扫码，小人正在耐心等待登录完成"))
+                result = await _wait_for_tencent_login(
+                    page,
+                    account_file,
+                    qrcode_info,
+                    qrcode_callback=qrcode_callback,
+                    poll_interval=poll_interval,
+                    max_checks=max_checks,
+                )
             if result["success"]:
                 await asyncio.sleep(2)
                 await context.storage_state(path=account_file)
