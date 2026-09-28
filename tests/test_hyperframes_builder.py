@@ -176,6 +176,34 @@ class HyperFramesBuilderTests(unittest.TestCase):
             for row in rows:
                 self.assertLessEqual(len(row), builder.caption_max_chars + 1)
 
+    def test_captions_never_cut_a_number_in_half(self):
+        """数字是整体：「24.55%」不许切成「24.」+「55%」（2026-09-28 实锤）。
+
+        601066 早档成片里字幕读作「净利率47.」/「07%。」——ASCII 的小数点同时
+        在 CAPTION_BREAKS 里，断句和硬切都得绕开数字。两个版面的上限都验。
+        """
+        lines = [
+            "净利率百分之四十七点零七。一家做证券业务的机构，几乎每收进两块钱就能净赚一块钱。",
+            "总资产8604.51亿打底。交易和机构服务占营收55.9%，毛利率74.22%。",
+            "经营现金流608.31亿，钱是落袋的。财富管理占28.75%，毛利率46.54%。",
+        ]
+        for canvas in ("horizontal", "vertical"):
+            with tempfile.TemporaryDirectory() as temp:
+                builder = HyperFramesBuilder({"video": {"canvas": canvas, "output_dir": str(temp)}})
+                project = builder.build_project(
+                    {}, {"turns": [{"speaker": "bull", "line": line} for line in lines]}, {})
+                content = project.composition_path.read_text(encoding="utf-8")
+                rows = re.findall(r'data-slot="caption" data-layout-ignore>([^<]+)</p>', content)
+                self.assertTrue(rows)
+                for row in rows:
+                    self.assertLessEqual(len(row), builder.caption_max_chars + 1)
+                    # 半截数字的形状：以小数点收尾，或以小数点开头接数字
+                    self.assertIsNone(re.search(r"[0-9][.．]$", row), f"{canvas} 字幕尾巴是半截数字：{row}")
+                    self.assertIsNone(re.match(r"^[.．][0-9]", row), f"{canvas} 字幕以小数点开头：{row}")
+                for number in ("47.07%", "8604.51亿", "55.9%", "74.22%", "608.31亿", "28.75%", "46.54%"):
+                    self.assertTrue(any(number in row for row in rows),
+                                    f"{canvas} 字幕里 {number} 被拆到两条里：{rows}")
+
     def test_every_topic_card_has_data_or_real_fallback(self):
         """All 9 topic visuals must exist; none may be an empty placeholder SVG."""
         with tempfile.TemporaryDirectory() as temp:

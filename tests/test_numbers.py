@@ -4,7 +4,7 @@
 同一个短语被抽去当 visual 关键词、封面标签和平台 tags 后观众完全看不懂。
 """
 
-from stocktalk.modules.numbers import has_digit, repair_spoken_numbers, to_display
+from stocktalk.modules.numbers import has_digit, repair_spoken_numbers, to_display, unbreakable_spans
 
 
 def test_repair_only_fixes_abbreviated_readings():
@@ -50,3 +50,42 @@ def test_has_digit_filters_number_fragments_from_tags():
     assert not has_digit("eSIM")
     # 「零售」的零不是数字，不能误伤
     assert not has_digit("零售")
+
+
+def test_unbreakable_spans_covers_decimal_and_thousands():
+    """排版层：小数点、千分位逗号、单位后缀都必须留在同一个数字整体里。
+
+    2026-09-28 事故：字幕分块把 ASCII「.」当句读，屏幕上是「净利率47.」+
+    「07%」两个半截数字。
+    """
+    text = "净利率47.07%。总资产8,604.51亿打底。涨幅3.5倍。九月二十六号"
+    spans = [text[a:b] for a, b in unbreakable_spans(text)]
+    assert "47.07%" in spans
+    assert "8,604.51亿" in spans
+    assert "3.5倍" in spans
+
+    # 区间必须自洽：左闭右开、不越界、不重叠
+    previous = -1
+    for start, end in unbreakable_spans(text):
+        assert 0 <= start < end <= len(text)
+        assert start > previous
+        previous = start
+
+
+def test_unbreakable_spans_does_not_swallow_punctuation():
+    """保守性：整数之后的顿号/逗号是句读，不是千分位，不能一起圈进来。"""
+
+    def pieces(text: str) -> list[str]:
+        return [text[a:b] for a, b in unbreakable_spans(text)]
+
+    assert pieces("第1，2名") == ["1", "2"]
+    assert pieces("涨了，跌了") == []
+    # 纯中文短语不该被当成数字
+    assert pieces("零售和十分钱") == []
+
+
+def test_to_display_never_emits_a_split_decimal():
+    """两层拼接：汉字数字转阿拉伯之后，小数点两侧仍是同一个整体。"""
+    text = to_display("毛利率十八点二九，市净率二点零七")
+    assert text == "毛利率18.29，市净率2.07"
+    assert [text[a:b] for a, b in unbreakable_spans(text)] == ["18.29", "2.07"]

@@ -13,7 +13,7 @@ from typing import Any, Callable, Mapping, Sequence
 
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 
-from stocktalk.modules.numbers import to_display
+from stocktalk.modules.numbers import to_display, unbreakable_spans
 
 
 class HyperFramesBuildError(RuntimeError):
@@ -120,21 +120,46 @@ class StockIdentity:
         return f"hsl({self.hue} 72% 62% / .16)"
 
 
+def _number_safe_break_positions(text: str) -> set[int]:
+    """``text`` 里落在一个数字内部的字符下标——在这些位置断句会劈开数字。"""
+    positions: set[int] = set()
+    for start, end in unbreakable_spans(text):
+        positions.update(range(start, end - 1))
+    return positions
+
+
+def _number_safe_cut(atom: str, max_chars: int) -> int:
+    """在 ``max_chars`` 处断开，但绝不落在数字内部。
+
+    落在数字里就退到数字开头（这一条字幕短一点无所谓，劈开的数字没法读）；
+    数字本身比一行还长时只能按上限硬切——让整行字幕溢出安全条比劈开数字更糟。
+    """
+    for start, end in unbreakable_spans(atom):
+        if start < max_chars < end:
+            return start if start > 0 else max_chars
+    return max_chars
+
+
 def split_caption_lines(line: str, max_chars: int = CAPTION_MAX_CHARS) -> list[str]:
     """Split one spoken line into single-row caption chunks.
 
     Chunks break at punctuation where possible and hard-split an over-long
     clause, then greedily merge short neighbours — a caption that flashes past
     faster than it can be read is worse than a slightly denser one.
+
+    数字是例外：CAPTION_BREAKS 里的 ASCII 「.」「,」同时是小数点与千分位逗号，
+    所以断句点和硬切都必须绕开数字整体，否则屏幕上是「净利率47.」+「07%」
+    （2026-09-28 用户反馈，601066 早档成片）。
     """
     text = " ".join(str(line or "").split())
     if not text:
         return []
+    protected = _number_safe_break_positions(text)
     atoms: list[str] = []
     buffer = ""
-    for char in text:
+    for index, char in enumerate(text):
         buffer += char
-        if char in CAPTION_BREAKS:
+        if char in CAPTION_BREAKS and index not in protected:
             atoms.append(buffer)
             buffer = ""
     if buffer:
@@ -143,8 +168,9 @@ def split_caption_lines(line: str, max_chars: int = CAPTION_MAX_CHARS) -> list[s
     pieces: list[str] = []
     for atom in atoms:
         while len(atom) > max_chars:
-            pieces.append(atom[:max_chars])
-            atom = atom[max_chars:]
+            cut = _number_safe_cut(atom, max_chars)
+            pieces.append(atom[:cut])
+            atom = atom[cut:]
         if atom:
             pieces.append(atom)
 

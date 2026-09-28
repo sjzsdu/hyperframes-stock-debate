@@ -9,6 +9,8 @@ LLM 写台词时偶尔会产出「四亿五一」「两亿三二」这类缩略�
 * :func:`to_display` —— **显示层**：把数字语境里的汉字数字转成阿拉伯数字
   （字幕、visual 关键词、SRT、发布摘要共用）：「十八点二九」→「18.29」、
   「九月二十六号」→「9月26号」、「两千七百多万」→「2700多万」。
+* :func:`unbreakable_spans` —— **排版层**：标出不能断行的数字整体，供字幕分块
+  与 SVG 折行绕开（「24.55%」不许被切成「24.」+「55%」）。
 
 转换是保守的：纯数字成语（十有八九、三十六计、百年不遇）里的数字不贴单位词，
 一律不动；只有紧邻单位（亿/万/成/点/％/倍/月/日…）或以亿/万收尾的短语才转换。
@@ -183,3 +185,25 @@ def has_digit(text: str) -> bool:
     if _TAG_DIGIT_RE.search(text):
         return True
     return any(ch in _TAG_NUMERAL_CHARS for ch in text)
+
+
+# 排版层：一个「数字整体」= 整数（可带千分位）+ 可选小数 + 可选单位后缀。
+# 字幕分块把 ASCII 的「.」「,」当句读（CAPTION_BREAKS），而这两者恰恰是小数点
+# 和千分位逗号——按字符硬切就会得到「净利率47.」+「07%」（2026-09-28 实锤，
+# 601066 早档成片），观众看到的是两个半截数字。
+_NUMBER_UNIT_CHARS = "%％‰万亿千百十元块倍股手次单个月日号年岁家人条项位个"
+_ATOM_NUMBER = re.compile(
+    r"[0-9０-９]+"
+    r"(?:[,，][0-9０-９]{3})*"
+    r"(?:[.．][0-9０-９]+)?"
+    rf"[{_NUMBER_UNIT_CHARS}]*"
+)
+
+
+def unbreakable_spans(text: str) -> list[tuple[int, int]]:
+    """标出 ``text`` 里不可断行的数字区间 ``(start, end)``（左闭右开）。
+
+    只覆盖「数字 + 小数点/千分位 + 单位」这一类：排版方（字幕分块、SVG 折行）
+    在切分时绕开这些区间即可，其余标点照常断。
+    """
+    return [(match.start(), match.end()) for match in _ATOM_NUMBER.finditer(str(text or ""))]

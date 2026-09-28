@@ -1353,3 +1353,55 @@ def test_schedule_reaches_the_upload_command(tmp_path: Path) -> None:
     publisher._publish_one("tencent", video, metadata, "2026-09-24 19:30")
 
     assert commands[0][commands[0].index("--schedule") + 1] == "2026-09-24 19:30"
+
+
+# ---------------------------------------------------------------------------
+# 视频号自动登录：微信前置探测失败时先拉起再复测（2026-09-28 事故驱动）
+# ---------------------------------------------------------------------------
+
+def test_auto_login_wakes_wechat_then_probes_again(monkeypatch: pytest.MonkeyPatch,
+                                                   tmp_path: Path) -> None:
+    """探活不过 → 拉起微信 → 端口开始监听 → 照常走快捷登录。
+
+    2026-09-28 早档：探活一失败就放弃，视频号整档漏发。拉起是唯一能无人值守
+    修好的动作，所以放弃前必须先试一次。
+    """
+    probes = {"n": 0}
+
+    def fake_probe(*args: Any, **kwargs: Any) -> bool:
+        probes["n"] += 1
+        return probes["n"] > 1  # 拉起前 False，拉起后 True
+
+    monkeypatch.setattr(publisher_module, "wechat_desktop_reachable", fake_probe)
+    launched: list[int] = []
+    monkeypatch.setattr(SauPublisher, "_launch_wechat", staticmethod(lambda: launched.append(1)))
+    commands: list[list[str]] = []
+    publisher = SauPublisher(
+        {"publish": {"platforms": ["tencent"], "preflight": False,
+                     "sau_dir": str(tmp_path / "nonexistent"), "wechat_wake_seconds": 5}},
+        runner=fake_runner_factory(commands), sau_bin="sau")
+
+    verdict = publisher.auto_login("tencent")
+
+    assert launched == [1]
+    # detail 已被登录命令自己的输出覆盖（唤醒只是中间过程，成功时不留在终态里）
+    assert verdict["attempted"] is True and verdict["ok"] is True
+    assert commands and commands[0][:2] == ["sau", "tencent"]
+
+
+def test_auto_login_gives_up_when_wechat_never_listens(monkeypatch: pytest.MonkeyPatch,
+                                                       tmp_path: Path) -> None:
+    """拉起微信后端口仍不监听 = 微信没登录：如实上报，不去烧快捷登录的等待。"""
+    monkeypatch.setattr(publisher_module, "wechat_desktop_reachable", lambda *a, **k: False)
+    monkeypatch.setattr(SauPublisher, "_launch_wechat", staticmethod(lambda: None))
+    commands: list[list[str]] = []
+    publisher = SauPublisher(
+        {"publish": {"platforms": ["tencent"], "preflight": False,
+                     "sau_dir": str(tmp_path / "nonexistent"), "wechat_wake_seconds": 0}},
+        runner=fake_runner_factory(commands), sau_bin="sau")
+
+    verdict = publisher.auto_login("tencent")
+
+    assert verdict["attempted"] is False and verdict["ok"] is False
+    assert "仍未监听" in verdict["detail"]
+    assert commands == []

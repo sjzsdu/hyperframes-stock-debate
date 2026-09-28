@@ -676,6 +676,9 @@ class SauPublisher:
         # waiting for a QR scan, and that wait has to be cut short here rather
         # than inherited.
         self.auto_login_timeout = float(publish.get("auto_login_timeout_seconds", 180))
+        # 探活不过 ≠ 微信没启动：进程在跑但没登录时，本地快捷登录端口同样不监听
+        # （2026-09-28 早档实测）。所以放弃前先拉起微信限时复测一次。
+        self.wechat_wake = max(0.0, float(publish.get("wechat_wake_seconds", 30)))
         self.preflight = bool(publish.get("preflight", True))
         # Unattended runs get transient failures (network blips, one browser
         # timing out) for free; retrying only the failed platforms in the same
@@ -929,6 +932,33 @@ class SauPublisher:
         finally:
             self.timeout = saved
 
+    @staticmethod
+    def _launch_wechat() -> None:
+        """激活/启动微信客户端。失败抛 OSError/SubprocessError，由调用方兜住。"""
+        subprocess.run(["open", "-a", "WeChat"], check=True, timeout=15, capture_output=True)
+
+    def _wake_wechat(self) -> tuple[bool, str]:
+        """微信探活不过时拉起它，并限时复测本地快捷登录端口。
+
+        返回 ``(可达?, 过程说明)``。端口一监听就立刻返回——等待只为盖住
+        「冷启动 + 自动登录」的那几十秒，不替微信的登录流程本身兜底。
+        """
+        if sys.platform != "darwin":
+            return False, "非 macOS，无法自动拉起微信客户端"
+        try:
+            self._launch_wechat()
+        except (OSError, subprocess.SubprocessError) as exc:
+            return False, f"自动拉起微信失败（{exc.__class__.__name__}: {exc}）"
+        deadline = time.monotonic() + self.wechat_wake
+        waited = 0.0
+        while not wechat_desktop_reachable():
+            if time.monotonic() >= deadline:
+                return False, (f"已拉起微信并等 {waited:.0f}s，本地快捷登录端口仍未监听"
+                               " —— 多半是微信没登录，需人工登录一次微信")
+            time.sleep(1.0)
+            waited += 1.0
+        return True, f"微信已就绪（本地端口开始监听，等了 {waited:.0f}s）"
+
     def auto_login(self, platform: str) -> dict[str, Any]:
         """Repair one dead session without a human.  Never raises.
 
@@ -948,9 +978,11 @@ class SauPublisher:
             return {"platform": platform, "ok": False, "attempted": False,
                     "detail": "该平台登录需要人工扫码（自动登录不适用）"}
         if platform == "tencent" and not wechat_desktop_reachable():
-            return {"platform": platform, "ok": False, "attempted": False,
-                    "detail": "本机微信客户端未运行（登录页探测不到微信，快捷登录按钮不会出现）"
-                              " —— 启动并登录微信后重跑，或手动扫码登录"}
+            awake, detail = self._wake_wechat()
+            if not awake:
+                return {"platform": platform, "ok": False, "attempted": False,
+                        "detail": f"本机微信不可用（{detail}）—— 快捷登录按钮不会出现，"
+                                  "启动并登录微信后重跑，或手动扫码登录"}
         command = [self._require_sau(), platform, "login", "--account", account]
         saved, self.timeout = self.timeout, self.auto_login_timeout
         try:
