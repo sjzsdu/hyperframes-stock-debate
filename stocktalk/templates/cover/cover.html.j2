@@ -77,8 +77,10 @@
     font-size: min(10.6vw, 7.6vh); line-height: 1.04; letter-spacing: -.01em;
     text-shadow: 0 1.4vh 4.5vh rgba(0,0,0,.6);
   }
+  /* 2026-09-27：代码弱化成小注——视频号信息流里它对点击无贡献，
+     但目标受众是股民，留着便于搜索识别，只降字号、退到次要色。 */
   .hero .code {
-    font-size: min(3.2vw, 2.3vh); font-weight: 600; color: var(--accent);
+    font-size: min(2.2vw, 1.6vh); font-weight: 500; color: var(--muted);
     letter-spacing: .14em; font-variant-numeric: tabular-nums;
   }
   .quote { display: flex; align-items: baseline; gap: 1.8vw; margin-top: 1.6vh; flex-wrap: wrap; }
@@ -138,8 +140,10 @@
     display: block; font-size: min(1.7vw, 1.25vh); color: var(--accent);
     letter-spacing: .24em; margin-bottom: 1.2vh;
   }
+  /* 2026-09-27：hook 提级为封面第二视觉焦点（仅次股票名）——
+     评审实测信息流里原字号在手机上读不清，悬念短句必须够大。 */
   .hook .text {
-    font-size: min(4.6vw, 3.4vh); line-height: 1.42; font-weight: 600;
+    font-size: min(5.2vw, 4.0vh); line-height: 1.38; font-weight: 700;
     color: var(--text); text-shadow: 0 1vh 3vh rgba(0,0,0,.55);
   }
 
@@ -164,7 +168,7 @@
     .quote .price { font-size: min(4.4vw, 5.4vh); }
     .quote .change { font-size: min(2.9vw, 3.6vh); }
     .hook { align-self: end; padding-bottom: 1vh; }
-    .hook .text { font-size: min(2.2vw, 2.9vh); }
+    .hook .text { font-size: min(2.6vw, 3.4vh); }
     .chart .chart-body { padding-bottom: .6vh; }
   }
 </style>

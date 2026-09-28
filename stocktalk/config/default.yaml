@@ -156,23 +156,28 @@ topics:
 # accounts 里每个平台对应一个账号名；headless=true 时上传在后台浏览器执行。
 publish:
   # 已开通的发布渠道。未登录或 cookie 失效的平台会在发布前预检时被跳过并提示。
-  # 小红书 2026-09-18 停发：本机生成的封面只有背景图（Chrome 截图在该模板上不稳定），
-  # 用户决定移除；PLATFORM_SPECS 里的能力保留，想恢复加回列表 + `sau xiaohongshu login` 即可。
-  platforms: [douyin, bilibili, kuaishou, tencent, baijiahao]
+  # 小红书 2026-09-25 恢复：用户要求加回。PLATFORM_SPECS 能力一直在（title 20、
+  # tags 10、AI 声明走 --ai-content-label）。已知遗留：本机生成的 3:4 封面在该
+  # 平台曾只有背景图（Chrome 截图不稳定）——封面失败只会降级为不带封面发布，
+  # 不中断；真复发就先 `sau xiaohongshu upload-video` 裸传观察。
+  platforms: [douyin, bilibili, kuaishou, xiaohongshu, tencent, baijiahao]
   # 各平台账号名（对应 sau login --account 时的命名）。
   accounts:
     douyin: default
     bilibili: default
     kuaishou: default
+    xiaohongshu: default
     tencent: default
     baijiahao: default
   headless: true
-  # AI 生成声明。财经内容不标注 AI 会被限流甚至取消变现资格。快手（现唯一走
-  # --ai-content-label 通道的平台；小红书已停发）的选项文案由这里传给上传器，
-  # 文案若随站点改版变化，改这里即可，不用动代码；抖音（内容由AI生成）和
-  # 视频号（含AI生成内容）由上传器自行勾选，B站/百家号无此字段，声明写在简介里。
+  # AI 生成声明。财经内容不标注 AI 会被限流甚至取消变现资格。快手与小红书走
+  # --ai-content-label 通道，选项文案由这里传给上传器（文案若随站点改版变化，
+  # 改这里即可，不用动代码）；抖音（内容由AI生成）和视频号（含AI生成内容）由
+  # 上传器自行勾选，百家号由上传器勾「含AI生成内容」并回读验证（3 次重试，
+  # 失败阻断该平台发布而非裸发）；B站无此字段，声明写在简介里。
   ai_content_label:
     kuaishou: 内容由AI生成
+    xiaohongshu: AI生成
   # 发布前用 `sau <platform> check` 预检登录态（每个平台约 10-30 秒）。
   # 渲染一条正片要 8 分钟，先花一分钟拦下 cookie 失效比渲染完再失败划算。
   preflight: true
@@ -211,6 +216,9 @@ publish:
     douyin: horizontal
     bilibili: horizontal
     kuaishou: vertical
+    # 小红书是纯移动端 9:16 平台，走 vertical；与快手共用同一版竖片，
+    # 不新增渲染成本（渲染按画幅去重，见 pipeline 的 platform_videos）。
+    xiaohongshu: vertical
     tencent: horizontal
     baijiahao: horizontal
   # 每个平台上传的超时；浏览器上传 2-8 分钟视频通常 1-3 分钟完成。

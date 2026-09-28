@@ -21,9 +21,11 @@
   <div id="ambient-orb-b" class="ambient-orb orb-b clip" data-start="0" data-duration="{{ duration }}" data-track-index="2" data-layout-ignore></div>
 
   {# Slot 0 — speaker ambience.  A run of turns by the same speaker is one
-     layer, so the backdrop only changes when the speaker actually changes. #}
+     layer, so the backdrop only changes when the speaker actually changes.
+     The speaker chip rides on the same layer: it swaps exactly when the
+     speaker swaps, and a muted viewer can always tell who is talking. #}
   {% for item in slots.tint %}
-  <div class="stage-tint {{ item.character }} clip" data-start="{{ item.start }}" data-duration="{{ item.duration }}" data-track-index="5" data-slot="tint" data-layout-ignore></div>
+  <div class="stage-tint {{ item.character }} clip" data-start="{{ item.start }}" data-duration="{{ item.duration }}" data-track-index="5" data-slot="tint" data-layout-ignore><i class="speaker-chip {{ item.character }}">{{ item.name }}</i></div>
   {% endfor %}
 
   {# Permanent: stock name, code and the real quote #}
@@ -63,10 +65,9 @@
   <div class="visual-item visual-market clip" data-start="{{ item.start }}" data-duration="{{ item.duration }}" data-track-index="{{ 20 + loop.index }}" data-slot="visual" data-layout-ignore>
     <div class="market-chart"><div class="chart-camera">{{ chart|safe }}</div></div>
     <div class="market-finance"><div class="metric-list">{% for metric in financials %}<div class="metric"><span>{{ metric.label }}</span><strong class="{{ metric.tone or '' }}">{{ metric.value }}</strong></div>{% endfor %}</div></div>
-    <i class="sheen" aria-hidden="true"></i>
   </div>
   {% else %}
-  <div class="visual-item clip" data-start="{{ item.start }}" data-duration="{{ item.duration }}" data-track-index="{{ 20 + loop.index }}" data-slot="visual" {% if item.topic %}data-topic="{{ item.topic }}" {% endif %}data-layout-ignore>{{ item.svg|safe }}<i class="sheen" aria-hidden="true"></i></div>
+  <div class="visual-item clip" data-start="{{ item.start }}" data-duration="{{ item.duration }}" data-track-index="{{ 20 + loop.index }}" data-slot="visual" {% if item.topic %}data-topic="{{ item.topic }}" {% endif %}data-layout-ignore>{{ item.svg|safe }}</div>
   {% endif %}
   {% endfor %}
 
@@ -85,6 +86,12 @@
   <section id="intro-card" class="intro-card clip" data-start="0" data-duration="{{ stage_in + 1.5 }}" data-track-index="40" data-layout-ignore>
     <div class="intro-kicker">{{ identity.hook }}</div>
     <div class="intro-title">{{ name }} <em>{{ code }}</em></div>
+    {# 角色出场：新观众前 3 秒必须知道这是两个人在辩论，谁暖谁冷从第一帧就立住。 #}
+    <div class="intro-roles">
+      <span class="role bull"><i></i>{{ speakers.bull }}</span>
+      <em>×</em>
+      <span class="role bear"><i></i>{{ speakers.bear }}</span>
+    </div>
   </section>
 
   {# Natural closing: recap card with the real interval numbers #}

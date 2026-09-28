@@ -648,6 +648,31 @@ class ChartLibraryTests(unittest.TestCase):
         # 首条字幕（at === 0）直接可见
         self.assertIn("tl.set(el, { visibility: 'visible', opacity: 1, y: 0 }, 0);", js)
 
+    # ---- 语音同步高亮：sheen 扫光下线，改为「说到哪、亮哪」 ----------------
+
+    def test_sheen_sweep_is_gone_and_spotlight_is_wired(self) -> None:
+        """2026-09-25 用户反馈：图板每 7 秒扫一道高光看着一闪一闪。
+
+        sheen（JS 循环、模板元素、CSS 规则）必须全部下线；取而代之的是
+        按字幕片段的绝对时刻切换 data-hl 的 spotlight——必须仍然用 tl.set
+        写死在时间轴上（逐帧 seek 渲染要确定性，不能用 CSS transition）。
+        """
+        assets = HyperFramesBuilder({"video": {}})._asset_dir
+        js = (assets / "stock-debate.js").read_text(encoding="utf-8")
+        html = (assets / "index.html.j2").read_text(encoding="utf-8")
+        css = (assets / "stock-debate.css").read_text(encoding="utf-8")
+        # sheen 三处全清
+        self.assertNotIn("class=\"sheen\"", html)
+        self.assertNotIn(".sheen", css)
+        self.assertNotIn(".querySelector('.sheen')", js)
+        # spotlight 用 tl.set + attr 切 data-hl，且字幕片段是唯一驱动源
+        self.assertIn("attr: { 'data-hl': '1' }", js)
+        self.assertIn("attr: { 'data-hl': '0' }", js)
+        self.assertIn(".caption-line", js)
+        # CSS 里点亮样式 keyed on data-hl，且不带 transition（中途态=假缺陷）
+        self.assertIn('span[data-hl="1"]', css)
+        self.assertNotIn("transition:", css)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -13,6 +13,8 @@ from typing import Any, Callable, Mapping, Sequence
 
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 
+from stocktalk.modules.numbers import to_display
+
 
 class HyperFramesBuildError(RuntimeError):
     """Raised when a project cannot be built or rendered."""
@@ -378,7 +380,7 @@ class HyperFramesBuilder:
             # 内部代号对观众无意义，图板 SVG 自带中文标题）；这里仍返回
             # topic_title 供图板左上角的小标签使用，beat 只留在脚本结构里。
             turn = turns_by_line.get(line)
-            keywords = [str(x) for x in ((turn or {}).get("visual") or []) if str(x).strip()]
+            keywords = [to_display(str(x)) for x in ((turn or {}).get("visual") or []) if str(x).strip()]
             if not keywords:
                 keywords = self._keywords_for(line, character)
             topic_key, topic_title = self._visual_topic(line)
@@ -455,8 +457,12 @@ class HyperFramesBuilder:
         return segments
 
     def _caption_timing(self, line: Any, duration: float, origin: float) -> list[dict[str, Any]]:
-        """Lay single-row caption chunks out across one turn's spoken duration."""
-        text = " ".join(str(line or "").split())
+        """Lay single-row caption chunks out across one turn's spoken duration.
+
+        字幕是显示层：口播念「三亿一千九百万」，屏幕上出现「3.19亿」——
+        汉字数字统一转阿拉伯（stocktalk.modules.numbers.to_display）。
+        """
+        text = to_display(" ".join(str(line or "").split()))
         if not text:
             return []
         if self.subtitle_mode == "full":
@@ -512,6 +518,13 @@ class HyperFramesBuilder:
                          "key": key, **payload})
         return runs
 
+    def _character_name(self, role: str) -> str:
+        """配置里的角色名（股市新手/股市老登），缺省退回角色代号。"""
+        characters = self.characters if isinstance(self.characters, Mapping) else {}
+        value = characters.get(role, {})
+        value = value if isinstance(value, Mapping) else {}
+        return str(value.get("name") or role)
+
     def _slots(self, segments: Sequence[Mapping[str, Any]], duration: float = 0.0) -> dict[str, list[dict[str, Any]]]:
         """Split the dialogue into independently-updating stage slots."""
         slots: dict[str, list[dict[str, Any]]] = {name: [] for name in self.SLOT_NAMES}
@@ -527,7 +540,8 @@ class HyperFramesBuilder:
             (market_start, market_span, "__market__", {"kind": "market"})]
         first_character = str(first.get("character") or "bull")
         tint_entries: list[tuple[float, float, str, dict[str, Any]]] = [
-            (market_start, market_span, first_character, {"character": first_character})]
+            (market_start, market_span, first_character,
+             {"character": first_character, "name": self._character_name(first_character)})]
         keyword_entries: list[tuple[float, float, str, dict[str, Any]]] = []
         for index, segment in enumerate(segments):
             start = float(segment.get("visual_start") or 0.0)
@@ -539,7 +553,8 @@ class HyperFramesBuilder:
             character = str(segment.get("character") or "bull")
             topic = str(segment.get("topic") or "industry")
             if index:
-                tint_entries.append((start, duration, character, {"character": character}))
+                tint_entries.append((start, duration, character,
+                                     {"character": character, "name": self._character_name(character)}))
             keywords = [str(k) for k in (segment.get("keywords") or []) if str(k).strip()]
             keyword_entries.append((start, duration, "||".join(keywords),
                                     {"keywords": keywords, "character": character, "topic": topic}))
@@ -598,9 +613,14 @@ class HyperFramesBuilder:
 
     @staticmethod
     def _keyword(line: str, keywords: Sequence[str]) -> str:
-        """Return the first keyword that actually appears in the spoken line."""
+        """Return the first keyword that actually appears in the spoken line.
+
+        关键词是显示层（阿拉伯数字），台词是口播层（汉字读法），所以按
+        显示层转换后的台词做包含判断。
+        """
+        display = to_display(line)
         for keyword in keywords:
-            if keyword and keyword in line:
+            if keyword and keyword in display:
                 return keyword
         return keywords[0] if keywords else ""
 
@@ -790,6 +810,7 @@ class HyperFramesBuilder:
             safe_side_left=self.safe_side_left,
             safe_side_right=self.safe_side_right,
             stage_in=self.STAGE_IN,
+            speakers={role: self._character_name(role) for role in ("bull", "bear")},
             financials=self._financials(quote, financials, technical),
             chart=self._candles(history),
             f10_text=self._f10_text(f10, ("公司概况", "经营分析")),

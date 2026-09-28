@@ -72,20 +72,62 @@
     tl.fromTo(chips, { opacity: 0, y: 14 }, { opacity: 1, y: 0, stagger: .05, duration: .3, ease: 'power2.out' }, at + .06);
   });
 
-  // ---- Panel sheen: in-page motion that moves no content -------------------
-  // 每块图板进场后扫一道高光；长图板（合并窗）每 7 秒再扫一次，页面静止时也
-  // 有呼吸感。sheen 平时停在面板外（CSS translateX），第 0 帧永远干净。
-  document.querySelectorAll('.visual-item').forEach(el => {
-    const sheen = el.querySelector('.sheen');
-    if (!sheen) return;
-    const start = Math.max(0, Number(el.dataset.start || 0));
-    const span = Math.max(0, Number(el.dataset.duration || 0));
-    for (let at = start + 1.0; at + 1.7 <= start + span; at += 7) {
-      tl.fromTo(sheen, { xPercent: -140 }, { xPercent: 480, duration: 1.6, ease: 'power1.inOut' }, at);
-      tl.fromTo(sheen, { opacity: 0 }, { opacity: .85, duration: .35 }, at)
-        .to(sheen, { opacity: 0, duration: .4 }, at + 1.2);
+  // ---- Speech-synced spotlight (replaces the old periodic sheen sweep) -----
+  // 旧方案是图板每 7 秒扫一道高光——与语音无关，看着一闪一闪。现在改成
+  // 「说到哪、亮哪」：每条字幕片段在时间轴上有绝对时刻，把片段文本与当前
+  // 在屏元素（关键词 chip、市场指标行、图板 SVG 文字）做匹配，命中的元素在
+  // 该片段播出期间点亮（data-hl="1"）。全部用 tl.set 写死在绝对时刻上，
+  // 逐帧 seek 渲染是确定性的；第 0 帧全素态，分享卡=首帧的纪律不受影响。
+  const captionChunks = Array.from(document.querySelectorAll('.caption-line'))
+    .map(el => ({
+      start: Math.max(0, Number(el.dataset.start || 0)),
+      end: Math.max(0, Number(el.dataset.start || 0)) + Math.max(.3, Number(el.dataset.duration || .8)),
+      text: (el.textContent || '').trim(),
+    }))
+    .filter(c => c.text);
+
+  // 收集一个窗口（keywords 版本或图板版本）内可高亮的元素，并取出用于匹配
+  // 的标签文本：chip 用自身文本；指标行用 label 列（strong 里是数值，口语
+  // 不会逐字念出来）；SVG 文字用自身内容。复合标签（「华北 · 资产管理」）
+  // 按分隔符切段——台词念的是「资产管理」，整串匹配永远落空。
+  const splitLabel = (label) => label.split(/[\s·、，,/:：()（）]+/).filter(s => s.length >= 2);
+
+  const highlightables = (scope) => {
+    const targets = [];
+    scope.querySelectorAll('.slot-keywords span, .metric, text').forEach(el => {
+      const labelEl = el.matches('.metric') ? el.querySelector('span') : null;
+      const raw = (labelEl ? labelEl.textContent : el.textContent || '').trim();
+      if (raw.length < 2) return;
+      targets.push({ el, labels: el.matches('.metric') ? [raw] : splitLabel(raw) });
+    });
+    return targets;
+  };
+
+  const wireSpotlight = (scope) => {
+    const start = Math.max(0, Number(scope.dataset.start || 0));
+    const end = start + Math.max(0, Number(scope.dataset.duration || 0));
+    const targets = highlightables(scope);
+    if (!targets.length || !captionChunks.length) return;
+    // 事件列表：片段开始点亮命中元素，片段结束全部熄灭。同一时刻先熄后亮，
+    // 相邻字幕片段才不会把上一段的残光带过来。
+    const events = [];
+    for (const chunk of captionChunks) {
+      if (chunk.end <= start || chunk.start >= end) continue;
+      const hits = targets.filter(t => t.labels.some(label => chunk.text.includes(label))).map(t => t.el);
+      events.push({ t: Math.max(chunk.start, start), on: hits });
+      events.push({ t: chunk.end, on: [] });
     }
-  });
+    if (!events.length) return;
+    events.sort((a, b) => a.t - b.t);
+    let lit = [];
+    for (const ev of events) {
+      for (const el of lit) tl.set(el, { attr: { 'data-hl': '0' } }, ev.t);
+      for (const el of ev.on) tl.set(el, { attr: { 'data-hl': '1' } }, ev.t);
+      lit = ev.on;
+    }
+  };
+  document.querySelectorAll('[data-slot="keywords"], .visual-item').forEach(wireSpotlight);
+
 
   // ---- Captions: one row at a time, swapped on the spoken word -------------
   document.querySelectorAll('.caption-line').forEach(el => {

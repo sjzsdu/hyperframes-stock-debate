@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Mapping
 
 from stocktalk.modules.arcs import resolve_speakers
+from stocktalk.modules.numbers import to_display
 
 try:
     import websockets
@@ -499,9 +500,10 @@ class TTSAgent:
         srt_path = self.output_dir / "subtitles.srt"
         blocks = []
         for index, segment in enumerate(segments, start=1):
+            # SRT 是显示层：口播念汉字完整读法，字幕出阿拉伯数字。
             blocks.append(
                 f"{index}\n{self._format_srt_time(float(segment['start_time']))} --> "
-                f"{self._format_srt_time(float(segment['end_time']))}\n{segment['line']}"
+                f"{self._format_srt_time(float(segment['end_time']))}\n{to_display(str(segment['line']))}"
             )
         srt_path.write_text("\n\n".join(blocks) + ("\n" if blocks else ""), encoding="utf-8")
         return srt_path

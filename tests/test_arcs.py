@@ -58,9 +58,9 @@ def test_pruning_drops_the_beats_this_stock_cannot_support() -> None:
     """有就加，没有数据就不要——剪掉撑不起来的节拍，而不是让它硬凑。"""
     full = prune_beats(ARCS["annual"], FULL)
     thin = prune_beats(ARCS["annual"], THIN)
-    assert [beat.key for beat in full] == ["revenue", "margin", "cash", "occupied", "shadow"]
-    # 只有行情时，年报逐条只剩那个不依赖数据的隐患节拍
-    assert [beat.key for beat in thin] == ["shadow"]
+    assert [beat.key for beat in full] == ["revenue", "margin", "cash", "occupied", "shadow", "closing"]
+    # 只有行情时，年报逐条只剩那个不依赖数据的隐患节拍（closing 无数据依赖，保留）
+    assert [beat.key for beat in thin] == ["shadow", "closing"]
     assert "f10.主营构成.明细" in missing_needs(ARCS["annual"], THIN)
 
 
@@ -105,7 +105,7 @@ def test_forced_arc_is_honoured_and_still_pruned() -> None:
     # 强制指定但数据不够：照旧按数据剪枝，缺哪拍是可见的（arc.report().pruned）
     forced_thin = select_arc(THIN, configured="crack", code="1")
     assert forced_thin.forced
-    assert [beat.key for beat in forced_thin.beats] == ["challenge", "concede", "fork"]
+    assert [beat.key for beat in forced_thin.beats] == ["challenge", "concede", "fork", "closing"]
     assert "odd" in forced_thin.report()["pruned"]
 
 
@@ -150,3 +150,14 @@ def test_report_is_serialisable_for_the_review_page() -> None:
 
 if __name__ == "__main__":
     pytest.main([__file__])
+
+
+def test_every_arc_ends_with_a_dialogue_closing_beat() -> None:
+    """2026-09-26 评审：9 轮对话以 bull 单方独白收尾，观众会觉得"然后呢？"。
+
+    每条骨架的最后一拍必须是 closing 短回应——由对方接话收束，不许独白结束。
+    """
+    for arc in ARCS.values():
+        last = arc.beats[-1]
+        assert last.key == "closing", f"{arc.id} 以 {last.key} 收尾，没有对话收束"
+        assert last.short and last.max_chars, f"{arc.id} 的 closing 必须是短回应"

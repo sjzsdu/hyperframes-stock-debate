@@ -96,3 +96,30 @@ def test_frame_copy_flags_trade_actions_the_line_check_would_miss():
     issues = " ".join(reviewed["compliance_issues"])
     assert "片尾文案触碰画面红线: 目标价" in issues
     assert "片尾文案触碰画面红线: 止损" in issues
+
+
+def test_fund_flow_phrases_are_whitelisted_not_rewritten():
+    """「净卖出」是龙虎榜/北向的客观资金流向数据，不是投资建议。
+
+    2026-09-26 003040 实锤：兜底替换把「机构净卖出两千七百多万」改成了
+    「机构净相关操作两千七百多万」，语义残废，口播与 visual 还对不上。
+    白名单短语必须原样保留，且不再计入问题清单。
+    """
+    agent = ComplianceAgent({})
+    line = "九月二十三号跌停，机构净卖出两千七百多万，深股通也在撤。"
+
+    assert agent._review_line(line, "bear") == []
+    assert agent._fix_line(line) == line
+
+    # 真建议词照旧拦截：替换只豁免白名单短语，不豁免建议性表达
+    advice = "机构净卖出之后建议卖出，马上清仓。"
+    fixed = agent._fix_line(advice)
+    assert "净卖出" in fixed
+    assert "建议卖出" not in fixed
+    assert "清仓" not in fixed
+    assert any("禁用词: 卖出" in issue for issue in agent._review_line(advice, "bear"))
+
+    # 片尾图板同样豁免客观资金数据，但买卖动作红线照旧
+    label, text, issues, _ = "片尾·提问", *agent._review_plain("片尾·提问", "机构净卖出之后你会加仓吗？", frame=True)
+    assert "净卖出" in text
+    assert any("加仓" in issue for issue in issues)

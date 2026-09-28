@@ -119,6 +119,20 @@ h1 em { color: var(--accent); font-style: normal; font-size: 30px; font-weight: 
 .stage-tint.bull { background: radial-gradient(circle at 22% 16%, var(--bull-soft), transparent 46%), radial-gradient(circle at 80% 84%, rgba(105,183,255,.06), transparent 44%); }
 .stage-tint.bear { background: radial-gradient(circle at 22% 16%, var(--bear-soft), transparent 46%), radial-gradient(circle at 80% 84%, rgba(255,120,188,.05), transparent 44%); }
 
+/* ---- 说话人徽标（2026-09-26）----
+   抽帧反馈：静音刷到的观众不知道现在是谁在说。徽标挂在 tint 层上，跟随 tint
+   的可见性整体进出场，所以它换人换得和背景氛围完全同步；不用 transform，
+   兼容截图注入的 .clip *{transform:none}。 */
+.speaker-chip { position: absolute; top: calc(var(--safe-top) + 250px); right: calc(var(--safe-side-right) + 30px);
+  display: inline-flex; align-items: center; gap: 10px; padding: 8px 20px 8px 16px;
+  border-radius: 999px; font-size: 22px; font-weight: 700; letter-spacing: 2px; font-style: normal;
+  border: 1.5px solid; background: rgba(6, 15, 29, .95); box-shadow: 0 6px 22px rgba(0, 0, 0, .45); }
+.speaker-chip::before { content: ""; width: 12px; height: 12px; border-radius: 50%; }
+.speaker-chip.bull { color: var(--bull); border-color: color-mix(in srgb, var(--bull) 80%, transparent); }
+.speaker-chip.bull::before { background: var(--bull); box-shadow: 0 0 10px var(--bull); }
+.speaker-chip.bear { color: var(--bear); border-color: color-mix(in srgb, var(--bear) 80%, transparent); }
+.speaker-chip.bear::before { background: var(--bear); box-shadow: 0 0 10px var(--bear); }
+
 /* ---- Horizontal: identity is a right-aligned strip in the band between the
         headline and the keyword chips.  The 300px left rail was mostly static
         info sitting on prime chart real estate; 2026-09-23 it moves here and
@@ -145,14 +159,16 @@ h1 em { color: var(--accent); font-style: normal; font-size: 30px; font-weight: 
   left: var(--stage-left); right: var(--safe-side-right); padding: 24px 28px;
   border-radius: 28px; opacity: 0; visibility: hidden; overflow: hidden; }
 .visual-item svg { width: 100%; height: 100%; }
-/* Sheen: a soft highlight band that sweeps across the panel after each board
-   change (and every few seconds on long-lived boards) — in-page motion that
-   never touches the layout.  Parked off-panel at rest, so frame zero (the
-   poster frame) stays clean. */
-.sheen { position: absolute; top: 0; bottom: 0; left: 0; width: 34%;
-  background: linear-gradient(105deg, transparent 0%, rgba(148,190,235,.05) 38%,
-              rgba(198,224,250,.15) 50%, rgba(148,190,235,.05) 62%, transparent 100%);
-  transform: translateX(-140%); pointer-events: none; }
+/* ---- 语音同步高亮（2026-09-25）----
+   取代旧的周期性 sheen 扫光（每块图板每 7 秒闪一道，与语音无关）。
+   现在「说到哪、亮哪」：GSAP 时间轴按字幕片段的绝对时刻切换 data-hl，
+   命中的 chip / 指标行 / SVG 文字在该片段播出期间点亮，其余时间素态。
+   不用 CSS transition——逐帧 seek 渲染必须状态确定，中途态就是假缺陷。 */
+.slot-keywords span[data-hl="1"] { color: #0b1626; background: var(--gold);
+  border-color: var(--gold); box-shadow: 0 0 18px rgba(255, 209, 102, .35); }
+.metric[data-hl="1"] { background: rgba(255, 209, 102, .10); border-radius: 10px; }
+.metric[data-hl="1"] span { color: var(--gold); }
+svg text[data-hl="1"] { fill: var(--gold) !important; font-weight: 700; }
 .visual-market { display: flex; align-items: stretch; gap: 0; }
 .market-chart { flex: 1; height: 100%; padding: 20px 24px; }
 .chart-camera { width: 100%; height: 100%; }
@@ -171,8 +187,13 @@ h1 em { color: var(--accent); font-style: normal; font-size: 30px; font-weight: 
 .caption-line { position: absolute; left: 40px; right: 40px; top: 0; height: 122px; line-height: 122px;
   margin: 0; opacity: 0; visibility: hidden; text-align: center; white-space: nowrap;
   font-size: 34px; font-weight: 600; letter-spacing: .4px; }
-.caption-line.bull { color: #ffd7ec; }
-.caption-line.bear { color: #d3e9ff; }
+/* 字幕左侧立场色条 + 强化色差（2026-09-26）：bull 暖粉 / bear 冷蓝，说话人一眼可辨。 */
+.caption-line::before { content: ""; position: absolute; left: 22px; top: 30px; bottom: 30px;
+  width: 7px; border-radius: 4px; }
+.caption-line.bull { color: #ffb9dd; }
+.caption-line.bull::before { background: var(--bull); box-shadow: 0 0 14px color-mix(in srgb, var(--bull) 70%, transparent); }
+.caption-line.bear { color: #b8dcff; }
+.caption-line.bear::before { background: var(--bear); box-shadow: 0 0 14px color-mix(in srgb, var(--bear) 70%, transparent); }
 .progress-fill { position: absolute; left: 0; right: 0; bottom: 0; height: 4px; display: block;
   transform-origin: left center; transform: scaleX(0);
   background: linear-gradient(90deg, var(--bull), var(--accent), var(--bear)); }
@@ -199,6 +220,17 @@ h1 em { color: var(--accent); font-style: normal; font-size: 30px; font-weight: 
   max-width: 100%; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
 .intro-title { font-size: 84px; font-weight: 800; letter-spacing: 2px; text-shadow: 0 12px 44px rgba(0,0,0,.6); }
 .intro-title em { color: var(--accent); font-style: normal; font-size: 44px; font-weight: 700; margin-left: 18px; letter-spacing: 3px; }
+/* 角色出场行（2026-09-26）：首帧即亮明「谁 vs 谁」与各自的立场色。 */
+.intro-roles { display: flex; align-items: center; gap: 22px; }
+.intro-roles em { color: var(--muted); font-style: normal; font-size: 30px; }
+.intro-roles .role { display: inline-flex; align-items: center; gap: 12px;
+  padding: 12px 26px; border-radius: 999px; border: 1.5px solid;
+  font-size: 30px; font-weight: 700; letter-spacing: 2px; background: rgba(8, 20, 37, .8); }
+.intro-roles .role i { width: 14px; height: 14px; border-radius: 50%; }
+.intro-roles .role.bull { color: var(--bull); border-color: color-mix(in srgb, var(--bull) 55%, transparent); }
+.intro-roles .role.bull i { background: var(--bull); box-shadow: 0 0 12px var(--bull); }
+.intro-roles .role.bear { color: var(--bear); border-color: color-mix(in srgb, var(--bear) 55%, transparent); }
+.intro-roles .role.bear i { background: var(--bear); box-shadow: 0 0 12px var(--bear); }
 .outro-card { position: absolute; inset: 0; display: flex; flex-direction: column;
   align-items: center; justify-content: center; gap: 26px; z-index: 9000; pointer-events: none;
   background: radial-gradient(circle at 50% 42%, rgba(10, 24, 43, .93), rgba(5, 11, 22, .97)); }
@@ -308,3 +340,12 @@ h1 em { color: var(--accent); font-style: normal; font-size: 30px; font-weight: 
 #root.layout-vertical .outro-kicker { font-size: 34px; }
 #root.layout-vertical .outro-title { font-size: 66px; max-width: calc(100% - var(--safe-side-left) - var(--safe-side-right)); }
 #root.layout-vertical .outro-tip { font-size: 36px; }
+
+/* ---- 竖屏：说话人徽标 / 字幕色条 / 角色出场行的 1080 布局适配 ---- */
+/* 竖屏面板 top=safe+432：徽标挂在面板右上角内侧，不与 board 标题同排。 */
+#root.layout-vertical .speaker-chip { top: calc(var(--safe-top) + 448px); right: calc(var(--safe-side-right) + 34px); font-size: 24px; padding: 8px 20px 8px 14px; }
+#root.layout-vertical .caption-line::before { left: 18px; top: 36px; bottom: 36px; width: 8px; }
+#root.layout-vertical .intro-roles { gap: 18px; }
+#root.layout-vertical .intro-roles em { font-size: 34px; }
+#root.layout-vertical .intro-roles .role { font-size: 32px; padding: 12px 24px; }
+#root.layout-vertical .intro-roles .role i { width: 16px; height: 16px; }

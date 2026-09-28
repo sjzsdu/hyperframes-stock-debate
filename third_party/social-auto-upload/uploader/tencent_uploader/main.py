@@ -5,6 +5,9 @@ import asyncio
 import base64
 import inspect
 import os
+import shutil
+import subprocess
+import sys
 import time
 from datetime import datetime
 from pathlib import Path
@@ -29,6 +32,54 @@ TENCENT_PUBLISH_STRATEGY_SCHEDULED = "scheduled"
 
 def _msg(emoji: str, text: str) -> str:
     return f"{emoji} {text}"
+
+
+def _applescript_str(text: str) -> str:
+    """包成 AppleScript 字符串字面量：反斜杠和双引号必须转义。"""
+    escaped = str(text).replace("\\", "\\\\").replace('"', '\\"')
+    return f'"{escaped}"'
+
+
+def _surface_verification_qr(qr_path: Path) -> None:
+    """把实名验证二维码「送到人眼前」，而不是只写进日志路径。
+
+    之前二维码只截图存盘 + 写一行日志，无人值守时等于没人知道要扫码，
+    等 10 分钟必然超时。现在做两件事：
+
+    1. macOS 通知中心弹横幅（带声音，即使人不在屏幕前也能听到）；
+    2. 用系统默认看图工具把二维码直接弹窗打开 —— 扫完关掉窗口即可。
+
+    整个函数是旁路：任何一步失败只写日志，绝不影响发布主链路。
+    """
+    if sys.platform != "darwin":
+        return
+    title = "视频号需要实名验证"
+    text = f"发布已暂停，请用管理员微信扫码（10 分钟内）: {qr_path.name}"
+    if shutil.which("osascript"):
+        script = (
+            f"display notification {_applescript_str(text)} "
+            f"with title {_applescript_str(title)} "
+            f'subtitle "视频号" sound name "Glass"'
+        )
+        try:
+            done = subprocess.run(["osascript", "-e", script], capture_output=True,
+                                  text=True, timeout=10, check=False)
+            if done.returncode == 0:
+                tencent_logger.info(_msg("🔔", "已弹出系统通知：需要管理员扫码实名验证"))
+            else:
+                tencent_logger.warning(_msg("🔕", f"系统通知没弹出来: {done.stderr.strip() or done.returncode}"))
+        except (OSError, subprocess.SubprocessError) as exc:
+            tencent_logger.warning(_msg("🔕", f"系统通知没弹出来: {exc}"))
+    if shutil.which("open"):
+        try:
+            done = subprocess.run(["open", str(qr_path)], capture_output=True,
+                                  text=True, timeout=10, check=False)
+            if done.returncode == 0:
+                tencent_logger.info(_msg("🖼️", "验证二维码已用看图工具打开，请扫码"))
+            else:
+                tencent_logger.warning(_msg("🔕", f"二维码图片没能打开: {done.stderr.strip() or done.returncode}"))
+        except (OSError, subprocess.SubprocessError) as exc:
+            tencent_logger.warning(_msg("🔕", f"二维码图片没能打开: {exc}"))
 
 
 def _resolve_account_file(account_file: str | Path) -> str:
@@ -705,6 +756,9 @@ class TencentBaseUploader(BaseVideoUploader):
         output_path.parent.mkdir(parents=True, exist_ok=True)
         await dialog.screenshot(path=str(output_path))
         tencent_logger.warning(_msg("📱", f"需要管理员微信扫码完成实名验证: {output_path}"))
+        # 二维码只躺在日志路径里＝没人知道要扫码（9-26 楚天龙那单就是这么挂的）。
+        # 通知 + 弹图都是旁路，失败了也照常等扫码。
+        _surface_verification_qr(output_path)
 
         deadline = asyncio.get_running_loop().time() + timeout_seconds
         while await dialog.count() and await dialog.is_visible():

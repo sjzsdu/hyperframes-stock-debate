@@ -40,6 +40,8 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+from stocktalk.modules.numbers import has_digit, to_display
+
 
 def _now_iso() -> str:
     """Local wall-clock timestamp for state files (the operator reads these)."""
@@ -581,7 +583,7 @@ class PublishMetadataGenerator:
     def generate(self, script: Mapping[str, Any], stock_name: str, stock_code: str) -> PublishMetadata:
         title = self._title(script, stock_name, stock_code)
         description = self._description(script, stock_name)
-        tags = self._tags(script)
+        tags = self._tags(script, stock_name)
         disclaimer = " ".join(str(d) for d in script.get("disclaimers", ()) if str(d).strip())
         return PublishMetadata(title=title, description=description, tags=tags, disclaimer=disclaimer)
 
@@ -617,7 +619,7 @@ class PublishMetadataGenerator:
         for turn in script.get("turns", ()):
             if not isinstance(turn, Mapping):
                 continue
-            line = str(turn.get("line", "")).strip()
+            line = to_display(str(turn.get("line", "")).strip())
             if line and line not in lines:
                 lines.append(line)
             if len(lines) == 2:
@@ -625,14 +627,22 @@ class PublishMetadataGenerator:
         hook = "；".join(lines) if lines else f"一起聊聊{stock_name}的生意本质。"
         return f"{hook}\n观点仅代表个人学习交流，欢迎评论区聊聊你的看法。"
 
-    def _tags(self, script: Mapping[str, Any]) -> tuple[str, ...]:
+    def _tags(self, script: Mapping[str, Any], stock_name: str = "") -> tuple[str, ...]:
+        """平台标签：只要可检索的话题词，不要数字碎片。
+
+        visual 关键词是写给画面的（「毛利率18.29」「应收账款4.51亿」），直接搬上
+        平台没人会搜（2026-09-26 003040 实锤）；这里过滤带数字成分的词，股票名
+        置顶——观众和平台搜索的第一入口都是它。
+        """
         tags: list[str] = []
+        if stock_name and 2 <= len(stock_name) <= 8:
+            tags.append(stock_name)
         for turn in script.get("turns", ()):
             if not isinstance(turn, Mapping):
                 continue
             for keyword in turn.get("visual", ()) or ():
                 word = str(keyword).strip()
-                if 2 <= len(word) <= 8 and word not in tags:
+                if 2 <= len(word) <= 8 and word not in tags and not has_digit(word):
                     tags.append(word)
         for tag in (*tags, *self.extra_tags, *DEFAULT_TAGS):
             if tag and tag not in tags:

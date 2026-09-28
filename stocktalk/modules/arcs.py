@@ -71,6 +71,8 @@ MAINLINE = Arc(
         Beat("risk", "把风险与不确定性落到某个具体环节（存货、应收、外销依赖、产能爬坡等）", speaker="bear"),
         Beat("valuation", "只讲市场预期与估值处在什么位置的事实，不做买卖判断"),
         Beat("wrap", "对这门生意做一次小结式收束，不要戛然而止", speaker="bull"),
+        Beat("closing", "对方接一句短回应收束：一句认可、一句保留，或把最关键的分歧钉一次；禁止一方独白结束",
+             speaker="bear", short=True, max_chars=24),
     ),
 )
 
@@ -90,6 +92,9 @@ CRACK = Arc(
         Beat("concede", "极短回应：一句认可、或一句更硬的追问，允许只有几个字", speaker="bear",
              short=True, max_chars=20),
         Beat("fork", "把两个人在哪里仍然不一致讲清楚——不劝和、不给结论，把分歧留给观众"),
+        Beat("closing", "对方接一句短回应收束：若上一拍是 bull 长篇，由 bear 接（反之亦然）；"
+                        "一句认可、一句保留，或把分歧钉一次；禁止一方独白结束",
+             short=True, max_chars=24),
     ),
     min_beats=3,
 )
@@ -110,6 +115,9 @@ CUSTOMER = Arc(
         Beat("swap", "谁可能把客户抢走：同类产品、替代品、客户自建，用真实数据说", speaker="bear",
              needs=("f10.行业地位.同行家数|board.industry",)),
         Beat("wrap", "收束：这门生意对客户的不可替代性到底有多强"),
+        Beat("closing", "对方接一句短回应收束：若上一拍是 bull 长篇，由 bear 接（反之亦然）；"
+                        "一句认可、一句保留，或把分歧钉一次；禁止一方独白结束",
+             short=True, max_chars=24),
     ),
     min_beats=3,
 )
@@ -130,6 +138,9 @@ ANNUAL = Arc(
         Beat("occupied", "钱压在哪：存货与应收账款各相当于多少营收，货有没有变成钱",
              speaker="bear", needs=("financials.存货(亿元)|financials.应收账款(亿元)",)),
         Beat("shadow", "隐患：这条账里最容易被忽略的一处，明明数据摆着但容易看漏"),
+        Beat("closing", "对方接一句短回应收束：若上一拍是 bull 长篇，由 bear 接（反之亦然）；"
+                        "一句认可、一句保留，或把分歧钉一次；禁止一方独白结束",
+             short=True, max_chars=24),
     ),
     min_beats=3,
 )
@@ -151,6 +162,9 @@ PEERS = Arc(
                      "没上榜的维度就说没上榜，不猜",
              speaker="bull", needs=("f10.行业地位.市场表现|f10.行业地位.公司规模|f10.行业地位.估值水平|f10.行业地位.财务状况",)),
         Beat("wrap", "收束：它在同行里的位置是护城河还是天花板"),
+        Beat("closing", "对方接一句短回应收束：若上一拍是 bull 长篇，由 bear 接（反之亦然）；"
+                        "一句认可、一句保留，或把分歧钉一次；禁止一方独白结束",
+             short=True, max_chars=24),
     ),
     min_beats=3,
 )

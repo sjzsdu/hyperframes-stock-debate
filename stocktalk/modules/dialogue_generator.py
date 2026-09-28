@@ -11,6 +11,7 @@ from typing import Any, Callable, Mapping, Sequence
 
 from stocktalk.modules.arcs import (Arc, ArcChoice, Beat, beats_by_key,
                                     resolve_speakers, select_arc)
+from stocktalk.modules.numbers import repair_spoken_numbers, to_display
 
 
 class DialogueGenerationError(RuntimeError):
@@ -138,18 +139,26 @@ class DialogueGenerator:
             "6. 多用通俗类比和生活化举例把生意讲透（如把经销网络比作水管、把预收款比作客户先排队交钱）；"
             "关键数字要说清楚\u201c意味着什么\u201d，而不是只报数字。\n"
             "7. 每轮对话都要给出画面指引：从 line 中提取 2-4 个关键词或短语（公司名、业务词、财务指标名、"
-            "日期或区间、行业词、新闻事件词），按对话顺序填入 visual 数组；只允许出现 line 里说到的词。\n"
+            "日期或区间、行业词、新闻事件词），按对话顺序填入 visual 数组；只允许出现 line 里说到的词；"
+            "visual 会直接打在画面上，数字一律用阿拉伯数字（如「应收账款4.51亿」「毛利率18.29%」「9月26日中标」）；"
+            "相邻两轮的 visual 数组不得完全相同——每一轮讲了新信息就配新关键词，图板才会随对话推进。\n"
             "8. 台词要有情绪起伏和口语节奏：多使用反问、设问、惊讶、质疑、认同后转折；"
             "在最想强调的词和数字上自然用上\u201c！\u201d\u201c？\u201d\u201c……\u201d\u201c——\u201d等标点，"
             "但不要每句都感叹，该克制时克制，做到有张有弛。\n"
+            "9. 数字必须写完整读法，禁止缩略：写「四亿五千一百万」不要写「四亿五一」，"
+            "写「百分之八十二点七」不要写「八成二七」，写「十八点二九」不要写「十八二九」；"
+            "缩略数字配音会念错，观众也听不懂。\n"
             + "\n" + self._arc_section(choice) + "\n"
             "\n反套话（重要）：每一期的开场都必须是新的。禁止把这些当开场套式——"
-            "“咱们先看 XX 到底卖啥”“说白了”“这家公司靠什么赚钱”式的设问、“XX 这门生意”式的名词解释。"
+            "“咱们先看……”整个句式（不管宾语换成什么，2026-09-27 实锤：“咱们先看谁在给XX掏钱”只换了宾语、骨架照旧）、"
+            "“说白了”“这家公司靠什么赚钱”式的设问、“XX 这门生意”式的名词解释。"
             "这些意思可以在正文里讲，但第一句必须从具体事实、具体数字或一个反直觉的判断切入，"
             "不要出处介绍、不要背景铺垫。收尾同样禁止“总的来说/说到底”式的空转，要落到一个具体变量上。\n"
             "\n对话节奏（重要）：长度由内容决定，该长则长、该短则短。允许某一轮只有几个字"
             "（如“嗯”“有道理”“但是——”“等等，这个不对”），用来表示认可、打断或迟疑；"
-            "也允许一方连续追问、另一方长答后短驳。不要为了凑字数把每一轮都写满，也不要每轮等长。\n"
+            "也允许一方连续追问、另一方长答后短驳。不要为了凑字数把每一轮都写满，也不要每轮等长。"
+            "两人必须交替发言：同一说话人连续两轮只允许超长台词被拆成续轮的情况；"
+            "一个论点的自然延伸就并进同一轮里说完，不要单独再开一轮。\n"
             "\n风格要求：像两个懂行的人聊天，允许追问、打断（……或破折号）、短暂停顿、跑题后拉回、惊讶/认同/质疑，"
             "及被说服后修正观点。每一轮都必须提供新信息、新数字或新角度，严禁重复已经说过的观点；"
             "鼓励连续 2-3 轮围绕一个话题层层深挖（提出→举例/数字→追问短板→修正），再自然转到下一个话题。"
@@ -239,14 +248,22 @@ class DialogueGenerator:
             "至少一半的篇幅围绕公司业务和行业本身（生意模式、行业格局、竞争与需求），技术信号最多作为一句带过的佐证。"
             "开头几轮就把“这家公司靠什么赚钱”讲明白，让观众听完能多懂一门生意，而不是听了一段行情点评。"
             f"本期必须按这条骨架展开（节拍顺序与分工见系统提示，第 1 拍就是开场）：{'→'.join(beat_keys)}。"
+            "节拍只进不退，每拍大致对应一轮：closing 是唯一收束拍，只允许最后一轮、"
+            "由上一轮说话人的对方用一句短回应（不超过25字）完成；骨架各拍走完后不得再新增论证轮——"
+            "还想交锋就把内容写进倒数第二拍（wrap 一类的收束拍），绝不要在 closing 之后继续争论。"
             "每一拍的对话都要落到具体数字或具体环节上，讲清“这意味着什么”，不要停在结论式的形容。"
             "涉及管理层时只能用公司档案里给出的姓名与职务，不评价个人能力、不推测动机；公司动作只说新闻里写了的，并带上出处和时间。"
-            "收尾要自然，不要戛然而止。"
+            "收尾必须是对话收束，不要一方独白结束：最后一拍（closing）由上一拍说话人的对方用一句短回应接住"
+            "——一句认可、一句保留，或把最关键的分歧再钉一次（如“那就看下一份财报应收账款压不压得下来”）。"
             "另外必须产出三个用于和观众互动的字段（本期片尾会把它们打在画面上，必须经得起核对）："
             "hook —— 下一期要盯的一个可验证的具体变量（如“下一份财报的外销收入占比”“越南基地的实际产出”），"
             "要能被下一期直接核对，不要写“继续关注”“拭目以待”这类空话；"
+            "hook 同时是封面文案，鼓励带反差或悬念的措辞（如“九成收入竟靠它”），"
+            "但落点必须仍是具体事实，不超过 22 字，禁止买卖词与收益暗示；"
             "question —— 抛给观众的一个问题，必须是生意层面的二选一（如“你更信渠道还是产能”），"
-            "观众能用一句话回答；禁止询问买卖、点位、涨跌、能不能涨；"
+            "观众能用一句话回答；问题必须从本场对话实际交锋的分歧点提炼，与 sides 里的立场相互呼应，"
+            "禁止引入对话里没有出现过的概念或环节（对话没聊到代工就绝不能问代工）；"
+            "禁止询问买卖、点位、涨跌、能不能涨；"
             "sides —— 多空各一句立场，只讲生意层面的分歧（渠道、产能、价格能不能传导、谁会替代谁），"
             "一句话说完；禁止出现点位、目标价、买卖动作、收益暗示。"
             "输出结构必须匹配：\n"
@@ -277,6 +294,18 @@ class DialogueGenerator:
             if not line:
                 raise DialogueGenerationError(f"turn {index} line is empty")
             beat, cursor = self._resolve_beat(entry.get("beat"), beats, cursor, index, notes)
+            # 硬约束：closing 一来一回最多 2 轮。骨架走完后模型继续论证时，游标会把
+            # 后续轮全压到 closing 拍（2026-09-27 600295 实锤：第 7-11 轮连续 5 个
+            # closing）；closing 挂 short 标记，渲染层跳过图板更新，主画面就此空白。
+            # 长于该拍字数上限的 closing 轮降级回最近的信息拍，图板照常更新；
+            # 真正的短收尾仍归 closing——prompt 约束在前，这里兜底。
+            if beat is not None and beat.short and cursor == len(beats) - 1 \
+                    and len(line) > max(beat.max_chars or 0, self.config.short_line_chars):
+                demoted = next((b for b in reversed(beats[:cursor]) if not b.short), None)
+                if demoted is not None:
+                    notes.append(f"[第{index}轮] closing 拍出现长台词（{len(line)}字），"
+                                 f"降级为 {demoted.key}——closing 最多一来一回")
+                    beat = demoted
             # 节拍声明为短回应、或者模型自己就写了极短的一句，都按"短回应"处理：
             # 这类轮次不换画面图板（一句话的认可没必要把图板重画一遍）。
             short = bool(beat and beat.short) or len(line) <= self.config.short_line_chars
@@ -335,8 +364,10 @@ class DialogueGenerator:
     def _clean_line(self, value: Any) -> str:
         """清洗台词。只去空白，不做字数截断——截断会把句子砍成半截，
         配音照着半句念，听感就是"语音被掐掉"（2026-09-22 000066 实锤）。
-        超长交给 :meth:`_split_line` 拆成续轮，内容一个字都不丢。"""
-        return re.sub(r"\s+", "", str(value or ""))
+        超长交给 :meth:`_split_line` 拆成续轮，内容一个字都不丢。
+        数字走口播层修复：模型漏网的「四亿五一」式缩略读法修成「4.51亿」，
+        完整读法原样保留（TTS 对完整汉字数字的发音是可靠的）。"""
+        return repair_spoken_numbers(re.sub(r"\s+", "", str(value or "")))
 
     def _split_line(self, value: Any) -> list[str]:
         """把超长台词按标点拆成多轮（每轮 ≤ max_line_chars），保句子的完整。
@@ -375,11 +406,16 @@ class DialogueGenerator:
 
     @staticmethod
     def _clean_visuals(value: Any) -> list[str]:
-        """Keep up to 4 non-empty keyword phrases extracted from the turn line."""
+        """Keep up to 4 non-empty keyword phrases extracted from the turn line.
+
+        visual 会直接上屏，汉字数字统一转阿拉伯显示（「毛利率十八点二九」→
+        「毛利率18.29」），观众扫一眼就读懂，也不会再漏进封面标签。
+        """
         items = value if isinstance(value, list) else []
         visuals: list[str] = []
         for item in items:
             text = re.sub(r"\s+", " ", str(item)).strip()[:24]
+            text = to_display(text)
             if text and text not in visuals:
                 visuals.append(text)
             if len(visuals) == 4:

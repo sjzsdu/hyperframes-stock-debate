@@ -26,19 +26,20 @@ def test_every_platform_names_its_preferred_canvas() -> None:
 
     platform_canvas 同时决定「一次运行渲几版」：这里列了两种画幅，
     所以会渲出横竖两个 MP4，各平台取自己那一版。
-    小红书 2026-09-18 停发（封面生成不稳定），不在默认列表里。
+    小红书 2026-09-25 恢复（用户要求加回）：纯移动端 9:16 平台走 vertical，
+    与快手共用同一版竖片，不新增渲染成本。
     """
     canvases = _config()["publish"]["platform_canvas"]
-    assert set(canvases) == {"douyin", "bilibili", "kuaishou", "tencent", "baijiahao"}
+    assert set(canvases) == {"douyin", "bilibili", "kuaishou", "xiaohongshu", "tencent", "baijiahao"}
     assert set(canvases.values()) == {"horizontal", "vertical"}
     # 抖音/视频号的分成硬性要求原创横屏 ≥1 分钟；B站横屏生态；百家号横版才有
     # 播放分成且上传器强制横版封面。
     for platform in ("douyin", "bilibili", "tencent", "baijiahao"):
         assert canvases[platform] == "horizontal"
-    # 快手激励不强制横屏且流量收益集中在竖屏。
+    # 快手激励不强制横屏且流量收益集中在竖屏；小红书同为竖屏社区。
     assert canvases["kuaishou"] == "vertical"
-    # 小红书已从发布渠道移除。
-    assert "xiaohongshu" not in _config()["publish"]["platforms"]
+    assert canvases["xiaohongshu"] == "vertical"
+    assert "xiaohongshu" in _config()["publish"]["platforms"]
 
 
 def test_safe_areas_cover_platform_ui() -> None:
@@ -88,10 +89,11 @@ def test_long_script_budget_gets_headroom_for_tokens_and_timeouts() -> None:
     assert dialogue["timeout_seconds"] >= 240
 
 
-def test_ai_content_label_is_configured_for_the_cli_platform() -> None:
-    """快手是唯一走 --ai-content-label 通道的默认平台（小红书已停发）。"""
+def test_ai_content_label_is_configured_for_the_cli_platforms() -> None:
+    """快手与小红书走 --ai-content-label 通道，选项文案必须在配置里。"""
     label = _config()["publish"]["ai_content_label"]
     assert label["kuaishou"]
+    assert label["xiaohongshu"]
 
 
 def test_topic_rotation_defaults_survive_a_missed_run() -> None:

@@ -52,6 +52,18 @@ ADVICE_REPLACEMENTS: Tuple[Tuple[str, str], ...] = (
     ("绝对", "相对"),
 )
 
+# 资金流向白名单：龙虎榜/北向/主力资金这类**客观披露数据**里的"买/卖"不是投资建议，
+# 却会被禁用词兜底替换成"相关操作"，产出"机构净相关操作两千七百多万"这种语义残句
+# （2026-09-26 003040 实锤，口播与 visual 还会对不上）。替换前先把这些短语掩码保护，
+# 替换完原样还原——"建议卖出"这类建议性短语不在白名单里，照旧拦截。
+FUND_FLOW_TERMS: Tuple[str, ...] = (
+    "资金净流入", "资金净流出",
+    "净买入", "净卖出", "净流入", "净流出",
+    "机构买入", "机构卖出", "北向买入", "北向卖出",
+    "主力买入", "主力卖出", "大单买入", "大单卖出",
+    "龙虎榜卖出", "龙虎榜买入",
+)
+
 # These are reported even when a particular expression has no dedicated
 # replacement above.  Configured forbidden words extend (rather than replace)
 # this baseline.
@@ -115,6 +127,27 @@ class ComplianceAgent:
     def _unique_words(words: Iterable[str]) -> List[str]:
         """Return non-empty phrases once, preferring specific phrases first."""
         return sorted(set(words), key=lambda word: (-len(word), word))
+
+    @staticmethod
+    def _mask_fund_flow(text: str) -> Tuple[str, List[str]]:
+        """把资金流向短语换成占位符，返回 (掩码文本, 被保护的短语序列)。
+
+        占位符用控制字符夹索引（``\\x00<idx>\\x01``），不会与任何替换目标冲突。
+        长短语优先掩码，避免"净买入"先于"资金净买入"留下残段。
+        """
+        masked = text
+        kept: List[str] = []
+        for term in sorted(FUND_FLOW_TERMS, key=len, reverse=True):
+            while term in masked:
+                kept.append(term)
+                masked = masked.replace(term, f"\x00{len(kept) - 1}\x01", 1)
+        return masked, kept
+
+    @staticmethod
+    def _unmask_fund_flow(text: str, kept: List[str]) -> str:
+        for index, term in enumerate(kept):
+            text = text.replace(f"\x00{index}\x01", term)
+        return text
 
     def review(self, script: Dict[str, Any]) -> Dict[str, Any]:
         """Return a deep-copied, sanitised script with audit metadata.
@@ -201,8 +234,11 @@ class ComplianceAgent:
             return text, [], []
         issues = self._review_line(text, label)
         if frame:
+            # 片尾红线检查同样先掩码白名单短语：客观资金数据出现在片尾图板
+            # 上不算"买卖动作"红线。
+            masked, _kept = self._mask_fund_flow(text)
             issues.extend(f"[{label}] 片尾文案触碰画面红线: {term}"
-                          for term in FRAME_ADVICE_TERMS if term in text)
+                          for term in FRAME_ADVICE_TERMS if term in masked)
         fixed = self.sanitize_frame(text) if frame else self.sanitize(text)
         changes = [{"where": label, "before": text, "after": fixed}] if fixed != text else []
         return fixed, issues, changes
@@ -239,21 +275,24 @@ class ComplianceAgent:
         if not isinstance(line, str):
             return []
 
+        # 白名单短语先掩码：客观资金流向数据不算禁用词，也不该出现在问题清单里。
+        masked, _kept = self._mask_fund_flow(line)
         issues: List[str] = []
         for word in self.forbidden_words:
-            if word in line:
+            if word in masked:
                 issues.append(f"[{character}] 包含禁用词: {word}")
         for pattern in ABSOLUTE_PATTERNS:
-            if pattern in line:
+            if pattern in masked:
                 issues.append(f"[{character}] 包含绝对性表述: {pattern}")
         for pattern in PREDICTIVE_PATTERNS:
-            if pattern in line:
+            if pattern in masked:
                 issues.append(f"[{character}] 包含预测性表述: {pattern}")
         return issues
 
     def _fix_line(self, line: str) -> str:
         """Replace unsafe language while keeping the sentence readable."""
-        fixed = line
+        masked, kept = self._mask_fund_flow(line)
+        fixed = masked
         for phrase, replacement in ADVICE_REPLACEMENTS:
             fixed = fixed.replace(phrase, replacement)
 
@@ -262,6 +301,9 @@ class ComplianceAgent:
         for word in self.forbidden_words:
             if word in fixed:
                 fixed = fixed.replace(word, "相关操作")
+
+        # 还原被保护的资金流向短语，再做标点清理。
+        fixed = self._unmask_fund_flow(fixed, kept)
 
         # Collapse punctuation/whitespace artefacts created by phrase removal.
         fixed = re.sub(r"[，,]{2,}", "，", fixed)

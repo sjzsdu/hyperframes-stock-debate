@@ -585,46 +585,65 @@ class BaiJiaHaoVideo(BaseVideoUploader):
             await self._wait_cover_ready(page)
 
     async def _check_ai_declaration(self, page: Page) -> None:
-        """选择「含AI生成内容」创作声明。
+        """选择「含AI生成内容」创作声明，并**验证写入成功**。
 
         点击「请选择创作声明」input → 弹出 modal 弹窗 → 点选「含AI生成内容」→ 点「确定」。
+
+        2026-09-26 实锤：旧实现弹窗渲染慢于 10s 就静默放弃、发布照样继续，
+        视频裸发后只能人工补声明（AI 财经内容不标注会被限流）。改为整段重试
+        （最多 3 次），每次以 trigger 的 value 回读为准——value 含 "AI" 才算
+        写入成功；重试耗尽直接抛错阻断百家号发布，宁可失败也不裸发。
         """
-        try:
-            # 点击创作声明输入框触发弹窗
-            trigger = page.locator('input[placeholder="请选择创作声明"]').first
-            await trigger.scroll_into_view_if_needed()
-            await trigger.click(force=True, timeout=8000)
-            await page.wait_for_timeout(3000)
-
-            # 弹窗内点选「含AI生成内容」
-            ai_option = page.locator('.cheetah-modal-wrap :text("含AI生成内容")').first
-            if not await ai_option.count():
-                ai_option = page.locator('text="含AI生成内容"').first
-            await ai_option.wait_for(state="visible", timeout=10000)
-            await ai_option.click(timeout=5000)
-            await page.wait_for_timeout(1000)
-
-            # 点「确定」按钮关闭弹窗（弹窗可能在点选后仍存在）
-            modal = page.locator('.cheetah-modal-wrap:visible').first
-            if await modal.count():
-                confirm_btn = modal.locator('button:has-text("确定")').first
-                if await confirm_btn.count() and await confirm_btn.is_visible():
-                    await confirm_btn.click(timeout=5000)
-                    await page.wait_for_timeout(500)
-                else:
-                    # 确定按钮不可见，尝试 force click 或按 Escape 关闭
-                    await page.keyboard.press("Escape")
-                    await page.wait_for_timeout(500)
-
-            baijiahao_logger.success(_msg("🏷️", "已选择「含AI生成内容」"))
-        except Exception as exc:
-            # 如果失败，尝试关闭可能残留的弹窗
+        trigger = page.locator('input[placeholder="请选择创作声明"]').first
+        last_error: Exception | None = None
+        for attempt in range(1, 4):
             try:
-                await page.keyboard.press("Escape")
-                await page.wait_for_timeout(500)
-            except Exception:
-                pass
-            baijiahao_logger.warning(_msg("⚠️", f"选择 AI 声明失败: {exc}"))
+                await trigger.scroll_into_view_if_needed()
+                await trigger.click(force=True, timeout=8000)
+                await page.wait_for_timeout(3000)
+
+                # 弹窗内点选「含AI生成内容」
+                ai_option = page.locator('.cheetah-modal-wrap :text("含AI生成内容")').first
+                if not await ai_option.count():
+                    ai_option = page.locator('text="含AI生成内容"').first
+                await ai_option.wait_for(state="visible", timeout=15000)
+                await ai_option.click(timeout=5000)
+                await page.wait_for_timeout(1000)
+
+                # 点「确定」按钮关闭弹窗（弹窗可能在点选后仍存在）
+                modal = page.locator('.cheetah-modal-wrap:visible').first
+                if await modal.count():
+                    confirm_btn = modal.locator('button:has-text("确定")').first
+                    if await confirm_btn.count() and await confirm_btn.is_visible():
+                        await confirm_btn.click(timeout=5000)
+                        await page.wait_for_timeout(500)
+                    else:
+                        # 确定按钮不可见，尝试 force click 或按 Escape 关闭
+                        await page.keyboard.press("Escape")
+                        await page.wait_for_timeout(500)
+
+                # 回读 trigger 的 value 验证声明确实写入了。
+                # value 读不出来（站点改版/元素重渲染）→ 降级为旧行为（信任成功点击），
+                # 只告警；读出来了但不含 AI → 判未生效，重试。
+                value = None
+                try:
+                    value = await trigger.input_value()
+                except Exception as read_exc:
+                    baijiahao_logger.warning(_msg("⚠️", f"声明 value 回读失败（按已生效处理）: {read_exc}"))
+                if value is None or "AI" in value.upper():
+                    baijiahao_logger.success(_msg("🏷️", f"已选择创作声明: {value or '含AI生成内容(未回读)'}"))
+                    return
+                last_error = RuntimeError(f"声明选择后 trigger value 为 {value!r}，未见 AI 标注")
+                baijiahao_logger.warning(_msg("⚠️", f"第 {attempt} 次选择 AI 声明未生效（value={value!r}），重试"))
+            except Exception as exc:
+                last_error = exc
+                baijiahao_logger.warning(_msg("⚠️", f"第 {attempt} 次选择 AI 声明失败: {exc}"))
+                try:
+                    await page.keyboard.press("Escape")
+                    await page.wait_for_timeout(800)
+                except Exception:
+                    pass
+        raise RuntimeError(f"百家号「含AI生成内容」声明三次重试后仍未写入，阻断发布: {last_error}")
 
     async def _apply_collection(self, page: Page) -> None:
         """选择合集（cheetah-select 下拉搜索框）。

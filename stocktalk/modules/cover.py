@@ -28,6 +28,7 @@ from typing import Any
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 
 from stocktalk.modules.compliance import ComplianceAgent
+from stocktalk.modules.numbers import has_digit
 
 # name -> (width, height).  3:4 竖版给抖音/快手/小红书/视频号，4:3 与 16:9 横版
 # 给 B站（以及抖音/视频号的横版封面位）。
@@ -296,13 +297,16 @@ class CoverGenerator:
                     break
         if not hook:
             hook = f"{stock_name}的生意本质与数据边界"
-        return self._clip(self.compliance.sanitize(hook), 38)
+        # 2026-09-27：hook 字号提级后 38 字会排到三行，缩略图读不完——收到 26。
+        return self._clip(self.compliance.sanitize(hook), 26)
 
     @staticmethod
     def _tags(script: Mapping[str, Any]) -> list[str]:
         """A short #话题 行 built from real script keywords.
 
         只取 2 个：feed 缩略图里第三个以后的胶囊读不清，纯噪声。
+        带数字成分的关键词（「毛利率18.29」）不上封面——缩略图里观众读不懂，
+        也不是可检索的话题词（2026-09-26 003040 实锤）。
         """
         words: list[str] = []
         for turn in script.get("turns", ()):
@@ -310,7 +314,7 @@ class CoverGenerator:
                 continue
             for keyword in turn.get("visual", ()) or ():
                 word = str(keyword).strip()
-                if 2 <= len(word) <= 6 and word not in words:
+                if 2 <= len(word) <= 6 and word not in words and not has_digit(word):
                     words.append(word)
         for fallback in ("A股", "基本面", "财报解读"):
             if fallback not in words:

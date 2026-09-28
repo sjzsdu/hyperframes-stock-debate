@@ -284,7 +284,7 @@ class DialogueGeneratorTests(unittest.TestCase):
         with patch("stocktalk.modules.dialogue_generator.shutil.which", return_value="bl"):
             script = self._annual_generator().generate(self._full_data())
         self.assertEqual(script["arc"]["id"], "annual")
-        self.assertEqual(script["arc"]["beats"], ["revenue", "margin", "cash", "occupied", "shadow"])
+        self.assertEqual(script["arc"]["beats"], ["revenue", "margin", "cash", "occupied", "shadow", "closing"])
         self.assertEqual(script["hook"], "下一份财报的外销收入占比")
         self.assertEqual(script["question"], "你更信渠道还是产能？")
         self.assertEqual(script["sides"]["bull"], "单一品类做到九成，说明产品力扎实")
