@@ -71,14 +71,15 @@ class HyperFramesBuilderTests(unittest.TestCase):
                 {"segments": [{"character": "bull", "line": "营收保持韧性", "start_time": 1, "duration": 3, "audio_path": str(audio_source)}], "total_duration": 4},
             )
             content = project.composition_path.read_text(encoding="utf-8")
-            # Dialogue 4.0s + 0.45s intro fade-in + 0.45s outro recap pad.
-            self.assertEqual(project.duration, 4.9)
+            # Dialogue 4.0s + 0.45s intro fade-in + 2.4s outro hold（2026-09-29：
+            # 话音落下后片尾卡要停够，不许话音没落就黑屏）。
+            self.assertEqual(project.duration, 6.85)
             self.assertIn('data-composition-id="stock-debate"', content)
             self.assertIn('data-track-index="4"', content)
             self.assertIn('id="audio-1"', content)
             self.assertIn("window.__timelines['stock-debate']", (project.directory / "stock-debate.js").read_text(encoding="utf-8"))
             self.assertIn("<svg", content)
-            self.assertIn('data-topic="financial"', content)
+            self.assertIn('data-topic="revenue"', content)
             self.assertIn('class="ma draw-line"', content)
             self.assertIn('id="visual-frame"', content)
             self.assertIn('data-slot="visual"', content)
@@ -105,9 +106,9 @@ class HyperFramesBuilderTests(unittest.TestCase):
                            "THE VETERAN", "TOPIC VISUAL", "正在讨论", "正在发言", "AI", "生成"):
                 self.assertNotIn(banned, content)
             # kicker 文本已下线（2026-09-23）：骨架 beat key 对观众无意义，
-            # 话题分类仍通过 keywords 槽位的 data-topic 到达成片。
+            # 论点分类仍通过 keywords 槽位的 data-topic 到达成片。
             self.assertIn('data-slot="keywords"', content)
-            self.assertIn('data-topic="risk"', content)
+            self.assertIn('data-topic="valuation"', content)
             self.assertNotIn("slot-kicker", content)
 
     def test_news_topic_slide_shows_real_headlines(self):
@@ -122,7 +123,7 @@ class HyperFramesBuilderTests(unittest.TestCase):
             )
             content = project.composition_path.read_text(encoding="utf-8")
             self.assertIn('data-topic="news"', content)
-            self.assertIn("近期资讯", content)
+            self.assertIn("政策与资讯", content)
             self.assertIn("线下自营店调价", content)
             self.assertIn("研报", content)
 
@@ -213,7 +214,8 @@ class HyperFramesBuilderTests(unittest.TestCase):
             for key, svg in visuals.items():
                 self.assertNotIn("暂无", svg, f"topic {key} still renders an empty placeholder")
 
-    def test_classifies_industry_topic_from_business_line(self):
+    def test_classifies_argument_from_business_line(self):
+        """论点绑定（2026-09-29）：讲同行/护城河的台词归「同业竞争」，中央图出排名标尺。"""
         with tempfile.TemporaryDirectory() as temp:
             project = HyperFramesBuilder(self._config(temp)).build_project(
                 {},
@@ -221,7 +223,7 @@ class HyperFramesBuilderTests(unittest.TestCase):
                 {},
             )
             content = project.composition_path.read_text(encoding="utf-8")
-            self.assertIn('data-topic="industry"', content)
+            self.assertIn('data-topic="peers"', content)
 
     def test_topic_visual_falls_back_to_company_profile(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -449,7 +451,7 @@ class HyperFramesBuilderTests(unittest.TestCase):
 
 
 class ChartLibraryTests(unittest.TestCase):
-    """图表库：每轮右半屏按话题轮换，同一支视频尽量不重样，数据不足就换下一个。"""
+    """图表库：中央图与该轮论点显式绑定（2026-09-29），数据不足就按序后退。"""
 
     def _builder(self) -> HyperFramesBuilder:
         return HyperFramesBuilder({"video": {"canvas": "horizontal"}})
@@ -476,24 +478,26 @@ class ChartLibraryTests(unittest.TestCase):
         return {"bars": [{"close": 10.0 + i} for i in range(40)], "quote": {"name": "澳弘电子"},
                 "keywords": [], "f10": f10, "financials": financials, "news": {"items": []}}
 
-    def test_financial_topic_rotates_charts_within_one_video(self) -> None:
+    def test_margin_argument_alternates_equal_charts(self) -> None:
+        """同一论点连续出现时在语义等价的图之间轮换，不再重复同一张。"""
         builder = self._builder()
-        used: set = set()
         ctx = {"bars": [{"close": 10.0 + i} for i in range(40)], "quote": {"name": "澳弘电子"},
-               "keywords": [], "f10": self._f10(), "financials": self._financials(), "news": {"items": []}}
-        first = builder._turn_chart("financial", used, ctx)
-        second = builder._turn_chart("financial", used, ctx)
-        self.assertIn("业务拆解", first)          # mindmap first
-        self.assertIn("收入构成", second)         # then composition bars
-        self.assertEqual(used, {"mindmap", "composition"})
+               "argument": "margin", "keywords": [], "f10": self._f10(),
+               "financials": self._financials(), "news": {"items": []}}
+        first, first_name = builder._turn_chart("margin", ctx)
+        second, second_name = builder._turn_chart("margin", ctx, first_name)
+        self.assertEqual(first_name, "composition")   # 盈利结构 → 收入构成条（逐业务标毛利率）
+        self.assertEqual(second_name, "mindmap")      # 连续第二个毛利论点换业务拆解
+        self.assertIn("收入构成", first)
+        self.assertIn("业务拆解", second)
 
     def test_chart_falls_back_when_data_is_missing(self) -> None:
         builder = self._builder()
-        used: set = set()
         ctx = {"bars": [{"close": 10.0 + i} for i in range(40)], "quote": {"name": "某股"},
-               "keywords": [], "f10": {}, "financials": {}, "news": {"items": []}}
-        body = builder._turn_chart("financial", used, ctx)
-        # mindmap/composition/waterfall 全没数据 → 只剩真实 K 线兜底
+               "argument": "margin", "keywords": [], "f10": {}, "financials": {}, "news": {"items": []}}
+        body, name = builder._turn_chart("margin", ctx)
+        # mindmap/composition 全没数据 → 只剩真实 K 线兜底
+        self.assertEqual(name, "kline")
         self.assertIn("真实日K", body)
 
     def test_mindmap_shows_real_composition_and_margins(self) -> None:
@@ -552,38 +556,145 @@ class ChartLibraryTests(unittest.TestCase):
         self.assertIsNone(self._builder()._industry_rank_body(
             {"profile": {"行业地位": {"研究行业": "元器件", "同行家数": 66}}}))
 
-    def test_chart_borrows_unused_charts_before_repeating_kline(self) -> None:
+    def test_argument_never_borrows_an_unrelated_chart(self) -> None:
+        """绑定不许被「换换花样」破坏：存货论点只出营运占用图，缺数据也不借别的。"""
         builder = self._builder()
-        used: set = {"mindmap", "composition", "waterfall", "working_capital", "kline"}
-        ctx = self._full_ctx(self._ranking_f10(), self._financials())
-        body = builder._turn_chart("money", used, ctx)
-        # money 的候选只有 K线且已用过 → 从全片未用过的池里借排名标尺
-        self.assertIn("行业里站哪", body)
-        self.assertIn("ranking", used)
+        ctx = {"bars": [{"close": 10.0 + i} for i in range(40)], "quote": {"name": "某股"},
+               "argument": "inventory", "keywords": [], "f10": {}, "financials": {}, "news": {"items": []}}
+        body, name = builder._turn_chart("inventory", ctx)
+        # working_capital 缺数据 → 退到业务兜底（脑图/K线），绝不借排名或瀑布
+        self.assertIn(name, ("mindmap", "composition", "kline"))
 
-    def test_chart_prefers_kline_for_money_before_borrowing(self) -> None:
+    def test_money_argument_keeps_the_real_kline(self) -> None:
         builder = self._builder()
-        used: set = {"mindmap", "composition", "waterfall"}
         ctx = self._full_ctx(self._ranking_f10(), self._financials())
-        builder._turn_chart("money", used, ctx)
-        self.assertIn("kline", used)   # 本话题候选还没用过，先轮自己
-        self.assertNotIn("ranking", used)
+        body, name = builder._turn_chart("money", ctx)
+        self.assertEqual(name, "kline")   # 量价论点 = K线，与全片出现过什么无关
+        self.assertIn("真实日K", body)
 
-    def test_exhausted_library_rotates_least_recently_used(self) -> None:
-        """六种图全登场后，按最久未用轮转，而不是 K线连播。"""
+
+# 继承 ChartLibraryTests：2026-09-29 插入时原类尾部的版面方法落在了这个类里，
+# 它们依赖父类的 _f10/_full_ctx 等 helper——继承正好补上，也算同一条演化线。
+class FinancePoolTests(ChartLibraryTests):
+    """多年财务图表池（2026-09-29）：F10 财务分析块 → 五张新图与论点绑定。"""
+
+    def _builder(self) -> HyperFramesBuilder:
+        return HyperFramesBuilder({"video": {"canvas": "horizontal"}})
+
+    def _history(self) -> dict:
+        return {"profile": {"财务历史": {
+            "年度": {"报告期": ["2021-12-31", "2022-12-31", "2023-12-31", "2024-12-31", "2025-12-31"],
+                     "指标": {
+                         "营业总收入(亿元)": [32.98, 35.76, 39.67, 41.38, 41.22],
+                         "归母净利润(亿元)": [-5.62, 0.45, 0.49, -1.94, -3.98],
+                         "销售毛利率(%)": [7.57, 8.62, 13.88, 14.62, 12.48],
+                         "净资产收益率(%)": [-13.54, 1.05, 1.11, -4.37, -9.6],
+                         "经营活动现金流量净额(亿元)": [1.0, -4.03, -2.23, -0.42, 1.61],
+                         "投资活动现金流量净额(亿元)": [1.35, 10.79, -2.75, -2.6, 0.99],
+                         "筹资活动现金流量净额(亿元)": [1.1, -2.54, -0.55, 3.73, -3.05],
+                     }},
+            "科目变动": {"报告期": "2026-06-30", "明细": [
+                {"科目": "存货", "本期(亿元)": 40.51, "上期(亿元)": 30.89, "变动率(%)": 31.13},
+                {"科目": "短期借款", "本期(亿元)": 6.06, "上期(亿元)": 4.02, "变动率(%)": 50.58},
+                {"科目": "合同负债", "本期(亿元)": 20.41, "上期(亿元)": 17.08, "变动率(%)": 19.48},
+            ]}}}}
+
+    def _pool_ctx(self) -> dict:
+        return {"bars": [{"close": 10.0 + i} for i in range(40)], "quote": {"name": "机器人"},
+                "keywords": [], "f10": self._history(), "financials": {}, "news": {"items": []}}
+
+    def test_profit_trend_shows_five_year_profit_and_revenue(self) -> None:
+        body = self._builder()._profit_trend_body(self._history())
+        self.assertIn("业绩走势 · 归母净利润", body)
+        self.assertIn("-5.62", body)          # 2021 亏损柱
+        self.assertIn("-3.98", body)          # 2025 亏损柱
+        self.assertIn("41.4", body)           # 营收线（2024，独立刻度）
+        # 两个点连不成走势：数据不足三期宁可不画
+        thin = {"profile": {"财务历史": {"年度": {
+            "报告期": ["2024-12-31", "2025-12-31"],
+            "指标": {"归母净利润(亿元)": [-1.94, -3.98]}}}}}
+        self.assertIsNone(self._builder()._profit_trend_body(thin))
+
+    def test_loss_making_profit_argument_falls_to_profit_trend(self) -> None:
+        """亏损股（净利为负）画不了利润阶梯 → 落到历年净利走势，而不是收入构成。
+
+        002912 这期实测：上半年净利 -1.29 亿，waterfall 的 value>0 过滤把
+        负值全丢掉 → 返回 None → profit 论点掉进 composition 兜底，
+        观众看到「讲亏损、画收入构成」的错位。
+        """
         builder = self._builder()
-        used: set = set()
-        history: list = []
-        profile = {**self._f10()["profile"],
-                   "行业地位": {"研究行业": "元器件", "同行家数": 66,
-                               "市场表现": {"排名": 1}, "公司规模": {"排名": 52}}}
-        ctx = self._full_ctx({"profile": profile}, self._financials())
-        for topic in ("financial", "money", "sentiment", "risk", "industry"):
-            builder._turn_chart(topic, used, ctx, history)
-        sixth = builder._turn_chart("money", used, ctx, history)
-        self.assertIn("业务拆解", sixth)          # 最久没用的是脑图，轮它
-        seventh = builder._turn_chart("risk", used, ctx, history)
-        self.assertIn("真实日K", seventh)         # 再轮到 K线
+        ctx = self._pool_ctx()
+        ctx["financials"] = {"报告期": "2026-06-30", "营业收入(亿元)": 2.36,
+                             "营业利润(亿元)": -1.10, "利润总额(亿元)": -1.05,
+                             "净利润(亿元)": -1.29}
+        body, name = builder._turn_chart("profit", ctx)
+        self.assertEqual(name, "profit_trend")
+        self.assertIn("业绩走势", body)
+
+    def test_trend_lines_show_every_real_point(self) -> None:
+        builder = self._builder()
+        margin = builder._percent_trend_body(self._history(), "销售毛利率(%)",
+                                             "毛利率走势", "近几年销售毛利率", "#ffd166")
+        self.assertIn("7.57%", margin)
+        self.assertIn("12.48%", margin)
+        roe = builder._percent_trend_body(self._history(), "净资产收益率(%)",
+                                          "股东回报", "近几年净资产收益率", "#8fd3ff")
+        self.assertIn("-13.54%", roe)
+        self.assertIn("-9.6%", roe)
+
+    def test_cashflow_statement_groups_three_activities(self) -> None:
+        body = self._builder()._cashflow_statement_body(self._history())
+        self.assertIn("现金流三张账 · 近三年", body)
+        self.assertIn("3.73", body)     # 2024 筹资净流入
+        self.assertIn("-3.05", body)    # 2025 筹资净流出
+        self.assertIn("经营", body)
+
+    def test_balance_sheet_picks_the_biggest_changes(self) -> None:
+        body = self._builder()._balance_sheet_body(self._history())
+        self.assertIn("短期借款", body)      # |变动率| 最大的排最前
+        self.assertIn("+50.6%", body)
+        self.assertIn("本期 40.51", body)
+        self.assertIsNone(self._builder()._balance_sheet_body({"profile": {}}))
+
+    def test_arguments_route_to_their_own_trend_charts(self) -> None:
+        builder = self._builder()
+        ctx = self._pool_ctx()
+        # cashflow 的论点 id 是 cashflow，映射到的图才是 cashflow_statement。
+        for argument, chart, marker in (("profit_trend", "profit_trend", "业绩走势"),
+                                        ("margin_trend", "margin_trend", "毛利率走势"),
+                                        ("roe_trend", "roe_trend", "股东回报"),
+                                        ("cashflow", "cashflow_statement", "现金流三张账"),
+                                        ("balance_sheet", "balance_sheet", "资产与负债")):
+            body, name = builder._turn_chart(argument, ctx)
+            self.assertEqual(name, chart, argument)
+            self.assertIn(marker, body)
+
+    def test_cashflow_argument_prefers_statement_over_working_capital(self) -> None:
+        body, name = self._builder()._turn_chart("cashflow", self._pool_ctx())
+        self.assertEqual(name, "cashflow_statement")
+        self.assertIn("现金流三张账", body)
+
+    def test_overlap_terms_count_once(self) -> None:
+        """「毛利率」「毛利」是同一证据的两种写法，不许压过「毛利率从」。"""
+        builder = self._builder()
+        self.assertEqual(builder._proof_count(("毛利率", "毛利"), "销售毛利率"), 1)
+        self.assertEqual(builder._proof_count(("毛利率走", "毛利率"), "毛利率走势"), 1)
+        topic, _ = builder._turn_argument(
+            "销售毛利率从 2021 年的百分之七点五七爬到去年的百分之十二点四八。")
+        self.assertEqual(topic, "margin_trend")
+
+    def test_inventory_argument_repeats_the_right_chart(self) -> None:
+        """存货和现金流连着讲：两张营运占用图是「对的重复」，不为花样换错图。"""
+        builder = self._builder()
+        ctx = {"bars": [{"close": 10.0 + i} for i in range(40)], "quote": {"name": "某股"},
+               "argument": "cashflow", "keywords": [], "f10": {}, "news": {"items": []},
+               "financials": {"报告期": "2026-08-28", "营业收入(亿元)": 7.73,
+                              "存货(亿元)": 4.24, "应收账款(亿元)": 3.94}}
+        first, first_name = builder._turn_chart("cashflow", ctx)
+        second, second_name = builder._turn_chart("inventory", ctx, first_name)
+        self.assertEqual(first_name, "working_capital")
+        self.assertEqual(second_name, "working_capital")
+        self.assertIn("4.24亿", second)
 
     def test_timeline_shows_headlines_and_handles_empty_news(self) -> None:
         builder = self._builder()

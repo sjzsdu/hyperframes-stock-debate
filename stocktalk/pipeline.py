@@ -345,7 +345,25 @@ class Pipeline:
                 progress.update(task, description="HTML project ready (render skipped)")
             progress.advance(task)
 
-            publish_report: dict[str, Any] | None = None
+            result = {"stock_code": stock_code, "stock_name": stock_data.get("quote", {}).get("name", stock_name or ""),
+                      "tag": tag, "script": script, "approved_script": approved, "audio": audio,
+                      "srt": audio.get("srt_path"), "project_dir": str(project_dir),
+                      "video_path": str(video_path) if video_path else None, "rendered": bool(video_path),
+                      "platform_videos": platform_videos, "covers": cover_files,
+                      "review_path": str(review_path) if review_path else None,
+                      # Kept on the result so the CLI summary can name both cuts and
+                      # say which platforms each one feeds; otherwise the alternate
+                      # canvas render is invisible unless you open the JSON.
+                      "canvas": str(self.builder.video_config.get("canvas", "vertical")),
+                      "platform_canvas": dict(self.config.get("publish", {}).get("platform_canvas", {}) or {}),
+                      "preview": preview, "publish": None,
+                      "elapsed_seconds": round(time.monotonic() - t0, 1)}
+            result_path = self.output_dir / f"{tag}.json"
+            # 落盘要赶在发布之前（2026-09-29 评审：发布花了 40 分钟，审查的人在那
+            # 期间看不到任何 json，剧本审批/合规改写的回溯链是断的）。先写一版
+            # publish=null 的完整元数据，发布结束后再补写发布报告。
+            result_path.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
+
             if publish and video_path:
                 platform_list = [p for p in self.config.get("publish", {}).get("platforms", [])]
                 progress.update(task, description=f"Publishing to {', '.join(platform_list)}")
@@ -357,29 +375,16 @@ class Pipeline:
                 # code: the banner and their typing must not fight a refreshing
                 # progress bar for the same lines.
                 self.publisher.set_ui_hooks(pause=progress.stop, resume=progress.start)
-                publish_report = self.publisher.publish(
+                result["publish"] = self.publisher.publish(
                     video_path, approved, stock_data.get("quote", {}).get("name", stock_name or ""), stock_code,
                     schedule=str(self.config.get("publish", {}).get("schedule") or "") or None,
                     platform_videos=platform_videos or None, covers=cover_files or None,
                     on_event=report_event,
                 )
+                result["elapsed_seconds"] = round(time.monotonic() - t0, 1)
+                result_path.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
             progress.advance(task)
 
-        result = {"stock_code": stock_code, "stock_name": stock_data.get("quote", {}).get("name", stock_name or ""),
-                  "tag": tag, "script": script, "approved_script": approved, "audio": audio,
-                  "srt": audio.get("srt_path"), "project_dir": str(project_dir),
-                  "video_path": str(video_path) if video_path else None, "rendered": bool(video_path),
-                  "platform_videos": platform_videos, "covers": cover_files,
-                  "review_path": str(review_path) if review_path else None,
-                  # Kept on the result so the CLI summary can name both cuts and
-                  # say which platforms each one feeds; otherwise the alternate
-                  # canvas render is invisible unless you open the JSON.
-                  "canvas": str(self.builder.video_config.get("canvas", "vertical")),
-                  "platform_canvas": dict(self.config.get("publish", {}).get("platform_canvas", {}) or {}),
-                  "preview": preview, "publish": publish_report,
-                  "elapsed_seconds": round(time.monotonic() - t0, 1)}
-        result_path = self.output_dir / f"{tag}.json"
-        result_path.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
         self.console.print(f"[green]Done:[/green] {result_path}")
         return result
 

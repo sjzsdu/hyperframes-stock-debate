@@ -1,6 +1,7 @@
 """谈股论金 CLI — 一条命令从股票代码到发布视频。
 
     tangulunjin 601689 --publish          # 生成 MP4 并发布到全部已配置平台
+    tangulunjin 601689 -m "重点讲海外收入占比"   # 本期提示词：给 LLM 的选材与侧重参考
     tangulunjin 601689 --publish --auto    # 发布前的失效平台先自动重新登录（视频号免扫码）
     tangulunjin --check                   # 发布预检：工具链 + 各平台登录态
     tangulunjin --daemon                  # 守护进程：到点自动选题+生成+发布（推荐常驻）
@@ -57,6 +58,7 @@ def main(argv: list[str] | None = None) -> None:
         epilog=(
             "示例:\n"
             "  tangulunjin 601689 --publish                 # 生成 + 发布到全部平台\n"
+            "  tangulunjin 601689 -m \"重点讲海外收入占比\"    # 本期提示词（可重复，@文件也行）\n"
             "  tangulunjin 601689 --publish --auto          # 失效平台先自动重新登录再发\n"
             "  tangulunjin --check                          # 发布前预检各平台登录态\n"
             "  tangulunjin --daemon                         # 守护进程（前台，到点自动发布）\n"
@@ -80,6 +82,12 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--config", default=None, help="自定义配置文件路径")
     parser.add_argument("--output-dir", default=None, help="输出目录（默认 output/）")
     parser.add_argument("--duration-minutes", type=int, default=None, help="对话目标时长（分钟，默认 2-5）")
+    parser.add_argument("-m", "--message", action="append", default=None, metavar="TEXT",
+                        help="本期提示词：注入剧本生成，给 LLM 当选材与侧重的参考"
+                             "（如「重点讲海外收入占比」）。可重复，多条换行拼接；"
+                             "写成 @文件路径 就从文本文件读（长提示词免转义）。"
+                             "批量时对所有代码生效；不改变合规红线与数据真实性要求，"
+                             "也改不了骨架节拍与字数额度")
     parser.add_argument("--no-render", action="store_true", help="仅生成 HTML 项目，跳过 MP4 渲染")
     parser.add_argument("--preview", action="store_true", help="仅生成 HTML 预览项目（等同于 --no-render）")
     parser.add_argument("--publish", action="store_true", help="渲染完成后自动发布到已配置的平台（抖音/B站/快手/小红书/视频号）")
@@ -157,6 +165,13 @@ def main(argv: list[str] | None = None) -> None:
             parser.error(f"未知平台: {', '.join(unknown)}（可选: {', '.join(PLATFORM_SPECS)}）")
         config.setdefault("publish", {})["platforms"] = names
 
+    # --message 也写回 config：主流程、--auto-pick、批量、以及配置里已有的值都从
+    # dialogue.message 这一处读，谁都不会漏（同 --publish-at 的理由）。
+    message = _resolve_message(args, parser)
+    if message:
+        config.setdefault("dialogue", {})["message"] = message
+        _report_message(args, message)
+
     # --check / --keepalive / --notify-test / --daemon* probe or schedule only, so they
     # must not be gated on a stock code.
     if args.check_only:
@@ -202,6 +217,57 @@ def main(argv: list[str] | None = None) -> None:
     except KeyboardInterrupt:
         print("\n已中断。已成功的平台不会重发；失败的用 `tangulunjin <code> --republish` 补发。")
         sys.exit(130)
+
+
+# 提示词整条进 LLM 上下文（prompt 本身已有骨架说明和几万字数据 JSON），超过这个
+# 长度只是提醒一声——它不是删减阈值，内容一个字都不会丢。
+MESSAGE_NOTICE_CHARS = 2000
+
+
+def _resolve_message(args: argparse.Namespace, parser: argparse.ArgumentParser) -> str:
+    """把 -m/--message 的多个片段合成一条提示词；``@文件`` 从文本文件读。
+
+    它是「本期让 LLM 多讲点什么」的入口：侧重哪块业务、想强调哪些数据维度、想
+    避开的说法都能写进来。长提示词（比如一份选题说明）用 ``@文件`` 传，免得在
+    shell 里跟引号和换行较劲。
+    """
+    parts: list[str] = []
+    for raw in (getattr(args, "message", None) or ()):
+        text = str(raw).strip()
+        if not text:
+            parser.error("--message 不能是空字符串（要么给内容，要么整条别写）")
+        if text.startswith("@") and len(text) > 1:
+            path = Path(text[1:]).expanduser()
+            if not path.is_file():
+                parser.error(f"--message 指定的文件不存在: {path}")
+            try:
+                text = path.read_text(encoding="utf-8").strip()
+            except OSError as exc:
+                parser.error(f"--message 读取 {path} 失败: {exc}")
+            if not text:
+                parser.error(f"--message 指定的文件是空的: {path}")
+        parts.append(text)
+    return "\n".join(parts)
+
+
+def _report_message(args: argparse.Namespace, message: str) -> None:
+    """说清这条提示词这次到底会不会起作用——写了却不生效是最气人的。"""
+    if args.republish or args.publish_only:
+        print(f"  • 本期提示词 {len(message)} 字：补发/仅发布不重新生成剧本，本次用不到它。")
+        return
+    if args.check_only or args.keepalive or args.notify_test:
+        print(f"  • 本期提示词 {len(message)} 字：本次是预检/心跳/自检，用不到它。")
+        return
+    if args.daemon or args.daemon_status or args.daemon_install or args.daemon_uninstall:
+        # 守护进程跑的是子进程里另一条命令行（daemon.command()），-m 不会跟着走；
+        # 想让它长期生效只能写配置，写成 --daemon 的参数会静默失效。
+        print(f"  • 本期提示词 {len(message)} 字：守护进程不会带上 -m（它跑的是另一条命令），"
+              f"要长期生效请写进配置 dialogue.message。")
+        return
+    print(f"  本期提示词 {len(message)} 字 → 已注入剧本生成（dialogue.message）")
+    if len(message) > MESSAGE_NOTICE_CHARS:
+        print(f"    提示词较长（超过 {MESSAGE_NOTICE_CHARS} 字），会整条进 LLM 上下文，"
+              f"剧本生成的耗时与成本随之上升。")
 
 
 def _check(config: dict) -> int:

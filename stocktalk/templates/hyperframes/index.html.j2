@@ -12,7 +12,7 @@
    move; only the four content slots below change, and only when their content
    actually differs from the previous turn (see HyperFramesBuilder._merge_slot). #}
 <main id="root" class="layout-{{ layout }} captions-{{ subtitle_mode }}" data-composition-id="stock-debate" data-start="0" data-width="{{ canvas_width }}" data-height="{{ canvas_height }}" data-duration="{{ duration }}" data-stage-in="{{ stage_in }}" data-fps="30" style="--safe-top: {{ safe_top }}px; --safe-bottom: {{ safe_bottom }}px; --safe-side-left: {{ safe_side_left }}px; --safe-side-right: {{ safe_side_right }}px; --stock-accent: {{ identity.accent }}; --stock-soft: {{ identity.accent_soft }};">
-{% set outro_start = duration - 0.45 %}
+{% set outro_start = duration - outro_hold %}
   {# Safe-area guides: the bands the platform's player UI will sit on.  Hidden
      unless the preview URL asks for them (#guides), so they can never reach a
      rendered MP4. #}
@@ -95,7 +95,7 @@
   </section>
 
   {# Natural closing: recap card with the real interval numbers #}
-  <section id="outro-card" class="outro-card clip" data-start="{{ outro_start }}" data-duration="0.45" data-track-index="60" data-layout-ignore>
+  <section id="outro-card" class="outro-card clip" data-start="{{ outro_start }}" data-duration="{{ outro_hold }}" data-track-index="60" data-layout-ignore>
     <div class="outro-kicker">今天聊到这</div>
     <div class="outro-title">{{ outro_title }}</div>
     <div class="outro-svg">{{ outro_svg|safe }}</div>

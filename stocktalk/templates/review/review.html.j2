@@ -96,7 +96,7 @@
   </div>
   {% endif %}
 
-  {% if arc or cta.hook or cta.question or cta.bull or cta.bear or arc_notes %}
+  {% if arc or cta.hook or cta.question or cta.bull or cta.bear or arc_notes or message %}
   <h2>本期结构与互动</h2>
   <div class="row">
     <div class="panel" style="flex: 2 1 0;">
@@ -112,6 +112,12 @@
       {% if arc_notes %}
       <div><span class="k">偏差</span>模型有 {{ arc_notes|length }} 处没完全照骨架走：</div>
       <ul>{% for note in arc_notes %}<li>{{ note }}</li>{% endfor %}</ul>
+      {% endif %}
+      {% if message %}
+      {# 本期提示词（-m / dialogue.message）：这期"为什么讲得跟别期不一样"的原话。
+         排版保留换行（pre-line），长提示词读起来仍是它写下的样子。 #}
+      <div><span class="k">本期提示</span>操作者给 LLM 的选材参考：</div>
+      <div style="white-space: pre-line; border-left: 2px solid var(--accent); padding: 2px 0 2px 10px;">{{ message }}</div>
       {% endif %}
     </div>
     <div class="panel" style="flex: 2 1 0;">

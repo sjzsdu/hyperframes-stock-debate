@@ -465,6 +465,9 @@ tangulunjin <股票代码...> [选项]
   --config PATH         自定义配置文件路径
   --output-dir DIR      输出目录（默认 output/）
   --duration-minutes N  对话目标时长（分钟，默认 2-5）
+  -m, --message TEXT    本期提示词：注入剧本生成，给 LLM 当选材与侧重的参考（可重复；
+                        写 @文件路径 则从文件读）。不改变合规红线与数据真实性要求；
+                        守护进程要长期生效请写进配置 dialogue.message
   --no-render           只生成 HyperFrames 工程，跳过 MP4 渲染（最快跑通链路）
   --preview             同 --no-render
   --publish             渲染后自动发布到已配置的平台（抖音/B站/快手/视频号/百家号）
@@ -503,6 +506,13 @@ tangulunjin 600519 --name 贵州茅台 --config my_config.yaml
 
 # 指定输出目录和目标时长
 tangulunjin 000001 --name 平安银行 --output-dir ./videos --duration-minutes 3
+
+# 本期提示词：让 LLM 侧重讲某一块（可重复，多条换行拼接）
+tangulunjin 000001 -m "这期重点讲零售业务的息差变化，海外收入少提"
+tangulunjin 000001 -m "把管理层说过的产能规划讲清楚" -m "结尾盯应收账款的回收节奏"
+
+# 长提示词写进文件再传，免得在 shell 里跟引号和换行较劲
+tangulunjin 000001 -m @选题说明.txt
 
 # 生成并自动发布到所有已配置平台
 tangulunjin 600519 --publish

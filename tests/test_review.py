@@ -120,3 +120,28 @@ def test_review_page_shows_the_arc_interaction_copy_and_rewrites(tmp_path: Path)
     # 改写对照：改了什么、改成什么（语义有没有被改跑要人能判断）
     assert "改写对照" in html
     assert "看多一方：产品力扎实" in html and "乐观一边：产品力扎实" in html
+
+
+def test_review_page_shows_the_operator_message(tmp_path: Path) -> None:
+    """--message 的提示词要出现在审查页上。
+
+    它是"这期为什么讲得跟别期不一样"的唯一解释：成片看起来跑偏时，审查的人
+    要能一眼看到原话，判断是提示词要求的还是模型自己编的。
+    """
+    script = {"title": "t", "turns": [{"speaker": "bull", "line": "看点"}],
+              "message": "这期重点讲零售息差\n少提海外收入"}
+    path = write_review_page(tmp_path, "m", stock_name="平安银行", stock_code="000001",
+                             script=script, video_path=tmp_path / "m.mp4", platforms=[])
+    html = path.read_text(encoding="utf-8")
+
+    assert "本期提示" in html
+    assert "这期重点讲零售息差" in html and "少提海外收入" in html
+    # 多行提示词要保留换行，不能挤成一行
+    assert "white-space: pre-line" in html
+
+
+def test_review_page_has_no_message_block_without_a_message(tmp_path: Path) -> None:
+    path = write_review_page(tmp_path, "n", stock_name="平安银行", stock_code="000001",
+                             script={"title": "t", "turns": [{"speaker": "bull", "line": "看点"}]},
+                             video_path=tmp_path / "n.mp4", platforms=[])
+    assert "本期提示" not in path.read_text(encoding="utf-8")

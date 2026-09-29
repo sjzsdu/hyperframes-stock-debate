@@ -11,7 +11,10 @@ from typing import Any, Callable, Mapping, Sequence
 
 from stocktalk.modules.arcs import (Arc, ArcChoice, Beat, beats_by_key,
                                     resolve_speakers, select_arc)
+from stocktalk.modules.hyperframes_builder import short_business_label
 from stocktalk.modules.numbers import repair_spoken_numbers, to_display
+from stocktalk.modules.stock_data import StockDataClient
+from stocktalk.modules.story_spotter import spot_stories
 
 
 class DialogueGenerationError(RuntimeError):
@@ -45,6 +48,10 @@ class DialogueConfig:
     # 短回应（"嗯""有道理，但是…"）的字数上限。用户 2026-09-22：
     # 对话该长则长该短则短，有时候只是认可一句。
     short_line_chars: int = 20
+    # 本期提示词（CLI `-m/--message` 或配置 dialogue.message）：注入剧本生成
+    # prompt 的**选材与侧重参考**——「这期多讲点什么」。它是提示而非新约束：
+    # 合规红线、数据真实性、骨架节拍与字数额度都照旧有效（见 _message_section）。
+    message: str = ""
 
 
 class DialogueGenerator:
@@ -62,6 +69,7 @@ class DialogueGenerator:
             timeout_seconds=float(source.get("timeout_seconds", DialogueConfig.timeout_seconds)),
             arc=str(source.get("arc", DialogueConfig.arc) or DialogueConfig.arc),
             short_line_chars=int(source.get("short_line_chars", DialogueConfig.short_line_chars)),
+            message=self._normalize_message(source.get("message")),
         )
         if (self.config.min_duration_seconds < 1 or self.config.max_duration_seconds < self.config.min_duration_seconds
                 or not 30 <= self.config.max_line_chars <= 150 or self.config.max_tokens < 1):
@@ -96,6 +104,11 @@ class DialogueGenerator:
             raise TypeError("stock_data must be a mapping")
         self._require_bailian_cli()
         payload = self._compact_data(stock_data)
+        # 本期重点（2026-09-29）：按个股数据挑出的讨论角度——每期视频「有个性」
+        # 的入口。没有足够数据（新股/块缺失）时就是空表，prompt 里不会出现。
+        stories = spot_stories(stock_data)
+        if stories:
+            payload["本期重点"] = stories
         choice = self.select_arc(payload)
         raw = self._runner(self._command(self._system_prompt(choice.arc),
                                          self._user_prompt(payload, choice.arc)),
@@ -116,11 +129,17 @@ class DialogueGenerator:
             "不编造数字、新闻或事实，不预测涨跌，不给出买卖或仓位建议，不承诺收益。\n"
             f"看多角色：{bull['name']}，人设：{bull['persona']}。\n看空角色：{bear['name']}，人设：{bear['persona']}。\n"
             "\n内容要求（重要）：\n"
+            "0. 数据里的「本期重点」是按这家公司**这期财务数据**的显著变化挑出的讨论角度"
+            "（业绩趋势/毛利率走势/股东回报/现金流/科目异动/收入结构位移）——"
+            "它们正是这家公司区别于别家的地方，优先围绕它们展开；"
+            "但每个角度都必须落到数据明细里的具体数字与年份，明细里撑不住的角度宁可不讲。\n"
             "1. 以“讲懂这家公司”为主线：先说清它到底卖什么、靠什么赚钱、客户是谁、这门生意怎么运转；"
             "再说它在所处行业里的位置、竞争格局、行业天花板与政策环境。\n"
             "   数据里的「公司档案」来自交易所 F10 原文，是讲这门生意的第一手依据，必须据此展开：\n"
             "   · 主营业务、主营构成（各产品/地区/销售模式的收入占比与毛利率）就是这门生意的骨架——"
-            "哪块业务撑起收入、哪块最赚钱、直销和经销各占多少，都要讲到具体数字；\n"
+            "哪块业务撑起收入、哪块最赚钱、直销和经销各占多少，都要讲到具体数字；"
+            "提到某块业务时，统一用数据里给出的业务名称（已是画面同款简称），"
+            "不要自创缩写或换一个叫法——旁白和画面必须用同一个词；\n"
             "   · 所属行业、行业地位（研究行业与同行家数）用来定位它在行业里的位置和同行对比；\n"
             "   · 管理层只提档案里写了姓名和职务的人，不评价能力、不推测想法、不编造言论；\n"
             "   · 经营评述是公司自述，可以复述但要说明这是公司的说法。\n"
@@ -154,6 +173,10 @@ class DialogueGenerator:
             "“说白了”“这家公司靠什么赚钱”式的设问、“XX 这门生意”式的名词解释。"
             "这些意思可以在正文里讲，但第一句必须从具体事实、具体数字或一个反直觉的判断切入，"
             "不要出处介绍、不要背景铺垫。收尾同样禁止“总的来说/说到底”式的空转，要落到一个具体变量上。\n"
+            "\n开场三秒（重要）：第一句不超过 25 个字，必须带一个具体数字或一个反直觉的判断，"
+            "让人立刻想问「为什么」；前两句里要埋一个信息缺口——反差、反问或未解的因果，"
+            "观众为了补上这个缺口才会把片子看完。不要用行业定性开场（「这是一家做XX的公司」），"
+            "公司是谁、做什么生意，让观众从数据交锋里自己拼出来。"
             "\n对话节奏（重要）：长度由内容决定，该长则长、该短则短。允许某一轮只有几个字"
             "（如“嗯”“有道理”“但是——”“等等，这个不对”），用来表示认可、打断或迟疑；"
             "也允许一方连续追问、另一方长答后短驳。不要为了凑字数把每一轮都写满，也不要每轮等长。"
@@ -199,6 +222,41 @@ class DialogueGenerator:
         # 节拍的 key 同时是 JSON 里 beat 字段的合法取值，明确写出来，模型不用猜。
         lines.append(f"beat 字段只能从这些值里取：{'、'.join(beats_by_key(choice.beats))}。")
         return "\n".join(lines)
+
+    @staticmethod
+    def _normalize_message(value: Any, limit: int = 4000) -> str:
+        """规整本期提示词：去掉行尾空白与空行，超长截断并留下可见标记。
+
+        提示词整条进 LLM 上下文，而 prompt 本身已经有骨架说明和几万字数据 JSON，
+        所以留一个上限兜底：正常写得下的提示词碰不到它，误传一个 MB 级文件时
+        也不至于把上下文挤爆。截断标记会一并写进结果 JSON，事后能看出被截过。
+        """
+        lines = [re.sub(r"[ \t]+", " ", line).strip() for line in str(value or "").splitlines()]
+        text = "\n".join(line for line in lines if line)
+        if len(text) > limit:
+            return text[:limit] + f"\n（提示词超过 {limit} 字，已截断）"
+        return text
+
+    def _message_section(self) -> str:
+        """把 --message 注入的提示词渲染成 prompt 里的一段（没有就返回空串）。
+
+        位置放在用户提示的末尾、JSON 结构说明之前：它决定"本期从哪里切入、多讲
+        什么"，属于**选材与侧重**层面的参考，所以必须明确写出它与硬性要求的关系
+        ——数据真实性、合规红线、骨架节拍、轮数与字数额度一律不受它影响。不写这
+        一句，模型很容易把操作者的一句话当成新的硬约束（例如被要求"讲讲重组预期"
+        就去编一个数据里没有的重组）。
+        """
+        text = self.config.message
+        if not text:
+            return ""
+        return (
+            "\n本期额外提示（操作者指定，用于选材与侧重）：\n"
+            f"{text}\n"
+            "上面这条提示决定本期从哪里切入、多讲什么；它不改变前面那些硬性要求——"
+            "仍只依据提供的数据发言、不编造数字与事件、不预测涨跌、不给买卖或仓位建议，"
+            "骨架节拍顺序、轮数与字数预算也照旧。数据撑不住提示里的说法时，按数据本身讲，"
+            "并如实说明公开信息只到这一层。\n"
+        )
 
     @staticmethod
     def _minutes(seconds: int) -> int:
@@ -254,7 +312,12 @@ class DialogueGenerator:
             "每一拍的对话都要落到具体数字或具体环节上，讲清“这意味着什么”，不要停在结论式的形容。"
             "涉及管理层时只能用公司档案里给出的姓名与职务，不评价个人能力、不推测动机；公司动作只说新闻里写了的，并带上出处和时间。"
             "收尾必须是对话收束，不要一方独白结束：最后一拍（closing）由上一拍说话人的对方用一句短回应接住"
-            "——一句认可、一句保留，或把最关键的分歧再钉一次（如“那就看下一份财报应收账款压不压得下来”）。"
+            "——一句认可、一句保留，或把最关键的分歧再钉一次。"
+            "收尾句式每期必须换（2026-09-29 复盘：十期里七期都是「那就看下一期/下一份财报……」收尾，"
+            "观众会腻）：禁止再把「那就看下一…」「咱们看下一期……」当结语模板。要盯的变量会打在片尾画面上，"
+            "台词点到变量本身即可，说法要从当期的分歧里自然长出来，例如：「行，那就拿交付量说话。」"
+            "「这个分歧先记着，等十月十二号的说明会。」「存货压不压得下来，下一张报表见分晓。」"
+            "——例子只是示范语气，别整期复用同一句。"
             "另外必须产出三个用于和观众互动的字段（本期片尾会把它们打在画面上，必须经得起核对）："
             "hook —— 下一期要盯的一个可验证的具体变量（如“下一份财报的外销收入占比”“越南基地的实际产出”），"
             "要能被下一期直接核对，不要写“继续关注”“拭目以待”这类空话；"
@@ -266,8 +329,11 @@ class DialogueGenerator:
             "禁止询问买卖、点位、涨跌、能不能涨；"
             "sides —— 多空各一句立场，只讲生意层面的分歧（渠道、产能、价格能不能传导、谁会替代谁），"
             "一句话说完；禁止出现点位、目标价、买卖动作、收益暗示。"
-            "输出结构必须匹配：\n"
-            f"{json.dumps(schema, ensure_ascii=False)}\n股票数据：\n{json.dumps(payload, ensure_ascii=False, separators=(',', ':'))}"
+            # --message 的注入点：选材与侧重参考，紧挨 JSON 结构说明之前——
+            # 数据 JSON 仍留在提示最尾部，模型的"最后读到的是数据"不变。
+            + self._message_section()
+            + "输出结构必须匹配：\n"
+            + f"{json.dumps(schema, ensure_ascii=False)}\n股票数据：\n{json.dumps(payload, ensure_ascii=False, separators=(',', ':'))}"
         )
 
     def _normalize_script(self, response: Any, stock_data: Mapping[str, Any],
@@ -325,7 +391,7 @@ class DialogueGenerator:
         quote = stock_data.get("quote") if isinstance(stock_data.get("quote"), Mapping) else {}
         code, name = str(stock_data.get("code") or quote.get("code") or ""), str(quote.get("name") or stock_data.get("code") or "股票")
         char_count = sum(len(turn["line"]) for turn in turns)
-        return {"stock_code": code, "stock_name": name, "title": self._clean_title(response.get("title"), name, code),
+        script = {"stock_code": code, "stock_name": name, "title": self._clean_title(response.get("title"), name, code),
                 "turns": turns,
                 # 本期用了哪条骨架、哪些节拍因为没数据被剪掉、模型哪里没照着走。
                 # 结构"是否真的变了"要可核对，不能只看 prompt 写了什么。
@@ -338,6 +404,11 @@ class DialogueGenerator:
                 # 按实测语速换算的自估时长。长片最容易出的偏差是模型多写几百字，
                 # 把它留在结果里，pipeline 就能在渲染前提醒（而不是渲完才发现超长）。
                 "estimated_seconds": round(char_count / SPEECH_CHARS_PER_SECOND, 1)}
+        if self.config.message:
+            # 用了 --message 就要留痕：这期"为什么讲得跟别期不一样"必须能在成片
+            # 旁边的 JSON / 审查页里看到原话，否则提示词是一条断掉的回溯链。
+            script["message"] = self.config.message
+        return script
 
     @staticmethod
     def _resolve_beat(reported: Any, beats: Sequence[Beat], cursor: int, index: int,
@@ -486,6 +557,25 @@ class DialogueGenerator:
                 profile = value.get("profile")
                 if not isinstance(profile, Mapping) or not profile: continue
                 value = dict(profile)
+                # 主营构成明细名统一成图板同款简称（2026-09-29 评审：旁白说
+                # 「产线集成」、画面写「自动化装配与检测生产线」，同一个东西两个
+                # 名字）。prompt 与渲染共用 short_business_label，观众听到和
+                # 看到的就是同一个词。
+                composition = value.get("主营构成")
+                if isinstance(composition, Mapping) and isinstance(composition.get("明细"), list):
+                    rows = [dict(row) if isinstance(row, Mapping) else row for row in composition["明细"]]
+                    for row in rows:
+                        if isinstance(row, Mapping) and row.get("项目"):
+                            row["项目"] = short_business_label(str(row["项目"]))
+                    value["主营构成"] = dict(composition, 明细=rows)
+                # 财务历史整包有 60+ 指标，prompt 只吃最常讨论的一批；图表层
+                # 仍用全量（结构化对象按名精确取），互不影响。
+                trimmed = StockDataClient.trim_history_for_prompt(profile.get("财务历史"))
+                if trimmed:
+                    value["财务历史"] = trimmed
+                composition_history = value.get("主营构成历史")
+                if isinstance(composition_history, list) and len(composition_history) > 3:
+                    value["主营构成历史"] = composition_history[:3]
             elif key == "stockinfo" and isinstance(value, Mapping):
                 metrics = value.get("metrics")
                 if not isinstance(metrics, Mapping) or not metrics: continue

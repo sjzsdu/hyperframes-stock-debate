@@ -339,5 +339,115 @@ class DialogueGeneratorTests(unittest.TestCase):
         self.assertTrue(generated["arc"]["pruned"], "缺数据的节拍要记录成被剪掉")
 
 
+class OperatorMessageTests(unittest.TestCase):
+    """-m/--message（dialogue.message）：本期提示词要进 prompt，也要留痕。
+
+    它是「这期让模型多讲点什么」的入口，所以两件事都要能被核对：模型确实收到了
+    它，而且它是**参考**而不是新的硬约束——不然后面的人没法解释"这期为什么不一样"，
+    也没法判断某期内容跑偏到底是提示词要求的还是模型自己编的。
+    """
+
+    def _response(self):
+        return json.dumps({"title": "t", "turns": [
+            {"speaker": "bull", "beat": "生意本质", "line": "这家公司的收入大部分来自零售这条线，看业务结构比看行情有用。"},
+            {"speaker": "bear", "beat": "行业追问", "line": "行业数据里海外收入还没披露到那么细，这一点只能如实说。"},
+        ]}, ensure_ascii=False)
+
+    def _generator(self, message: str) -> DialogueGenerator:
+        return DialogueGenerator({"dialogue": {"message": message}},
+                                 runner=lambda argv, timeout: self._response())
+
+    def test_message_reaches_the_model_argument_and_the_prompt(self):
+        calls = []
+        generator = DialogueGenerator({"dialogue": {"message": "这期重点讲零售息差"}},
+                                      runner=lambda argv, timeout: calls.append(argv) or self._response())
+        with patch("stocktalk.modules.dialogue_generator.shutil.which", return_value="bl"):
+            generator.generate({"code": "000001", "quote": {"name": "平安银行"}})
+
+        sent = calls[0][calls[0].index("--message") + 1]
+        self.assertIn("这期重点讲零售息差", sent)
+        self.assertIn("本期额外提示", sent)
+
+    def test_message_sits_before_the_data_json_and_only_once(self):
+        """数据 JSON 仍留在提示最尾部：模型最后读到的是数据，不是操作者的提示词。"""
+        prompt = DialogueGenerator({"dialogue": {"message": "这期重点讲零售息差"}})._user_prompt({"code": "1"})
+
+        self.assertIn("这期重点讲零售息差", prompt)
+        self.assertEqual(prompt.count("这期重点讲零售息差"), 1)
+        self.assertLess(prompt.index("这期重点讲零售息差"), prompt.index("股票数据："))
+
+    def test_message_declares_it_cannot_override_the_hard_rules(self):
+        """提示词不是新约束：编数据、预测涨跌、给买卖建议一律照拦。"""
+        prompt = DialogueGenerator({"dialogue": {"message": "多讲讲产能规划"}})._user_prompt({"code": "1"})
+
+        self.assertIn("不改变前面那些硬性要求", prompt)
+        self.assertIn("不编造数字与事件", prompt)
+        self.assertIn("骨架节拍顺序、轮数与字数预算也照旧", prompt)
+
+    def test_without_a_message_the_prompt_has_no_extra_section(self):
+        prompt = DialogueGenerator()._user_prompt({"code": "1"})
+
+        self.assertNotIn("本期额外提示", prompt)
+
+    def test_multiline_message_keeps_its_lines_and_loses_the_fluff(self):
+        generator = DialogueGenerator({"dialogue": {"message": "  第一条：重点讲零售  \n\n\t第二条：少提海外  "}})
+
+        self.assertEqual(generator.config.message, "第一条：重点讲零售\n第二条：少提海外")
+        self.assertIn("第一条：重点讲零售\n第二条：少提海外", generator._user_prompt({"code": "1"}))
+
+    def test_overlong_message_is_capped_with_a_visible_marker(self):
+        """误传一个大文件时不能把上下文挤爆，但截断必须留痕。"""
+        message = DialogueGenerator({"dialogue": {"message": "讲" * 5000}}).config.message
+
+        self.assertTrue(message.startswith("讲" * 100))
+        self.assertTrue(message.endswith("已截断）"))
+        self.assertLess(len(message), 4200)
+
+    def test_message_is_written_into_the_script_for_audit(self):
+        """审查页/结果 JSON 要能核对「这期让模型讲了什么」。"""
+        with patch("stocktalk.modules.dialogue_generator.shutil.which", return_value="bl"):
+            script = self._generator("这期重点讲零售息差").generate({"code": "000001", "quote": {"name": "平安银行"}})
+
+        self.assertEqual(script["message"], "这期重点讲零售息差")
+
+    def test_script_omits_the_key_when_no_message_was_given(self):
+        """没用 --message 就不写这个键：默认路径的结果 JSON 不该多出一堆空字段。"""
+        generator = DialogueGenerator(runner=lambda argv, timeout: self._response())
+        with patch("stocktalk.modules.dialogue_generator.shutil.which", return_value="bl"):
+            script = generator.generate({"code": "000001", "quote": {"name": "平安银行"}})
+
+        self.assertNotIn("message", script)
+
+
+class OpeningClosingTests(unittest.TestCase):
+    """开场/收尾的吸引力约束（2026-09-29 复盘驱动）。
+
+    复盘实锤：十期里七期收尾都是「那就看下一期/下一份财报……」——源头就是
+    prompt 里那条收尾示例被模型当成了模板。prompt 是唯一的改造点，所以把
+    「收尾句式必须换」与「开场三秒钩子」钉死在这里。
+    """
+
+    def test_closing_example_is_no_longer_a_fixed_formula(self):
+        """旧示例「那就看下一份财报……」必须从 prompt 里消失。"""
+        generator = DialogueGenerator()
+        system = generator._system_prompt()
+        message = generator._user_prompt({"code": "1"})
+
+        self.assertNotIn("那就看下一份财报应收账款压不压得下来", system)
+        self.assertNotIn("那就看下一份财报应收账款压不压得下来", message)
+        self.assertIn("收尾句式每期必须换", message)
+        self.assertIn("禁止再把「那就看下一", message)
+        # 变量上屏、台词点到即可：收尾不替画面复述「下一期盯什么」
+        self.assertIn("要盯的变量会打在片尾画面上", message)
+
+    def test_opening_three_second_hook_is_required(self):
+        system = DialogueGenerator()._system_prompt()
+
+        self.assertIn("开场三秒", system)
+        self.assertIn("第一句不超过 25 个字", system)
+        self.assertIn("信息缺口", system)
+        self.assertIn("不要用行业定性开场", system)
+
+
 if __name__ == "__main__":
     unittest.main()

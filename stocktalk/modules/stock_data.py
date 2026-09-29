@@ -57,11 +57,15 @@ class StockDataConfig:
     timeout_seconds: float = 90.0
     consistency: str = "allow_stale"
     # F10 blocks that carry the business itself: 公司概况 (主营/行业/管理层),
-    # 经营分析 (主营构成与毛利率), 高管治理 (谁在管), 行业分析 (行业地位与同行),
-    # 热点题材 (概念/风格标签).  财务分析 is deliberately absent: `finance`
-    # already returns those numbers as JSON, and the block alone is ~38K chars
-    # of table text that only crowds the prompt.
-    f10_blocks: tuple[str, ...] = ("公司概况", "经营分析", "高管治理", "行业分析", "热点题材")
+    # 经营分析 (主营构成与毛利率), 财务分析 (多年指标序列与三表科目),
+    # 高管治理 (谁在管), 行业分析 (行业地位与同行), 热点题材 (概念/风格标签).
+    #
+    # 财务分析 过去被排除（`finance` 已经给了当期数字，而这块是 ~38K 字符的
+    # 表格文本，整段进 prompt 只会挤掉别的一切）。2026-09-29 改为**解析后**使用：
+    # 它是历年营收/净利/毛利率/ROE/周转率走势与三表科目变动的唯一真源，原文
+    # 依然不进 prompt，只进结构化结果（见 :meth:`_parse_finance_analysis`）。
+    f10_blocks: tuple[str, ...] = ("公司概况", "经营分析", "财务分析", "高管治理",
+                                   "行业分析", "热点题材")
     news_limit: int = 12
     news_days: int = 0
     # Company fundamentals are mandatory by default: a missing F10/finance
@@ -317,6 +321,17 @@ class StockDataClient:
             content = payload.get("content") if isinstance(payload, Mapping) else None
             sections[block] = content.strip() if isinstance(content, str) else ""
         profile = self._build_company_profile(sections)
+        # TDX 的 F10 块按字节偏移分发，实测读回的块可能从表格中间开始（证券
+        # 简称/所属研究行业这类**块头部**字段会整段消失），块本身却非空——不
+        # 记一笔的话，画面少一张排名图无从查起（2026-09-29）。
+        for block, marker in (("公司概况", "证券简称"), ("行业分析", "所属研究行业")):
+            content = sections.get(block) or ""
+            if content and marker not in content:
+                unavailable.setdefault(block, f"块内容缺少「{marker}」，该块可能从中段读回")
+        if not profile.get("财务历史"):
+            # 不阻断：主营业务仍在，视频主体成立；缺的只是多年走势图，图表层
+            # 会退回别的图。但必须记一笔，否则「这期怎么没走势图」无从查起。
+            unavailable.setdefault("财务分析", "解析不出年度指标序列——本期没有多年走势图")
         if not profile.get("主营业务") and not profile.get("所属行业"):
             raise StockDataError(
                 f"F10 分块已取回但解析不出主营业务/所属行业（空分块: "
@@ -439,6 +454,13 @@ class StockDataClient:
         themes = cls._parse_themes(sections.get("热点题材", ""))
         if themes:
             profile["题材标签"] = themes
+        # 多年财务：有几年数据就能讲几年的事，池子（图表与话题）全靠它做大。
+        finance = cls._parse_finance_analysis(sections.get("财务分析", ""))
+        if finance:
+            profile["财务历史"] = finance
+        composition_history = cls._parse_composition_history(sections.get("经营分析", ""))
+        if len(composition_history) >= 2:
+            profile["主营构成历史"] = composition_history
         return profile
 
     @staticmethod
@@ -465,6 +487,115 @@ class StockDataClient:
         return rows
 
     _COMPOSITION_HEADER = re.compile(r"项目名.*营业收入.*毛利率")
+    _PERIOD_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+    # ------------------------------------------------------------------
+    # 多期财务序列（F10「财务分析」块）
+    # ------------------------------------------------------------------
+    # 该块是若干张 box-drawing 表格，同一个指标同时有「年度表」（最近 5 个
+    # 12-31 加一列最新中期）和「季度表」（最近 6 个报告期）。所有内容都是 TDX
+    # 原文，这里只做搬运与万元→亿元换算，不做任何推导：算不出来的指标宁可不
+    # 给，也绝不凑一个数出来（2026-09-29 扩容图表池时的红线）。
+    #
+    # 块的开头会被 F10 文件切片切掉一部分，导致第一张表**没有列头**。那种表
+    # 不靠猜补列头，而是找一张已知列头的表，要求两者存在同名行且数值完全一致
+    # （实测「资产负债比率(%)」在两侧都是 64.62/61.76/…），校验通过才认列头，
+    # 否则整张表丢弃。
+    _FINANCE_METRICS: dict[str, str] = {
+        # --- 报告期指标表（行名自带单位，逐行判断换算） ---
+        "营业总收(未调整:万)": "营业总收入(亿元)",
+        "归母净利(未调整:万)": "归母净利润(亿元)",
+        "扣非净利润(万)": "扣非净利润(亿元)",
+        "总营收同比增长率(%)": "营收增长率(%)",
+        "营业收入增长率": "营收增长率(%)",
+        "净利润增长率(%)": "净利润增长率(%)",
+        "净利润增长率": "净利润增长率(%)",
+        "加权净资产收益率(%)": "净资产收益率(%)",
+        "净资产收益率": "净资产收益率(%)",
+        "销售毛利率": "销售毛利率(%)",
+        "销售净利率": "销售净利率(%)",
+        "营业利润率": "营业利润率(%)",
+        "总资产净利率": "总资产净利率(%)",
+        "资产负债比率(%)": "资产负债率(%)",
+        "流动比率": "流动比率",
+        "速动比率": "速动比率",
+        "产权比率": "产权比率",
+        "存货周转率": "存货周转率(次)",
+        "应收账款周转率": "应收账款周转率(次)",
+        "流动资产周转率": "流动资产周转率(次)",
+        "固定资产周转率": "固定资产周转率(次)",
+        "总资产周转率": "总资产周转率(次)",
+        "营业利润增长率": "营业利润增长率(%)",
+        "净资产增长率": "净资产增长率(%)",
+        "总资产增长率": "总资产增长率(%)",
+        "基本每股收益(元)": "每股收益(元)",
+        "每股净资产(元)": "每股净资产(元)",
+        "每股经营现金流量(元)": "每股经营现金流(元)",
+        "净利润现金含量(%)": "净利润现金含量(%)",
+        # --- 资产负债表（整表以万元计，表头已标明） ---
+        "货币资金": "货币资金(亿元)",
+        "存货": "存货(亿元)",
+        "应收票据及应收账款": "应收票据及应收账款(亿元)",
+        "合同资产": "合同资产(亿元)",
+        "预付款项": "预付款项(亿元)",
+        "流动资产合计": "流动资产合计(亿元)",
+        "长期股权投资": "长期股权投资(亿元)",
+        "固定资产净额": "固定资产净额(亿元)",
+        "在建工程": "在建工程(亿元)",
+        "无形资产": "无形资产(亿元)",
+        "非流动资产合计": "非流动资产合计(亿元)",
+        "资产总计": "资产总计(亿元)",
+        "应付票据及应付账款": "应付票据及应付账款(亿元)",
+        "合同负债": "合同负债(亿元)",
+        "流动负债": "流动负债(亿元)",
+        "长期借款": "长期借款(亿元)",
+        "非流动负债": "非流动负债(亿元)",
+        "负债合计": "负债合计(亿元)",
+        "资本公积金": "资本公积金(亿元)",
+        "未分配利润": "未分配利润(亿元)",
+        "归属母公司权益": "归属母公司权益(亿元)",
+        "股东权益合计": "股东权益合计(亿元)",
+        # --- 利润表 ---
+        "营业总收入": "营业总收入(亿元)",
+        "营业总成本": "营业总成本(亿元)",
+        "营业税金及附加": "营业税金及附加(亿元)",
+        "销售费用": "销售费用(亿元)",
+        "管理费用": "管理费用(亿元)",
+        "财务费用": "财务费用(亿元)",
+        "资产减值损失": "资产减值损失(亿元)",
+        "投资收益": "投资收益(亿元)",
+        "营业利润": "营业利润(亿元)",
+        "利润总额": "利润总额(亿元)",
+        "所得税": "所得税(亿元)",
+        "净利润": "净利润(亿元)",
+        "归属母公司净利润": "归母净利润(亿元)",
+        # --- 现金流量表 ---
+        "经营活动现金流入": "经营活动现金流入(亿元)",
+        "经营活动现金流出": "经营活动现金流出(亿元)",
+        "经营活动现金流量净额": "经营活动现金流量净额(亿元)",
+        "投资活动现金流入": "投资活动现金流入(亿元)",
+        "投资活动现金流出": "投资活动现金流出(亿元)",
+        "投资活动现金流量净额": "投资活动现金流量净额(亿元)",
+        "筹资活动现金流入": "筹资活动现金流入(亿元)",
+        "筹资活动现金流出": "筹资活动现金流出(亿元)",
+        "筹资活动现金流量净额": "筹资活动现金流量净额(亿元)",
+        "现金及等价物净增加额": "现金及等价物净增加额(亿元)",
+    }
+    # 上屏优先序：最常被讨论的指标在前。图表按精确名取，prompt 按这个顺序取前
+    # 若干个，所以把「讲生意」用得最多的指标排在前面。
+    _FINANCE_PRIORITY: tuple[str, ...] = (
+        "营业总收入(亿元)", "归母净利润(亿元)", "销售毛利率(%)",
+        "净资产收益率(%)", "净利润(亿元)", "营收增长率(%)", "净利润增长率(%)",
+        "经营活动现金流量净额(亿元)", "资产负债率(%)", "存货(亿元)",
+        "应收票据及应收账款(亿元)", "合同负债(亿元)", "资产总计(亿元)",
+        "负债合计(亿元)", "归属母公司权益(亿元)", "投资活动现金流量净额(亿元)",
+        "筹资活动现金流量净额(亿元)", "未分配利润(亿元)", "营业总成本(亿元)",
+        "财务费用(亿元)", "销售费用(亿元)", "管理费用(亿元)", "投资收益(亿元)",
+        "存货周转率(次)", "应收账款周转率(次)", "流动比率", "速动比率",
+        "每股收益(元)", "每股净资产(元)",
+    )
+    # 缺列头的表格补列头时必须命中其中之一，避免拿一张不相干的表去套。
+    _FINANCE_HEADER_ANCHORS: tuple[str, ...] = ("资产负债比率(%)", "流动比率", "销售毛利率")
 
     @classmethod
     def _parse_main_composition(cls, text: str, limit: int = 8) -> dict[str, Any]:
@@ -499,6 +630,280 @@ class StockDataClient:
             if len(rows) >= limit:
                 break
         return {"报告期": period, "明细": rows} if rows else {}
+
+    @classmethod
+    def _parse_composition_history(cls, text: str, periods: int = 5,
+                                   rows: int = 7) -> list[dict[str, Any]]:
+        """经营分析的**多期**主营构成，最新一期在前。
+
+        :meth:`_parse_main_composition` 只留最新一期（图板只需要当下结构），
+        但「哪块业务这几年在长、哪块的毛利率在掉」只能从多个报告期里看出来，
+        这正是让每期视频按个股讲出特点的原料。折行规则与它一致：项目名被 TDX
+        按宽度拆到下一行时（``自动化装配与检测生产线及系统集成(`` + ``产品)``），
+        续行只有一格，接回上一行而不是当成一条新记录。
+        """
+        history: list[dict[str, Any]] = []
+        period, current, in_table, pending = "", [], False, None
+
+        def flush() -> None:
+            if not period or not current:
+                return
+            picked = [row for row in current if "(产品)" in row["项目"]] or current
+            history.append({"报告期": period, "明细": picked[:rows]})
+
+        for line in text.splitlines():
+            stripped = line.strip()
+            if stripped.startswith("截止日期"):
+                flush()
+                if len(history) >= periods:
+                    return history[:periods]
+                period = re.split(r"[:：]", stripped, maxsplit=1)[-1].strip()
+                current, in_table, pending = [], False, None
+                continue
+            if not period or "───" in stripped:
+                continue
+            if cls._COMPOSITION_HEADER.search(stripped):
+                in_table = True
+                continue
+            if not in_table:
+                continue
+            cells = [cell.strip() for cell in re.split(r"\s{2,}", stripped) if cell.strip()]
+            if len(cells) < 3:
+                if cells and len(cells) == 1 and pending is not None:
+                    current[pending]["项目"] += cells[0]
+                continue
+            current.append({"项目": cells[0], "收入": cells[1],
+                            "收入占比(%)": cells[2], "毛利率(%)": cells[-1]})
+            pending = len(current) - 1
+        flush()
+        return history[:periods]
+
+    # ------------------------------------------------------------------
+    # F10 财务分析块 → 多期序列
+    # ------------------------------------------------------------------
+    @classmethod
+    def _box_tables(cls, text: str) -> list[dict[str, Any]]:
+        """把 box-drawing 表格切成 ``{"header": [...] | None, "rows": [[...]]}``。
+
+        连续以 ``│`` 开头的行属于同一张表。列头行靠第二格是报告期来认
+        （``YYYY-MM-DD``，因为第一列是行标签）。块开头被切片切掉列头的表也
+        照样收下，交给 :meth:`_adopt_header` 交叉校验后再用。
+        """
+        tables: list[dict[str, Any]] = []
+        current: dict[str, Any] | None = None
+        for line in text.splitlines():
+            stripped = line.strip()
+            # `├───┼───┤` 是表内分隔线，`└───┴───┘` 是表尾——都不是新表的开始，
+            # 早期版本把它们当成「非表格行」重置了 current，结果表头和数据行被
+            # 拆进两张表，整块序列全空。
+            if stripped.startswith("├") or stripped.startswith("└"):
+                continue
+            if not stripped.startswith("│"):
+                current = None
+                continue
+            cells = [cell.strip() for cell in stripped.split("│")[1:-1]]
+            if len(cells) < 2:
+                continue
+            if current is None:
+                current = {"header": None, "rows": []}
+                tables.append(current)
+            if current["header"] is None and cls._PERIOD_RE.match(cells[1]):
+                current["header"] = cells
+            else:
+                current["rows"].append(cells)
+        return tables
+
+    @staticmethod
+    def _same_numbers(left: Sequence[str], right: Sequence[str]) -> bool:
+        if len(left) != len(right):
+            return False
+        for a, b in zip(left, right):
+            x, y = StockDataClient._number(a), StockDataClient._number(b)
+            if x is None or y is None:
+                if a != b:
+                    return False
+                continue
+            if abs(x - y) > 1e-6:
+                return False
+        return True
+
+    @classmethod
+    def _adopt_header(cls, orphan: Mapping[str, Any],
+                      known: Sequence[Mapping[str, Any]]) -> list[str] | None:
+        """给缺列头的表借一列头——只在同名行数值完全一致时才认。
+
+        F10 文件是按字节切片分块的，「财务分析」块的第一张表常常丢掉列头
+        （曲线救国去猜年份是绝对不行的：年份错了整条走势就是假数据）。这里
+        拿它和同块内列头完好的表比对锚点指标（资产负债比率/流动比率/销售毛利
+        率），数值逐列相同才采用对方的列头，否则返回 None、整张表丢弃。
+        """
+        rows = [row for row in (orphan.get("rows") or []) if row and row[0]]
+        if not rows:
+            return None
+        # 不要求整张表等宽：切片切断的那一行会短两个格子（首格只剩 ``53``），
+        # 一旦拿它的长度当基准，真正能对上号的锚点行反而被自己的宽度检查挡掉。
+        # 所以逐行比对，宽度以**候选表的列头**为准。
+        for candidate in known:
+            header = candidate.get("header")
+            if not header:
+                continue
+            others = [row for row in (candidate.get("rows") or []) if row and len(row) == len(header)]
+            for row in rows:
+                if row[0] not in cls._FINANCE_HEADER_ANCHORS or len(row) != len(header):
+                    continue
+                match = next((other for other in others if other[0] == row[0]), None)
+                if match is not None and cls._same_numbers(row[1:], match[1:]):
+                    return list(header)
+        return None
+
+    @staticmethod
+    def _metric_value(label: str, table_unit: str, value: float) -> float:
+        """换算到上屏单位。金额一律亿元，比率/周转率/每股指标保持原值。
+
+        单位有两个来源：报告期指标表的**行名**自带 ``(万)``/``(元)``，而三大
+        报表整表的**表头**写的是 ``资产负债指标(万元)``。比率行（``(%)``）无论
+        落在哪张表里都不能换算——把 12.48% 变成 0.0012 是最难查的那类错。
+        """
+        if any(token in label for token in ("(%)", "(元)", "(次)", "(万股)")):
+            return round(value, 4)
+        if "万" in label or table_unit in ("万元", "万股"):
+            return round(value * 1e-4, 2)
+        return round(value, 4)
+
+    @classmethod
+    def _series_from_tables(cls, tables: Sequence[Mapping[str, Any]],
+                            *, annual: bool) -> dict[str, Any]:
+        """把若干张指标表合并成 ``{"报告期": [...], "指标": {名: [值]}}``（升序）。"""
+        columns: dict[str, int] = {}
+        metrics: dict[str, dict[str, float]] = {}
+        for table in tables:
+            header = table.get("header") or []
+            index = {header[i]: i for i in range(1, len(header))
+                     if cls._PERIOD_RE.match(header[i]) and (not annual or header[i].endswith("-12-31"))}
+            if len(index) < 3:
+                continue
+            table_unit = "万元" if "万元" in header[0] else "万股" if "万股" in header[0] else ""
+            for period in index:
+                columns.setdefault(period, len(columns))
+            for row in (table.get("rows") or []):
+                if len(row) != len(header) or not row[0]:
+                    continue
+                name = cls._FINANCE_METRICS.get(row[0])
+                if not name:
+                    continue
+                bucket = metrics.setdefault(name, {})
+                for period, column in index.items():
+                    value = cls._number(row[column])
+                    if value is not None:
+                        bucket.setdefault(period, cls._metric_value(row[0], table_unit, value))
+        periods = sorted(columns)
+        series = {name: [bucket.get(period) for period in periods] for name, bucket in metrics.items()}
+        # 只有一个点的指标画不出走势，直接不要——留着只会让模型以为它是趋势。
+        series = {name: values for name, values in series.items()
+                  if sum(value is not None for value in values) >= 2}
+        if not series:
+            return {}
+        ordered = {name: series[name] for name in cls._FINANCE_PRIORITY if name in series}
+        for name, values in series.items():
+            ordered.setdefault(name, values)
+        return {"报告期": periods, "指标": ordered}
+
+    @classmethod
+    def trim_history_for_prompt(cls, history: Any, max_metrics: int = 12) -> dict[str, Any]:
+        """给 prompt 的精简版财务历史：只留最常讨论的指标。
+
+        全量序列有 60+ 个指标，整包塞进 prompt 只会稀释注意力；图表层拿的是
+        全量（按指标名精确取值），这里按 :data:`_FINANCE_PRIORITY` 取前面一批，
+        让模型把注意力花在真正会被讨论的数字上。
+        """
+        if not isinstance(history, Mapping):
+            return {}
+        trimmed: dict[str, Any] = {}
+        for scope in ("年度", "季度"):
+            series = history.get(scope)
+            if not isinstance(series, Mapping):
+                continue
+            metrics = series.get("指标") if isinstance(series.get("指标"), Mapping) else {}
+            order = [name for name in cls._FINANCE_PRIORITY if name in metrics]
+            extras = [name for name in metrics if name not in order]
+            keep = set((order + extras)[:max_metrics])
+            trimmed[scope] = {"报告期": list(series.get("报告期") or []),
+                              "指标": {name: metrics[name] for name in metrics if name in keep}}
+        if isinstance(history.get("科目变动"), Mapping):
+            trimmed["科目变动"] = history["科目变动"]
+        return trimmed
+
+    @classmethod
+    def _parse_metric_changes(cls, text: str) -> dict[str, Any]:
+        """【6.指标变动说明】：三表关键科目的本期/上期数值与变动率。
+
+        TDX 把长科目名按显示宽度折成多行（``经营活动产生`` / ``的现金流量净``
+        / ``额``），这里把数值列全空的续行接回上一条，否则现金流量表那三行
+        会变成三个毫无意义的词。
+        """
+        lines = text.splitlines()
+        start = next((i for i, line in enumerate(lines) if line.strip().startswith("【6.")), -1)
+        if start < 0:
+            return {}
+        period, rows = "", []
+        for line in lines[start:start + 160]:
+            stripped = line.strip()
+            if stripped.startswith("截止日期"):
+                if rows:
+                    break  # 只要最新一期
+                period = re.split(r"[:：]", stripped, maxsplit=1)[-1].strip()
+                continue
+            if not stripped.startswith("│"):
+                continue
+            cells = [cell.strip() for cell in stripped.split("│")[1:-1]]
+            if len(cells) < 5 or "变动科目" in cells[0]:
+                continue
+            current, previous, rate = (cls._number(cells[2]), cls._number(cells[3]), cls._number(cells[4]))
+            if current is None and previous is None:
+                if rows and cells[0]:
+                    rows[-1]["科目"] += cells[0]
+                continue
+            if not cells[0]:
+                continue
+            rows.append({"科目": cells[0],
+                         "本期(亿元)": round(current * 1e-4, 2) if current is not None else None,
+                         "上期(亿元)": round(previous * 1e-4, 2) if previous is not None else None,
+                         "变动率(%)": rate})
+        return {"报告期": period, "明细": rows} if rows else {}
+
+    @classmethod
+    def _parse_finance_analysis(cls, text: str) -> dict[str, Any]:
+        """「财务分析」块 → 年度序列 + 季度序列 + 三表科目变动。
+
+        全部来自 TDX 原文；解析不出来的部分就不出现（图表层拿不到数据会退回
+        别的图，而不是画一条编出来的线）。
+        """
+        tables = cls._box_tables(text)
+        with_header = [table for table in tables if table["header"]]
+        for orphan in (table for table in tables if not table["header"]):
+            adopted = cls._adopt_header(orphan, with_header)
+            if adopted:
+                orphan["header"] = adopted
+                with_header.append(orphan)
+        annual_tables, quarterly_tables = [], []
+        for table in with_header:
+            header = table["header"]
+            periods = [i for i in range(1, len(header)) if cls._PERIOD_RE.match(header[i])]
+            if len(periods) < 3:
+                continue
+            if sum(1 for i in periods if header[i].endswith("-12-31")) >= 3:
+                annual_tables.append(table)
+            else:
+                quarterly_tables.append(table)
+        result: dict[str, Any] = {}
+        for key, tables_for_key, annual in (("年度", annual_tables, True), ("季度", quarterly_tables, False)):
+            series = cls._series_from_tables(tables_for_key, annual=annual)
+            if series:
+                result[key] = series
+        changes = cls._parse_metric_changes(text)
+        if changes:
+            result["科目变动"] = changes
+        return result
 
     _EXECUTIVE_TITLES = ("董事长", "总经理", "财务总监", "董秘", "副总经理")
 

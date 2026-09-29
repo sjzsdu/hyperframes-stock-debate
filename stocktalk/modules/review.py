@@ -129,7 +129,8 @@ def render_review_html(*, tag: str, stock_name: str, stock_code: str, created_at
                        arc: Mapping[str, Any] | None = None,
                        rewrites: Sequence[Mapping[str, str]] = (),
                        cta: Mapping[str, Any] | None = None,
-                       arc_notes: Sequence[str] = ()) -> str:
+                       arc_notes: Sequence[str] = (),
+                       message: str = "") -> str:
     return _environment().get_template("review.html.j2").render(
         tag=tag, video_tag=tag, stock_name=stock_name, stock_code=stock_code, created_at=created_at,
         turns=turns, duration=f"{duration:.0f}" if duration else "—",
@@ -137,7 +138,7 @@ def render_review_html(*, tag: str, stock_name: str, stock_code: str, created_at
         title=title, description=description, tags=tags,
         issues=list(issues), disclaimers=disclaimers,
         arc=dict(arc or {}), rewrites=list(rewrites), cta=dict(cta or {}),
-        arc_notes=list(arc_notes),
+        arc_notes=list(arc_notes), message=str(message or ""),
     )
 
 
@@ -175,6 +176,9 @@ def write_review_page(output_dir: str | Path, tag: str, *, stock_name: str, stoc
         rewrites=[r for r in (script.get("compliance_rewrites") or ()) if isinstance(r, Mapping)],
         cta=cta,
         arc_notes=[str(note) for note in script.get("arc_notes", ()) or ()],
+        # 本期提示词（--message / dialogue.message）来自脚本本身，所以三条发布路径
+        # （--publish-only / --republish 从 sidecar 读回剧本）都能照原样显示。
+        message=str(script.get("message") or ""),
     )
     path = Path(output_dir) / f"{tag}.review.html"
     path.write_text(html, encoding="utf-8")

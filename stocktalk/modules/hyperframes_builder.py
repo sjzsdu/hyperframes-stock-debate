@@ -51,19 +51,103 @@ DEFAULT_SAFE_AREA: dict[str, tuple[int, int]] = {"vertical": (240, 460), "horizo
 # Horizontal cuts only clear the progress bar, so 70 both sides is enough.
 DEFAULT_SAFE_SIDE: dict[str, tuple[int, int]] = {"vertical": (115, 115), "horizontal": (70, 70)}
 
-# Discussion topics, detected from the dialogue text itself. The first matching
-# entry wins, so specific topics precede generic ones.
-TOPICS: dict[str, tuple[str, tuple[str, ...]]] = {
-    "money": ("量价资金", ("量能", "资金", "换手", "成交", "主力", "筹码", "入场", "流出", "流入")),
-    "risk": ("风险与回撤", ("风险", "不确定", "警惕", "下行", "回撤", "波动", "分歧", "抛压", "概率", "仓位", "边界", "不良")),
-    "valuation": ("估值水平", ("估值", "pe", "pb", "市盈", "市净", "贵不贵", "溢价", "泡沫")),
-    "sentiment": ("市场情绪", ("情绪", "心理", "信心", "恐慌", "预期", "上头", "失望", "乐观", "悲观", "故事", "叙事", "共识")),
-    "financial": ("财务与业绩", ("营收", "利润", "收入", "毛利", "净利", "roe", "财报", "业绩", "现金流", "费用", "负债", "盈利", "成本")),
-    "news": ("近期资讯", ("资讯", "新闻", "研报", "快讯", "公告", "报道", "消息面", "评级", "券商")),
-    "industry": ("行业与业务", ("行业", "赛道", "格局", "竞争", "对手", "同业", "竞品", "份额", "市占", "天花板", "空间", "周期", "产业链", "渠道", "经销商", "政策", "消费", "需求", "供给", "产能", "壁垒", "护城河", "品牌", "公司", "业务", "商业", "管理层", "产品", "提价", "库存")),
-    "technical": ("技术走势", ("k线", "均线", "技术", "macd", "指标", "走势", "趋势", "多头排列", "空头排列", "死叉", "金叉", "信号", "强度", "rsi", "kdj", "布林", "压力位", "支撑位", "突破", "回调", "振幅")),
-    "outlook": ("后市关注", ("接下来", "未来", "后续", "观察", "验证", "催化剂", "展望", "预期差", "跟踪")),
+# 论点 → 中央图表的显式绑定（2026-09-29 用户评审后重写）。
+# 旧方案是「关键词表定 topic + 图表轮播队列」：topic 表按顺序命中第一个关键词
+# （「资金」会把经营现金流判成量价资金、「概率」会把毛利率论点判成风险），命中的
+# topic 只决定候选池，具体出哪张图由 borrow/LRU 队列决定——结果就是旁白讲存货、
+# 画面轮到行业排名这种错位。新方案把因果倒过来：
+#
+#   1. 先按台词给这一段「论点」归类（ARGUMENTS，强/弱词打分，并列取靠前者）；
+#   2. 论点直接映射语义正确的中央图（ARGUMENT_CHARTS），数据缺失才依次后退；
+#   3. 同一论点连续出现时，在语义等价的候选图之间轮换（避免同图连播），但绝不
+#      为了换图而借一张和论点无关的图——重复一张对的图好过一张错的新图。
+#
+# 顺序即并列时的优先级：具体数据论点（存货/现金流/毛利）排在泛化论点之前。
+ARGUMENTS: tuple[tuple[str, str, tuple[str, ...], tuple[str, ...]], ...] = (
+    # (id, 图板标题, 强信号词×2分, 弱信号词×1分)
+    #
+    # 多年财务论点（2026-09-29 扩容）：F10 财务分析块自带 5 年年度序列与
+    # 三大报表科目，这里是它们进入「讨论范围」的入口。趋势类必须排在同名
+    # 当期论点**之前**——并列时先到者胜，而「毛利率从 7.5% 爬到 14.6%」
+    # 这种句子同时命中两者，该给走势图而不是结构图。
+    ("profit_trend", "业绩趋势",
+     ("历年", "逐年", "这几年", "五年", "三年来", "连年", "一路", "年报"),
+     ("净利", "利润", "业绩", "营收", "下滑")),
+    ("margin_trend", "毛利率走势",
+     ("毛利率走", "毛利率一", "毛利率连", "毛利率从", "毛利率掉", "毛利率爬", "毛利率降"),
+     ("毛利率",)),
+    ("roe_trend", "股东回报",
+     ("净资产收益率", "roe", "赚钱能力", "股东回报"), ()),
+    ("balance_sheet", "资产与负债",
+     ("负债率", "资产负债", "借款", "偿债", "杠杆", "家底", "货币资金", "流动比率"),
+     ("负债", "资产")),
+    ("inventory", "存货与减值",
+     ("存货", "库存", "减值", "积压", "滞销"), ()),
+    ("receivable", "回款与占用",
+     ("应收", "回款", "占款", "挂账", "回笼", "压钱", "垫资"), ()),
+    ("cashflow", "现金流",
+     ("现金流", "经营活动", "投资活动", "筹资活动", "现金净额", "自由现金流"), ()),
+    ("margin", "盈利结构",
+     ("毛利率", "毛利"), ()),
+    ("peers", "同业竞争",
+     ("议价权", "同行", "竞对", "竞争对手", "价格战", "市占", "份额", "同业", "对手", "排名"),
+     ("竞争", "格局", "护城河", "替代")),
+    ("news", "政策与资讯",
+     ("快讯", "政策", "新闻", "公告", "规划", "集群", "园区", "印发", "试点", "会议", "研报"),
+     ("概念", "题材", "消息面", "消息", "报道", "资讯")),
+    ("profit", "利润表现",
+     ("净利", "亏损", "盈利", "利润", "盈亏"), ()),
+    ("revenue", "收入构成",
+     ("收入", "营收", "占比", "业务结构", "构成"), ("占", "贡献", "主业")),
+    ("valuation", "估值水平",
+     ("估值", "市盈", "市净", "pe", "pb"), ("贵", "泡沫", "溢价")),
+    ("technical", "技术走势",
+     ("k线", "均线", "macd", "kdj", "rsi", "布林", "金叉", "死叉", "压力位", "支撑位"),
+     ("走势", "趋势", "回调", "突破", "振幅")),
+    ("money", "量价资金",
+     ("量能", "换手", "成交额", "主力", "筹码", "流入", "流出", "封单"),
+     ("放量", "缩量", "成交")),
+    ("sentiment", "市场情绪",
+     ("情绪", "恐慌", "信心", "叙事", "共识", "上头", "失望"), ("预期", "故事", "乐观", "悲观")),
+    ("business", "业务与客户",
+     ("客户", "订单", "续单", "复购", "续购"),
+     ("方案", "产业链", "渠道", "经销商", "交付", "业务", "产品", "模式", "产能", "供应")),
+    ("outlook", "后市关注",
+     ("下一份", "下一期", "下期", "接下来"), ("未来", "观察", "验证", "跟踪", "后续")),
+)
+
+# 每个论点的中央图候选，按语义贴合度排序。只有语义上真能支撑该论点的图才许
+# 进候选：存货/现金流只有营运占用图，绝不为了「换换花样」借排名或瀑布图。
+ARGUMENT_CHARTS: dict[str, tuple[str, ...]] = {
+    # 多年财务：数据缺失时退到语义相邻的下一张图，不退到无关的图。
+    "profit_trend": ("profit_trend", "waterfall"),
+    "margin_trend": ("margin_trend", "composition"),
+    "roe_trend": ("roe_trend", "profit_trend"),
+    "balance_sheet": ("balance_sheet", "cashflow_statement"),
+    "inventory": ("working_capital",),
+    "receivable": ("working_capital",),
+    # 讲「经营/投资/筹资活动」时先给真正的现金流量表；同一论点连播再换到
+    # 讲「钱压在哪」的营运占用图。
+    "cashflow": ("cashflow_statement", "working_capital"),
+    "margin": ("composition", "mindmap"),      # 两张图都逐业务标注毛利率
+    "peers": ("ranking", "composition"),
+    "news": ("timeline",),
+    # 亏损股画不了利润阶梯（负值柱进不了漏斗）→ 落到历年净利走势，
+    # composition 只是最后兜底；002912 这期「讲亏损却配收入构成」就是这么来的。
+    "profit": ("waterfall", "profit_trend", "composition"),
+    "revenue": ("composition", "mindmap"),
+    "valuation": ("waterfall", "ranking"),
+    "technical": ("kline",),
+    "money": ("kline",),
+    "sentiment": ("kline", "waterfall"),
+    "business": ("mindmap", "composition"),
+    "outlook": ("kline", "waterfall"),
+    # 兜底：没有命中任何论点时按「公司与行业」处理
+    "industry": ("mindmap", "composition"),
 }
+
+# 论点候选全缺数据时的后退序列：业务总览 → 收入构成 → 真实K线，绝不空板。
+ARGUMENT_FALLBACK_CHARTS: tuple[str, ...] = ("mindmap", "composition", "kline")
 
 # Board membership is derived from the symbol prefix, which is the only
 # classification available without an F10 feed (that endpoint is not installed
@@ -118,6 +202,28 @@ class StockIdentity:
     @property
     def accent_soft(self) -> str:
         return f"hsl({self.hue} 72% 62% / .16)"
+
+
+# ---------------------------------------------------------------------------
+# 业务简称：F10 主营构成的官方明细名常是「自动化装配与检测生产线」这类长名，
+# 图板截成「自动化装配与检测生」难读，旁白又各叫各的（「产线集成」）。渲染与
+# dialogue prompt 两侧统一走这一个函数，观众看到和听到的就是同一个词。
+_LABEL_SUFFIXES = ("生产线", "成套设备", "自动化成", "成套", "集成系统", "系统", "设备", "工程", "服务", "业务", "项目")
+
+
+def short_business_label(name: str) -> str:
+    """官方业务名 → 图板与旁白共用的短名。确定性规则，不丢主语。"""
+    text = str(name or "").strip()
+    text = text.replace("(产品)", "").replace("(地区)", "").replace("(销售模式)", "").strip()
+    for suffix in _LABEL_SUFFIXES:
+        if text.endswith(suffix) and len(text) - len(suffix) >= 4:
+            text = text[:-len(suffix)]
+            break
+    if len(text) > 6:
+        head = text.split("与", 1)[0]
+        if len(head) >= 4:
+            text = head
+    return text
 
 
 def _number_safe_break_positions(text: str) -> set[int]:
@@ -402,14 +508,13 @@ class HyperFramesBuilder:
                 turns_by_line[line] = turn
 
         def meta_for(line: str, character: str) -> tuple[str, str, list[str]]:
-            # kicker 文本已下线（2026-09-23：beat key「books/occupied」这类骨架
-            # 内部代号对观众无意义，图板 SVG 自带中文标题）；这里仍返回
-            # topic_title 供图板左上角的小标签使用，beat 只留在脚本结构里。
+            # 图板标题与中央图都由「论点」决定（ARGUMENTS）：旁白讲什么，
+            # 画面就出什么。这里只做归类；选图在 _turn_chart。
             turn = turns_by_line.get(line)
             keywords = [to_display(str(x)) for x in ((turn or {}).get("visual") or []) if str(x).strip()]
             if not keywords:
                 keywords = self._keywords_for(line, character)
-            topic_key, topic_title = self._visual_topic(line)
+            topic_key, topic_title = self._turn_argument(line)
             return topic_key, topic_title, keywords
 
         def short_for(line: str) -> bool:
@@ -611,13 +716,38 @@ class HyperFramesBuilder:
         slots["visual"] = self._merge_slot(visual_entries)
         return slots
 
+    @classmethod
+    def _turn_argument(cls, line: str) -> tuple[str, str]:
+        """把一段台词归到「论点」，返回 (论点 id, 图板标题)。
+
+        强信号词每词 2 分、弱信号词每词 1 分，取总分最高的论点；并列时取
+        ARGUMENTS 里靠前的（具体数据论点优先于泛化论点）。一个词都没命中
+        就落回「公司与行业」。只看台词本身——visual 关键词是展示层标签，
+        不是旁白内容，不参与归类（否则 -1.89亿净利润 会把快讯论点拽向利润）。
+        """
+        normalized = str(line or "").lower().replace(" ", "")
+        best_id, best_title, best_score = "industry", "公司与行业", 0
+        for arg_id, title, strong, weak in ARGUMENTS:
+            score = 2 * cls._proof_count(strong, normalized) + cls._proof_count(weak, normalized)
+            if score > best_score:
+                best_id, best_title, best_score = arg_id, title, score
+        return best_id, best_title
+
     @staticmethod
-    def _visual_topic(text: str) -> tuple[str, str]:
-        normalized = text.lower().replace(" ", "")
-        for key, (title, terms) in TOPICS.items():
-            if any(term in normalized for term in terms):
-                return key, title
-        return "industry", "公司与行业"
+    def _proof_count(terms: Sequence[str], text: str) -> int:
+        """命中的词条数，但被更长命中词包含的词条不重复计数。
+
+        「毛利率」与「毛利」同时命中是**同一个证据的两种写法**，不是两条证据。
+        不去重的话「销售毛利率从 7.57% 爬到 14.62%」会因为多命中一个「毛利」
+        而把走势论点（强词「毛利率从」）压回结构论点，画面就成了结构图而不是
+        走势图（2026-09-29 实测）。
+        """
+        matched = sorted((term for term in terms if term in text), key=len, reverse=True)
+        counted: list[str] = []
+        for term in matched:
+            if not any(term in longer for longer in counted):
+                counted.append(term)
+        return len(counted)
 
     def _keywords_for(self, line: str, character: str) -> list[str]:
         """Extract up to 4 on-screen keywords from the spoken line itself."""
@@ -653,9 +783,19 @@ class HyperFramesBuilder:
     def _duration(self, segments: list[Mapping[str, Any]], timeline: Mapping[str, Any]) -> float:
         end = max((float(x["start"]) + float(x["duration"]) for x in segments), default=0.)
         total = round(max(1., self._float(timeline.get("total_duration"), 0.), end, self._float(self.video_config.get("duration"), 0.)), 3)
-        # Intro fade-in (0.45s) and outro recap (0.45s) pad the composition with
-        # a natural opening and closing instead of hard cuts at both ends.
-        return round(total + (0.9 if segments else 0.), 3)
+        # Intro fade-in (0.45s) pads the head; the tail holds the outro card for
+        # `outro_hold_seconds` (default 2.4s) after the last word lands — a video
+        # that cuts to black the instant the voice stops reads as truncated
+        # (2026-09-29 review: 收尾只有 2.6 秒、话音没落就结束).
+        return round(total + 0.45 + self._outro_hold, 3)
+
+    @property
+    def _outro_hold(self) -> float:
+        try:
+            hold = float(self.video_config.get("outro_hold_seconds", 2.4))
+        except (TypeError, ValueError):
+            hold = 2.4
+        return max(0.45, hold)
 
     def _copy_assets(self, directory: Path) -> None:
         for name in ("stock-debate.css", "stock-debate.js", "gsap.min.js"):
@@ -791,15 +931,15 @@ class HyperFramesBuilder:
         if not history:
             history = self._real_close_bars(technical)
         visuals = self._visuals(quote, financials, history, f10, technical, news)
-        # One shared "already shown" set: within a single video the chart
-        # library rotates, so the five turns don't all draw the same candles.
-        used_charts: set[str] = set()
-        chart_history: list[str] = []
-        rendered_segments = [
-            dict(segment,
-                 visual=self._turn_board_svg(segment, quote, history, technical, news,
-                                             financials, f10, used_charts, chart_history))
-            for segment in segments]
+        # One-element state: which chart the previous turn showed, so a same
+        # argument can rotate between semantically equal charts instead of
+        # repeating itself — but never borrow an unrelated chart.
+        chart_state: list[str] = [""]
+        rendered_segments: list[dict[str, Any]] = []
+        for segment in segments:
+            rendered_segments.append(dict(segment,
+                                          visual=self._turn_board_svg(segment, quote, history, technical, news,
+                                                                      financials, f10, chart_state)))
         cta = self._cta_payload(script)
         if cta and len(rendered_segments) > 1:
             # 片尾把最后一块图板换成互动图板（多空立场 + 下期盯什么 + 一个真问题）。
@@ -823,6 +963,10 @@ class HyperFramesBuilder:
             # 原来的写法。
             outro_title=self._text(self._outro_title(cta, stock_name)),
             outro_tip=self._text(self._outro_tip(cta)),
+            # 收尾留白：片尾卡在最后一句话音落下后还要停留多久（2026-09-29 评审：
+            # 0.45s 的片尾等于话音没落就黑屏）。_duration 会把同样的留白加进
+            # 总时长，所以这里只改片尾卡出场时刻，不挤占正文。
+            outro_hold=self._outro_hold,
             outro_svg=visuals["outro"],
             duration=duration,
             theme=str(self.video_config.get("theme", "dark")),
@@ -1116,14 +1260,14 @@ class HyperFramesBuilder:
     def _turn_board_svg(self, segment: Mapping[str, Any], quote: Mapping[str, Any],
                         bars: list[Any], technical: Mapping[str, Any], news: Mapping[str, Any] | None,
                         financials: Mapping[str, Any] | None = None, f10: Mapping[str, Any] | None = None,
-                        used_charts: set[str] | None = None,
-                        chart_history: list[str] | None = None) -> str:
+                        chart_state: list[str] | None = None) -> str:
         """A visual unique to the spoken turn: the real facts the line mentions
-        plus a topic-matched chart.
+        plus the chart BOUND to the turn's argument.
 
-        The chart rotates through the chart library — business mindmap,
-        revenue-composition bars, profit waterfall, news timeline, mini K-line —
-        so consecutive turns don't all look like the same candlestick chart.
+        The argument is classified from the line in `_segments` (存货→营运占用,
+        毛利率→收入构成/业务拆解, 同行→排名标尺…), so the chart always shows
+        what the narration is talking about.  ``chart_state`` is a one-element
+        list carrying the previous turn's chart id across the whole video.
         Horizontal boards are wide, so facts sit in a left column beside the
         chart; vertical panels are taller than wide, so the board STACKS — a
         facts strip across the top, the chart below at full width (2026-09-19
@@ -1132,7 +1276,8 @@ class HyperFramesBuilder:
         """
         line = str(segment.get("line") or "")
         topic = str(segment.get("topic") or "industry")
-        topic_title = html.escape(str(segment.get("topic_title") or "公司与行业"))
+        topic_title = html.escape(str(segment.get("topic_title")
+                                      or dict((a[0], a[1]) for a in ARGUMENTS).get(topic, "公司与行业")))
         facts = self._turn_facts(line, quote, bars, technical)
         # Horizontal panels are height-bound (inner ≈1394×356, aspect 3.9): a
         # 1160-wide board floats between dead margins.  Stretch the board to
@@ -1148,11 +1293,14 @@ class HyperFramesBuilder:
         parts.append(f'<text x="52" y="50" class="snap-label" style="font-size:20px;letter-spacing:2px">{topic_title}</text>')
         keywords = [str(k).strip() for k in (segment.get("keywords") or []) if str(k).strip()]
         ctx = {"bars": bars, "quote": quote, "keywords": keywords,
+               "argument": topic,
                "f10": f10 if isinstance(f10, Mapping) else {},
                "financials": financials if isinstance(financials, Mapping) else {},
                "news": news if isinstance(news, Mapping) else {}}
-        chart = self._turn_chart(topic, used_charts if used_charts is not None else set(),
-                                 ctx, chart_history if chart_history is not None else [])
+        last_chart = (chart_state or [""])[0]
+        chart, shown_chart = self._turn_chart(topic, ctx, last_chart)
+        if chart_state is not None:
+            chart_state[0] = shown_chart
         # Speech-tied focus caption: guarantees each turn's card is distinct and
         # visibly tied to exactly what is being said (keywords are LLM labels,
         # never fabricated numbers).
@@ -1357,88 +1505,61 @@ class HyperFramesBuilder:
         return ''.join(out)
 
     # ------------------------------------------------------------------
-    # Chart library — the right half of a turn board is no longer always a
-    # mini K-line.  Each topic has a candidate rotation; within one video a
-    # chart that was already shown is skipped while alternatives exist, so a
-    # finished video is a *mix* of charts instead of five identical candles.
+    # Chart library — the central chart is BOUND to the turn's argument,
+    # not dealt from a rotation queue (2026-09-29 review: 7 of 10 turns
+    # showed a chart unrelated to the narration because a borrow/LRU queue
+    # picked whatever the video hadn't shown yet).  Selection order now:
+    # (1) the argument's own candidates, most specific first, skipping the
+    # chart that is already on screen when an equally-valid alternative
+    # exists; (2) the neutral business fallbacks; (3) the real K-line.
     # Every chart renders strictly from fetched data; a chart whose data is
     # missing returns None and the next candidate takes over — nothing is
-    # ever invented to fill a slot.
+    # ever invented to fill a slot.  A repeat of the RIGHT chart beats a
+    # fresh but irrelevant one, so there is no cross-argument borrowing.
     # ------------------------------------------------------------------
-    CHART_ROTATION: dict[str, tuple[str, ...]] = {
-        "financial": ("mindmap", "composition", "waterfall", "working_capital"),
-        "sentiment": ("waterfall", "composition", "mindmap"),
-        "industry": ("ranking", "mindmap", "composition"),
-        "valuation": ("waterfall", "ranking", "composition"),
-        "money": ("kline",),
-        "technical": ("kline",),
-        "risk": ("working_capital", "waterfall", "composition", "kline"),
-        "outlook": ("kline", "waterfall"),
-        "news": ("timeline",),
-    }
 
-    # When a topic's own candidates are exhausted or data-less, borrow any chart
-    # the video has not shown yet before repeating the K-line.  Order = variety
-    # first.  timeline is excluded: for non-news turns it degrades to a
-    # "近期没有相关资讯" placeholder, which is worse than a repeated chart.
-    CHART_BORROW_ORDER: tuple[str, ...] = ("waterfall", "composition", "mindmap",
-                                           "working_capital", "ranking")
-
-    def _turn_chart(self, topic: str, used: set[str], ctx: Mapping[str, Any],
-                    chart_history: list[str] | None = None) -> str:
-        """Render the best available chart for this turn's topic.
-
-        Selection order: (1) an unused candidate of this topic whose data
-        exists; (2) any chart the video has not shown yet (borrow, keeps long
-        videos from collapsing back into wall-to-wall K-lines); (3) a used
-        candidate (repeat); (4) least-recently-used rotation — once every
-        chart type has appeared, cycle them again starting from whichever has
-        been off screen the longest, so a 12-turn video rotates instead of
-        spamming K-lines; (5) the real K-line whenever any bar data exists.
-        """
-        history = chart_history if chart_history is not None else []
-        candidates = list(self.CHART_ROTATION.get(topic) or ("kline",))
+    def _render_chart(self, name: str, ctx: Mapping[str, Any]) -> str | None:
+        """Render one named chart; None when its data does not exist."""
         renderers = {
-            "kline": lambda: self._mini_chart_body(ctx["bars"], topic, ctx["quote"], ctx.get("keywords")),
+            "kline": lambda: self._mini_chart_body(ctx["bars"], ctx.get("argument", "technical"), ctx["quote"], ctx.get("keywords")),
             "mindmap": lambda: self._business_mindmap_body(ctx["quote"], ctx["f10"]),
             "composition": lambda: self._composition_bars_body(ctx["f10"]),
             "waterfall": lambda: self._profit_waterfall_body(ctx["financials"]),
             "timeline": lambda: self._news_timeline_body(ctx["news"]),
             "working_capital": lambda: self._working_capital_body(ctx["financials"]),
             "ranking": lambda: self._industry_rank_body(ctx["f10"]),
+            # 多年财务（F10 财务分析块）：数据不到三期就返回 None，交给下一张图。
+            "profit_trend": lambda: self._profit_trend_body(ctx["f10"]),
+            "margin_trend": lambda: self._percent_trend_body(
+                ctx["f10"], "销售毛利率(%)", "毛利率走势", "近几年销售毛利率", "#ffd166"),
+            "roe_trend": lambda: self._percent_trend_body(
+                ctx["f10"], "净资产收益率(%)", "股东回报", "近几年净资产收益率", "#8fd3ff"),
+            "cashflow_statement": lambda: self._cashflow_statement_body(ctx["f10"]),
+            "balance_sheet": lambda: self._balance_sheet_body(ctx["f10"]),
         }
+        renderer = renderers.get(name)
+        return renderer() if renderer else None
 
-        def attempt(name: str) -> str | None:
-            renderer = renderers.get(name)
-            body = renderer() if renderer else None
-            if body:
-                used.add(name)
-                # LRU bookkeeping: a re-use moves the chart to the back, so
-                # "oldest first" really means least recently shown.
-                if name in history:
-                    history.remove(name)
-                history.append(name)
-            return body
+    def _turn_chart(self, argument: str, ctx: Mapping[str, Any], last_chart: str = "") -> tuple[str, str]:
+        """Render the chart bound to this turn's argument; returns (svg, chart名).
 
-        for name in candidates:
-            if name not in used:
-                body = attempt(name)
-                if body:
-                    return body
-        for name in self.CHART_BORROW_ORDER:
-            if name not in used and name not in candidates:
-                body = attempt(name)
-                if body:
-                    return body
-        for name in dict.fromkeys(history):
-            body = attempt(name)
+        ``last_chart`` 是上一块图板用的图：同一论点连续出现时优先换成语义
+        等价的另一张（margin 的 composition↔mindmap 都逐业务标注毛利率），
+        避免同图连播；候选只有一张时（存货→营运占用图）就坦然重复——
+        重复一张对的图，好过一张错的新图。
+        """
+        candidates = list(ARGUMENT_CHARTS.get(argument) or ("mindmap", "composition"))
+        order = [name for name in candidates if name != last_chart] + \
+                [name for name in candidates if name == last_chart]
+        for name in order:
+            body = self._render_chart(name, ctx)
             if body:
-                return body
-        for name in candidates:
-            body = attempt(name)
+                return body, name
+        for name in ARGUMENT_FALLBACK_CHARTS:
+            body = self._render_chart(name, ctx)
             if body:
-                return body
-        return self._mini_chart_body(ctx["bars"], topic, ctx["quote"], ctx.get("keywords"))
+                return body, name
+        return self._mini_chart_body(ctx["bars"], argument, ctx["quote"], ctx.get("keywords")), "kline"
 
     def _chart_zone(self) -> tuple[float, float]:
         """X extent of the chart area inside the turn-board viewBox.
@@ -1490,7 +1611,7 @@ class HyperFramesBuilder:
         out.append(f'<rect x="{cx - 128}" y="{cy - 44}" width="256" height="88" rx="24" fill="rgba(12,30,52,.95)" stroke="#ffd166" stroke-width="2"/>')
         out.append(f'<text x="{cx}" y="{cy + 11}" text-anchor="middle" fill="#ffd166" font-size="32" font-weight="700">{html.escape(name[:8])}</text>')
         for (nx, ny), row in zip(spots, rows):
-            label = str(row.get("项目") or "").replace("(产品)", "").replace("(地区)", "").replace("(销售模式)", "").strip()
+            label = short_business_label(str(row.get("项目") or ""))
             share, margin = str(row.get("收入占比(%)") or ""), str(row.get("毛利率(%)") or "")
             sub = " · ".join(part for part in (
                 f"收入占比 {share}%" if share not in ("", "0") else "",
@@ -1535,8 +1656,9 @@ class HyperFramesBuilder:
         for index, (label, share, revenue, margin) in enumerate(parsed):
             y = y0 + index * row_h
             tone = next((color for suffix, color in tones.items() if label.endswith(suffix)), "#6ab7ff")
+            shown_label = short_business_label(label)
             width = max(8.0, share / top_share * bar_max_w)
-            out.append(f'<text x="700" y="{y + 24}" text-anchor="end" fill="#dbe7f5" font-size="24">{html.escape(label[:11])}</text>')
+            out.append(f'<text x="700" y="{y + 24}" text-anchor="end" fill="#dbe7f5" font-size="24">{html.escape(shown_label[:11])}</text>')
             out.append(f'<rect x="{bar_x}" y="{y}" width="{width:.1f}" height="34" rx="9" fill="{tone}" opacity=".82"/>')
             if revenue:
                 shown = revenue[:8]
@@ -1636,6 +1758,221 @@ class HyperFramesBuilder:
             out.append(f'<text x="{bar_x + width + 12:.1f}" y="{y + 56}" fill="#91a8bf" font-size="19">占收入 {ratio:.0f}%</text>')
         parts = "、".join(f"{r:.0f} 元压在{label}" for label, _, r in ratios)
         out.append(f'<text x="442" y="456" fill="#ffd166" font-size="21">每 100 元年收入，{parts}</text>')
+        return ''.join(out)
+
+    # ------------------------------------------------------------------
+    # 多年财务图表（数据源：F10「财务分析」块解析出的年度序列与三表科目）
+    #
+    # 全部要求**至少三期**数据：两个点连成的线会让人以为是走势，其实只是
+    # 两个数字。数据不够就返回 None，由论点候选取下一张语义相邻的图。
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _finance_annual(f10: Mapping[str, Any]) -> tuple[list[str], Mapping[str, Any]]:
+        profile = f10.get("profile") if isinstance(f10.get("profile"), Mapping) else {}
+        history = profile.get("财务历史") if isinstance(profile.get("财务历史"), Mapping) else {}
+        annual = history.get("年度") if isinstance(history.get("年度"), Mapping) else {}
+        periods = [str(p) for p in (annual.get("报告期") or []) if str(p).strip()]
+        metrics = annual.get("指标") if isinstance(annual.get("指标"), Mapping) else {}
+        return periods, metrics
+
+    @classmethod
+    def _annual_points(cls, f10: Mapping[str, Any], name: str) -> list[tuple[str, float]]:
+        """某个年度指标的有效点（报告期, 值）；没有就返回空表。"""
+        periods, metrics = cls._finance_annual(f10)
+        values = metrics.get(name) if isinstance(metrics, Mapping) else None
+        if not isinstance(values, list) or len(values) != len(periods):
+            return []
+        return [(periods[index], float(value)) for index, value in enumerate(values)
+                if isinstance(value, (int, float)) and not isinstance(value, bool)]
+
+    def _profit_trend_body(self, f10: Mapping[str, Any]) -> str | None:
+        """历年归母净利润（柱）+ 营业收入（折线，独立刻度）。
+
+        两条序列量级差一个数量级，共用一根 y 轴会让利润柱缩成一条线，所以
+        营收走独立刻度画在上方（画面里明确标了单位，不靠视觉暗示）。
+        """
+        profit = self._annual_points(f10, "归母净利润(亿元)")
+        if len(profit) < 3:
+            return None
+        revenue = dict(self._annual_points(f10, "营业总收入(亿元)"))
+        zone_left, zone_right = self._chart_zone()
+        plot_left, plot_right = zone_left + 34.0, zone_right - 34.0
+        top, bottom = 190.0, 392.0
+        values = [value for _, value in profit]
+        lo, hi = min(values + [0.0]), max(values + [0.0])
+        span = (hi - lo) or 1.0
+        lo -= span * 0.16
+        hi += span * 0.16
+        scale = lambda value: top + (hi - value) / (hi - lo) * (bottom - top)
+        zero_y = scale(0.0)
+        step = (plot_right - plot_left) / len(profit)
+        bar_w = min(104.0, step * 0.52)
+        out = [self._svg_header("业绩走势 · 归母净利润", "年报 · 亿元")]
+        out.append(f'<line x1="{plot_left:.1f}" y1="{zero_y:.1f}" x2="{plot_right:.1f}" y2="{zero_y:.1f}"'
+                   ' stroke="rgba(101,151,196,.45)" stroke-width="1.6" stroke-dasharray="6 5"/>')
+        for index, (period, value) in enumerate(profit):
+            cx = plot_left + (index + 0.5) * step
+            bar_top = scale(value) if value >= 0 else zero_y
+            height = max(4.0, abs(scale(value) - zero_y))
+            tone = "#ff7188" if value >= 0 else "#5ee0a7"
+            out.append(f'<rect x="{cx - bar_w / 2:.1f}" y="{bar_top:.1f}" width="{bar_w:.1f}"'
+                       f' height="{height:.1f}" rx="8" fill="{tone}" opacity=".85"/>')
+            label_y = scale(value) - 16 if value >= 0 else scale(value) + 32
+            out.append(f'<text x="{cx:.1f}" y="{label_y:.1f}" text-anchor="middle" fill="#dbe7f5"'
+                       f' font-size="24" font-weight="700">{value:,.2f}</text>')
+            out.append(f'<text x="{cx:.1f}" y="{bottom + 40:.1f}" text-anchor="middle" fill="#91a8bf"'
+                       f' font-size="21">{period[:4]}</text>')
+        if len(revenue) == len(profit) and all(period in revenue for period, _ in profit):
+            series = [revenue[period] for period, _ in profit]
+            r_lo, r_hi = min(series), max(series)
+            r_span = (r_hi - r_lo) or 1.0
+            r_scale = lambda value: 172.0 - (value - r_lo) / r_span * 68.0
+            points = [(plot_left + (index + 0.5) * step, r_scale(value))
+                      for index, value in enumerate(series)]
+            out.append(f'<polyline points="{" ".join(f"{x:.1f},{y:.1f}" for x, y in points)}" fill="none"'
+                       ' stroke="#6ab7ff" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round" opacity=".9"/>')
+            for (cx, cy), value in zip(points, series):
+                out.append(f'<circle cx="{cx:.1f}" cy="{cy:.1f}" r="6" fill="#6ab7ff" stroke="#04121d" stroke-width="2"/>')
+                out.append(f'<text x="{cx:.1f}" y="{cy - 14:.1f}" text-anchor="middle" fill="#91a8bf"'
+                           f' font-size="18">{value:,.1f}</text>')
+            out.append(f'<text x="{plot_left:.1f}" y="110" fill="#6ab7ff" font-size="19">蓝线：营业收入（亿元）</text>')
+        return ''.join(out)
+
+    def _percent_trend_body(self, f10: Mapping[str, Any], metric: str, title: str,
+                            note: str, tone: str) -> str | None:
+        """单指标多年走势折线（毛利率/净资产收益率共用），每点标真实数值。"""
+        points = self._annual_points(f10, metric)
+        if len(points) < 3:
+            return None
+        unit = "%" if metric.endswith("(%)") else ""
+        zone_left, zone_right = self._chart_zone()
+        plot_left, plot_right = zone_left + 52.0, zone_right - 52.0
+        top, bottom = 158.0, 378.0
+        values = [value for _, value in points]
+        lo, hi = min(values), max(values)
+        span = (hi - lo) or max(abs(hi) * 0.25, 1.0)
+        lo -= span * 0.26
+        hi += span * 0.26
+        scale = lambda value: top + (hi - value) / (hi - lo) * (bottom - top)
+        step = (plot_right - plot_left) / max(1, len(points) - 1)
+        coords = [(plot_left + index * step, scale(value)) for index, (_, value) in enumerate(points)]
+        out = [self._svg_header(title, note)]
+        for _, value in (points[0], points[-1]):
+            gy = scale(value)
+            out.append(f'<line x1="{plot_left:.1f}" y1="{gy:.1f}" x2="{plot_right:.1f}" y2="{gy:.1f}"'
+                       ' stroke="rgba(101,151,196,.22)" stroke-width="1.2" stroke-dasharray="4 5"/>')
+        out.append(f'<polyline points="{" ".join(f"{x:.1f},{y:.1f}" for x, y in coords)}" fill="none"'
+                   f' stroke="{tone}" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/>')
+        for (period, value), (cx, cy) in zip(points, coords):
+            out.append(f'<circle cx="{cx:.1f}" cy="{cy:.1f}" r="8" fill="{tone}" stroke="#04121d" stroke-width="2"/>')
+            out.append(f'<text x="{cx:.1f}" y="{cy - 22:.1f}" text-anchor="middle" fill="#dbe7f5"'
+                       f' font-size="23" font-weight="700">{value:g}{unit}</text>')
+            out.append(f'<text x="{cx:.1f}" y="{bottom + 46:.1f}" text-anchor="middle" fill="#91a8bf"'
+                       f' font-size="21">{period[:4]}</text>')
+        return ''.join(out)
+
+    _CASHFLOW_SERIES: tuple[tuple[str, str, str], ...] = (
+        ("经营活动现金流量净额(亿元)", "经营", "#ffd166"),
+        ("投资活动现金流量净额(亿元)", "投资", "#6ab7ff"),
+        ("筹资活动现金流量净额(亿元)", "筹资", "#c9a0ff"),
+    )
+
+    def _cashflow_statement_body(self, f10: Mapping[str, Any]) -> str | None:
+        """现金流量表：近三年经营/投资/筹资三活动的净流入流出。
+
+        正负号是这张图的全部意义（经营为负、靠筹资补血 vs 经营自分红），
+        所以柱以零线为基准双向生长，正值暖色、负值冷色，不靠颜色暗示好坏。
+        """
+        series = [(label, tone, self._annual_points(f10, name)[-3:])
+                  for name, label, tone in self._CASHFLOW_SERIES]
+        series = [item for item in series if len(item[2]) >= 2]
+        if len(series) < 2:
+            return None
+        periods = [period for period, _ in series[0][2]]
+        count = len(periods)
+        zone_left, zone_right = self._chart_zone()
+        plot_left, plot_right = zone_left + 40.0, zone_right - 40.0
+        top, bottom = 168.0, 386.0
+        all_values = [value for _, _, points in series for _, value in points]
+        lo, hi = min(all_values + [0.0]), max(all_values + [0.0])
+        span = (hi - lo) or 1.0
+        lo -= span * 0.14
+        hi += span * 0.14
+        scale = lambda value: top + (hi - value) / (hi - lo) * (bottom - top)
+        zero_y = scale(0.0)
+        group_w = (plot_right - plot_left) / count
+        bar_w = min(56.0, group_w * 0.24)
+        out = [self._svg_header("现金流三张账 · 近三年", "亿元 · 正负为净流入/净流出")]
+        out.append(f'<line x1="{plot_left:.1f}" y1="{zero_y:.1f}" x2="{plot_right:.1f}" y2="{zero_y:.1f}"'
+                   ' stroke="rgba(101,151,196,.5)" stroke-width="1.6"/>')
+        legend_x = plot_left
+        for _, label, tone in self._CASHFLOW_SERIES:
+            if not any(label == item[0] for item in series):
+                continue
+            out.append(f'<rect x="{legend_x:.1f}" y="100" width="20" height="20" rx="5" fill="{tone}"/>')
+            out.append(f'<text x="{legend_x + 30:.1f}" y="117" fill="#91a8bf" font-size="20">{label}</text>')
+            legend_x += 150.0
+        for index, period in enumerate(periods):
+            group_center = plot_left + (index + 0.5) * group_w
+            span_w = bar_w * len(series) + 12 * (len(series) - 1)
+            cursor = group_center - span_w / 2
+            for label, tone, points in series:
+                value = dict(points).get(period)
+                if value is None:
+                    cursor += bar_w + 12
+                    continue
+                bar_top = scale(value) if value >= 0 else zero_y
+                height = max(3.0, abs(scale(value) - zero_y))
+                out.append(f'<rect x="{cursor:.1f}" y="{bar_top:.1f}" width="{bar_w:.1f}"'
+                           f' height="{height:.1f}" rx="6" fill="{tone}" opacity=".88"/>')
+                label_y = scale(value) - 14 if value >= 0 else scale(value) + 28
+                out.append(f'<text x="{cursor + bar_w / 2:.1f}" y="{label_y:.1f}" text-anchor="middle"'
+                           f' fill="#dbe7f5" font-size="19" font-weight="700">{value:,.2f}</text>')
+                cursor += bar_w + 12
+            out.append(f'<text x="{group_center:.1f}" y="{bottom + 44:.1f}" text-anchor="middle"'
+                       f' fill="#91a8bf" font-size="21">{period[:4]}</text>')
+        return ''.join(out)
+
+    def _balance_sheet_body(self, f10: Mapping[str, Any]) -> str | None:
+        """资产负债表：挑本期变动最剧烈的几个资产/负债科目，本期 vs 上期对比。"""
+        profile = self._f10_profile(f10)
+        history = profile.get("财务历史") if isinstance(profile.get("财务历史"), Mapping) else {}
+        changes = history.get("科目变动") if isinstance(history.get("科目变动"), Mapping) else {}
+        rows = [row for row in (changes.get("明细") or []) if isinstance(row, Mapping)]
+        watch = ("货币资金", "存货", "应收款项", "合同负债", "短期借款", "长期借款",
+                 "固定资产", "在建工程", "研发投入", "长期股权投资")
+        picked = [row for row in rows if row.get("科目") in watch
+                  and isinstance(row.get("本期(亿元)"), (int, float))
+                  and isinstance(row.get("上期(亿元)"), (int, float))
+                  and isinstance(row.get("变动率(%)"), (int, float))]
+        picked.sort(key=lambda row: -abs(float(row["变动率(%)"])))
+        picked = picked[:4]
+        if len(picked) < 2:
+            return None
+        zone_left, zone_right = self._chart_zone()
+        row_h, y0 = 82, 136
+        bar_x = zone_left + 250.0
+        bar_max = max(180.0, (zone_right - bar_x) - 250.0)
+        top_value = max(max(float(row["本期(亿元)"]), float(row["上期(亿元)"])) for row in picked) or 1.0
+        period = str(changes.get("报告期") or "")
+        out = [self._svg_header("资产与负债 · 本期对比", f"{period} vs 上期 · 亿元")]
+        for index, row in enumerate(picked):
+            y = y0 + index * row_h
+            current, previous = float(row["本期(亿元)"]), float(row["上期(亿元)"])
+            rate = float(row["变动率(%)"])
+            tone = "#ffd166" if rate >= 0 else "#6ab7ff"
+            out.append(f'<text x="{zone_left + 30:.1f}" y="{y + 42:.1f}" fill="#dbe7f5"'
+                       f' font-size="25" font-weight="700">{html.escape(str(row["科目"])[:8])}</text>')
+            for offset, (label, value, colour) in enumerate((("上期", previous, "rgba(105,183,255,.35)"),
+                                                              ("本期", current, tone))):
+                by = y + offset * 30
+                width = max(10.0, value / top_value * bar_max)
+                out.append(f'<rect x="{bar_x:.1f}" y="{by:.1f}" width="{width:.1f}" height="24"'
+                           f' rx="7" fill="{colour}" opacity=".85"/>')
+                out.append(f'<text x="{bar_x + width + 14:.1f}" y="{by + 19:.1f}" fill="#dbe7f5"'
+                           f' font-size="20">{label} {value:,.2f}</text>')
+            out.append(f'<text x="{zone_right:.1f}" y="{y + 42:.1f}" text-anchor="end" fill="{tone}"'
+                       f' font-size="26" font-weight="700">{rate:+.1f}%</text>')
         return ''.join(out)
 
     def _industry_rank_body(self, f10: Mapping[str, Any]) -> str | None:

@@ -954,3 +954,87 @@ def test_daemon_refuses_to_run_without_any_window(
 
     assert excinfo.value.code == 1
     assert "发布窗口" in capsys.readouterr().err
+
+
+# ---------------------------------------------------------------------------
+# -m/--message：本期提示词
+# ---------------------------------------------------------------------------
+
+
+def _capture_message(argv: list[str]) -> str:
+    """Run the CLI with the given argv and return dialogue.message it handed down."""
+    _ConfigCapturingPipeline.seen = {}
+    with patch.multiple(cli, Pipeline=_ConfigCapturingPipeline,
+                        load_config=lambda path=None: {"dialogue": {"arc": "annual"}}):
+        cli.main(argv)
+    return _ConfigCapturingPipeline.seen.get("dialogue", {}).get("message", "")
+
+
+def test_message_is_written_into_the_config_the_pipeline_receives() -> None:
+    """提示词只有写回 config 才能覆盖主流程/批量/--auto-pick 三条路径。"""
+    message = _capture_message(["601689", "--no-render", "-m", "这期重点讲海外收入占比"])
+
+    assert message == "这期重点讲海外收入占比"
+    # 注入不能把手写配置里的其它项冲掉
+    assert _ConfigCapturingPipeline.seen["dialogue"]["arc"] == "annual"
+
+
+def test_repeated_messages_are_joined_line_by_line() -> None:
+    message = _capture_message(["601689", "--no-render", "-m", "第一点：讲零售",
+                                "--message", "第二点：少提海外"])
+
+    assert message == "第一点：讲零售\n第二点：少提海外"
+
+
+def test_message_can_be_read_from_a_file(tmp_path: Path) -> None:
+    """长提示词写在文件里传，免得在 shell 里跟引号和换行较劲。"""
+    note = tmp_path / "选题说明.txt"
+    note.write_text("重点讲零售业务的息差\n少提海外收入\n", encoding="utf-8")
+
+    assert _capture_message(["601689", "--no-render", "-m", f"@{note}"]) == "重点讲零售业务的息差\n少提海外收入"
+
+
+def test_message_file_that_does_not_exist_is_rejected(tmp_path: Path,
+                                                     capsys: pytest.CaptureFixture[str]) -> None:
+    with pytest.raises(SystemExit) as excinfo:
+        cli.main(["601689", "--no-render", "-m", f"@{tmp_path / 'nope.txt'}"])
+
+    assert excinfo.value.code == 2
+    assert "不存在" in capsys.readouterr().err
+
+
+def test_empty_message_is_rejected(capsys: pytest.CaptureFixture[str]) -> None:
+    with pytest.raises(SystemExit) as excinfo:
+        cli.main(["601689", "--no-render", "-m", "   "])
+
+    assert excinfo.value.code == 2
+    assert "空字符串" in capsys.readouterr().err
+
+
+def test_message_without_the_flag_leaves_the_config_alone() -> None:
+    assert _capture_message(["601689", "--no-render"]) == ""
+
+
+def test_message_says_so_when_the_run_cannot_use_it(
+        capsys: pytest.CaptureFixture[str], tmp_path: Path) -> None:
+    """写了却不生效是最气人的：补发/守护进程两条路径都要说清 -m 这次用不上。"""
+    config = {"output": {"dir": str(tmp_path)}, "daemon": {"windows": ["07:30-09:30"]}}
+    with patch.multiple(cli, load_config=lambda path=None: dict(config)), \
+         patch.object(cli, "launchd_state", lambda: "launchd: 未加载"):
+        with pytest.raises(SystemExit):
+            cli.main(["--daemon-status", "-m", "这期重点讲零售"])
+
+    out = capsys.readouterr().out
+    assert "守护进程不会带上 -m" in out and "dialogue.message" in out
+
+
+def test_publish_only_says_the_message_will_not_be_used(tmp_path: Path,
+                                                       capsys: pytest.CaptureFixture[str]) -> None:
+    output_dir = tmp_path / "output"
+    video, _ = _write_run(output_dir, "601689_20260929_120000", failed=[])
+    fake = FakeRepublishPipeline()
+    fake.wire({"succeeded": ["douyin"], "failed": [], "platforms": []})
+    with patch.multiple(cli, Pipeline=lambda config: fake, load_config=lambda path=None: _republish_config(output_dir)):
+        cli.main(["--publish-only", str(video), "-m", "这期重点讲零售"])
+
+    assert "不重新生成剧本，本次用不到它" in capsys.readouterr().out
