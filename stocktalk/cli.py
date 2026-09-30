@@ -19,6 +19,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import shutil
+import subprocess
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -124,6 +126,11 @@ def main(argv: list[str] | None = None) -> None:
                         help=f"只发布这些平台，逗号分隔，可选项: {', '.join(PLATFORM_SPECS)}")
     parser.add_argument("--watchlist", default=None, metavar="FILE",
                         help="从文件读取股票代码，每行一个（可写成「601689 拓普集团」），# 之后为注释")
+    parser.add_argument("--add-watchlist", action=argparse.BooleanOptionalAction, default=True,
+                        dest="add_watchlist",
+                        help="开跑前把本期目标个股写进 tongstock 自选股（分组「谈股论金」，"
+                             "备注运行日期；支持手动代码/--watchlist 文件/--auto-pick 三种选题）。"
+                             "写入失败只提醒不阻断。默认开，--no-add-watchlist 关掉")
     parser.add_argument("--no-interactive", action="store_true",
                         help="不询问任何问题（抖音要短信验证码时只等待手工写入 verify_code.txt）")
     parser.add_argument("--auto-pick", action="store_true",
@@ -205,6 +212,7 @@ def main(argv: list[str] | None = None) -> None:
         picked = _auto_pick(config, args, parser)
 
         targets = _collect_targets(args, parser)
+        _add_to_watchlist(targets, args, config)
         failures = _run_all(pipeline, targets, args)
         if picked is not None:
             _record_pick(config, picked, ok=not any(code == picked.code for code, _ in failures))
@@ -752,6 +760,58 @@ def _collect_targets(args: argparse.Namespace, parser: argparse.ArgumentParser) 
             seen.add(code)
             ordered.append((code, name))
     return ordered
+
+
+# ---------------------------------------------------------------------------
+# tongstock 自选股：每期目标个股开跑前入列（best-effort，失败不阻断制作/发布）
+# ---------------------------------------------------------------------------
+
+WATCHLIST_GROUP = "谈股论金"
+WATCHLIST_TIMEOUT_SECONDS = 60
+
+
+def _tongstock_executable(config: Mapping[str, Any]) -> str:
+    """Resolve the tongstock binary, tolerating a bare PATH that misses ~/.local/bin."""
+    configured = str(((config or {}).get("topics") or {}).get("executable") or "tongstock")
+    if Path(configured).is_absolute():
+        return configured
+    found = shutil.which(configured)
+    if found:
+        return found
+    fallback = Path.home() / ".local" / "bin" / configured
+    return str(fallback) if fallback.is_file() else configured
+
+
+def _add_to_watchlist(targets: list[tuple[str, str | None]], args: argparse.Namespace,
+                      config: Mapping[str, Any]) -> None:
+    """把本期目标写进 tongstock 自选股，分组「谈股论金」、备注运行日期。
+
+    它是旁路（同通知层原则）：写失败只提醒一声，绝不把一次能跑的生成/发布变成
+    失败——自选股是记账，不是链路的一部分。目标集合在 _collect_targets 之后已
+    确定，所以手动代码、--watchlist 文件、--auto-pick 三种选题都覆盖。
+    """
+    if not getattr(args, "add_watchlist", True):
+        return
+    codes = [code for code, _ in targets]
+    if not codes:
+        return
+    note = f"tangulunjin {datetime.now():%Y-%m-%d}"
+    command = [_tongstock_executable(config), "watchlist", "add", *codes,
+               "--group", WATCHLIST_GROUP, "--note", note]
+    try:
+        completed = subprocess.run(command, capture_output=True, text=True,
+                                   encoding="utf-8", errors="replace",
+                                   timeout=WATCHLIST_TIMEOUT_SECONDS)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        print(f"  • 加入自选股失败（不阻断）：{exc}")
+        return
+    if completed.returncode == 0:
+        print(f"  • 已加入 tongstock 自选股（分组「{WATCHLIST_GROUP}」）：{'、'.join(codes)}")
+        return
+    lines = [line for line in (completed.stdout or "").splitlines() + (completed.stderr or "").splitlines()
+             if line.strip()]
+    detail = lines[-1] if lines else f"退出码 {completed.returncode}"
+    print(f"  • 加入自选股失败（不阻断）：{detail}")
 
 
 def _run_all(pipeline: Pipeline, targets: list[tuple[str, str | None]], args: argparse.Namespace) -> list[tuple[str, str]]:

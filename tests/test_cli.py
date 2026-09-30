@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import subprocess
 from pathlib import Path
 from typing import Any
 from unittest.mock import patch
@@ -1038,3 +1039,57 @@ def test_publish_only_says_the_message_will_not_be_used(tmp_path: Path,
         cli.main(["--publish-only", str(video), "-m", "这期重点讲零售"])
 
     assert "不重新生成剧本，本次用不到它" in capsys.readouterr().out
+
+
+# ---------------------------------------------------------------------------
+# tongstock 自选股：每期目标入列（best-effort）
+# ---------------------------------------------------------------------------
+
+def _watchlist_args(**overrides: Any) -> argparse.Namespace:
+    base = {"add_watchlist": True}
+    base.update(overrides)
+    return _args(**base)
+
+
+def test_add_to_watchlist_invokes_tongstock_with_group_and_note(capsys: pytest.CaptureFixture[str]) -> None:
+    with patch("stocktalk.cli.subprocess.run") as fake_run, \
+         patch.object(cli, "_tongstock_executable", lambda config: "/usr/local/bin/tongstock"):
+        fake_run.return_value = subprocess.CompletedProcess([], 0, stdout="", stderr="")
+        cli._add_to_watchlist([("601689", "拓普集团"), ("600519", None)], _watchlist_args(), {})
+
+    command = fake_run.call_args.args[0]
+    assert command[1:4] == ["watchlist", "add", "601689"]
+    assert "600519" in command and "--group" in command and cli.WATCHLIST_GROUP in command
+    assert "--note" in command and "tangulunjin" in command[command.index("--note") + 1]
+    assert "已加入 tongstock 自选股" in capsys.readouterr().out
+
+
+def test_add_to_watchlist_respects_no_flag() -> None:
+    with patch("stocktalk.cli.subprocess.run") as fake_run:
+        cli._add_to_watchlist([("601689", None)], _watchlist_args(add_watchlist=False), {})
+    assert not fake_run.called
+
+
+def test_add_to_watchlist_failure_does_not_raise(capsys: pytest.CaptureFixture[str]) -> None:
+    with patch("stocktalk.cli.subprocess.run") as fake_run, \
+         patch.object(cli, "_tongstock_executable", lambda config: "tongstock"):
+        fake_run.return_value = subprocess.CompletedProcess([], 1, stdout="✗ 写入失败", stderr="")
+        cli._add_to_watchlist([("601689", None)], _watchlist_args(), {})
+    assert "加入自选股失败（不阻断）" in capsys.readouterr().out
+
+
+def test_add_to_watchlist_swallows_oserror_and_timeout(capsys: pytest.CaptureFixture[str]) -> None:
+    with patch("stocktalk.cli.subprocess.run") as fake_run, \
+         patch.object(cli, "_tongstock_executable", lambda config: "tongstock"):
+        fake_run.side_effect = OSError("boom")
+        cli._add_to_watchlist([("601689", None)], _watchlist_args(), {})
+        fake_run.side_effect = subprocess.TimeoutExpired(cmd="tongstock", timeout=60)
+        cli._add_to_watchlist([("600519", None)], _watchlist_args(), {})
+    out = capsys.readouterr().out
+    assert out.count("加入自选股失败（不阻断）") == 2
+
+
+def test_tongstock_executable_resolution() -> None:
+    assert cli._tongstock_executable({"topics": {"executable": "/opt/bin/tongstock"}}) == "/opt/bin/tongstock"
+    with patch.object(cli.shutil, "which", lambda name: f"/resolved/{name}"):
+        assert cli._tongstock_executable({}) == "/resolved/tongstock"
