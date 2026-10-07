@@ -815,3 +815,24 @@ class FinancePoolTests(ChartLibraryTests):
 
 if __name__ == "__main__":
     unittest.main()
+
+    def test_intro_card_carries_the_spotlight_number(self) -> None:
+        """首帧冲突数字进 intro-card；模型没给就保持原三行布局，不硬凑。"""
+        with tempfile.TemporaryDirectory() as temp:
+            builder = HyperFramesBuilder({"video": {"output_dir": temp}})
+            project = builder.build_project(
+                {"code": "600519", "quote": {"name": "贵州茅台", "price": 1500, "change_pct": 1.2}},
+                {"spotlight": {"label": "经营现金流", "value": "-2.4亿→+8000万"}},
+                {"segments": [], "total_duration": 30},
+            )
+            html = project.composition_path.read_text(encoding="utf-8")
+            self.assertIn("intro-spotlight", html)
+            self.assertIn("经营现金流", html)
+            self.assertIn("-2.4亿→+8000万", html)
+
+            plain = HyperFramesBuilder({"video": {"output_dir": temp}}).build_project(
+                {"code": "600519", "quote": {"name": "贵州茅台", "price": 1500, "change_pct": 1.2}},
+                {},
+                {"segments": [], "total_duration": 30},
+            )
+            self.assertNotIn("intro-spotlight", plain.composition_path.read_text(encoding="utf-8"))

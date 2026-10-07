@@ -643,6 +643,15 @@ def plist_body(daemon: Daemon) -> str:
     """
     log = daemon.log_path
     env_path = _launchd_path(daemon)
+    # launchd 不加载 .zshrc，shell 里的 export 到不了服务进程（2026-10-06 事故：
+    # TTS key 缺失 → 静音片）。daemon.env 里的键值对会原样写进 plist ——
+    # 只放机器本机的凭据（与 .zshrc 同级保护），别放敏感度高于本机配置的东西。
+    extra_env = dict(daemon.settings.get("env") or {})
+    env_lines = ["    <key>PATH</key>", f"    <string>{xml_escape(env_path)}</string>"]
+    for key, value in extra_env.items():
+        env_lines.extend([f"    <key>{xml_escape(str(key))}</key>",
+                          f"    <string>{xml_escape(str(value))}</string>"])
+    env_block = "\n".join(env_lines)
     return f"""<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -660,8 +669,7 @@ def plist_body(daemon: Daemon) -> str:
   <string>{xml_escape(str(daemon.root))}</string>
   <key>EnvironmentVariables</key>
   <dict>
-    <key>PATH</key>
-    <string>{xml_escape(env_path)}</string>
+{env_block}
   </dict>
   <key>RunAtLoad</key>
   <true/>

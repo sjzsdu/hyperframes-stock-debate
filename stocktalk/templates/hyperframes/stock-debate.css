@@ -234,6 +234,15 @@ svg text[data-hl="1"] { fill: var(--gold) !important; font-weight: 700; }
 .intro-roles .role.bull i { background: var(--bull); box-shadow: 0 0 12px var(--bull); }
 .intro-roles .role.bear { color: var(--bear); border-color: color-mix(in srgb, var(--bear) 55%, transparent); }
 .intro-roles .role.bear i { background: var(--bear); box-shadow: 0 0 12px var(--bear); }
+/* 首帧冲突数字（2026-10-07）：封面/分享卡同源的「底牌」。静态、无动画——
+   首帧纪律：分享卡=第 0 帧必须完整排版，禁入场淡入。 */
+.intro-spotlight { display: flex; align-items: baseline; gap: 16px;
+  padding: 10px 30px; border-radius: 16px; border: 1px solid var(--line);
+  background: rgba(8, 20, 37, .8); max-width: 100%; }
+.intro-spotlight span { font-size: 26px; color: var(--muted); letter-spacing: 3px; flex: none; }
+.intro-spotlight strong { font-size: 52px; font-weight: 800; color: var(--gold);
+  font-variant-numeric: tabular-nums; letter-spacing: 1px;
+  overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
 .outro-card { position: absolute; inset: 0; display: flex; flex-direction: column;
   align-items: center; justify-content: center; gap: 26px; z-index: 9000; pointer-events: none;
   background: radial-gradient(circle at 50% 42%, rgba(10, 24, 43, .93), rgba(5, 11, 22, .97)); }

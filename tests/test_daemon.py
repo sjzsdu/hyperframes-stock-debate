@@ -460,6 +460,16 @@ def test_daemon_path_setting_appends_extra_directories(tmp_path: Path) -> None:
     assert "/opt/nvm/versions/node/v22/bin" in plist_body(daemon)
 
 
+def test_daemon_env_setting_reaches_the_plist(tmp_path: Path) -> None:
+    """launchd 不加载 .zshrc —— daemon.env 里的凭据要写进 plist（2026-10-06 事故）。"""
+    daemon = _daemon(tmp_path, Clock("2026-09-24T06:00:00"), Recorder(),
+                     env={"VOLCENGINE_TTS_API_KEY": "sk-test-123"})
+    body = plist_body(daemon)
+
+    assert "<key>VOLCENGINE_TTS_API_KEY</key>" in body
+    assert "<string>sk-test-123</string>" in body
+
+
 # ---------------------------------------------------------------------------
 # 服务到底有没有在跑（`launchctl list` 会骗人）
 # ---------------------------------------------------------------------------

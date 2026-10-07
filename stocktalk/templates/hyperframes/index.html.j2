@@ -86,6 +86,9 @@
   <section id="intro-card" class="intro-card clip" data-start="0" data-duration="{{ stage_in + 1.5 }}" data-track-index="40" data-layout-ignore>
     <div class="intro-kicker">{{ identity.hook }}</div>
     <div class="intro-title">{{ name }} <em>{{ code }}</em></div>
+    {# 首帧冲突数字（2026-10-07）：本期最反差的一个数字直接进分享卡。
+       静态展示、无入场动画——首帧纪律（分享卡=第 0 帧完整排版）。 #}
+    {% if spotlight %}<div class="intro-spotlight"><span>{{ spotlight.label }}</span><strong>{{ spotlight.value }}</strong></div>{% endif %}
     {# 角色出场：新观众前 3 秒必须知道这是两个人在辩论，谁暖谁冷从第一帧就立住。 #}
     <div class="intro-roles">
       <span class="role bull"><i></i>{{ speakers.bull }}</span>

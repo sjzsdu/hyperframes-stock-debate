@@ -193,6 +193,8 @@ class CoverGenerator:
         clamps = [self._number(bar.get("close")) for bar in bars]
         clamps = [value for value in clamps if value is not None]
         sparkline, spark_end_y = self._sparkline(bars, tone)
+        # 首帧冲突数字（2026-10-07）：与视频 intro-card 同源，合规审查后进封面
+        spotlight = script.get("spotlight") if isinstance(script.get("spotlight"), Mapping) else {}
         template = self._env.get_template("cover.html.j2")
         return template.render(
             name=stock_name or stock_code,
@@ -210,6 +212,8 @@ class CoverGenerator:
             spark_end_y=spark_end_y,
             hook=self._hook(script, stock_name, stock_code),
             tags=self._tags(script),
+            spotlight_label=str(spotlight.get("label") or "").strip(),
+            spotlight_value=str(spotlight.get("value") or "").strip(),
         )
 
     @staticmethod

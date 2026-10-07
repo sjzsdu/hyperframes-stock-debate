@@ -963,6 +963,10 @@ class HyperFramesBuilder:
             # 原来的写法。
             outro_title=self._text(self._outro_title(cta, stock_name)),
             outro_tip=self._text(self._outro_tip(cta)),
+            # 首帧冲突数字（2026-10-07）：分享卡=首帧，intro-card 静态展示、无入场动画；
+            # 模型没给（或结构不对）就是 None，intro-card 保持原三行布局。
+            spotlight=(dict(script["spotlight"]) if isinstance(script.get("spotlight"), Mapping)
+                       and str(script["spotlight"].get("value") or "").strip() else None),
             # 收尾留白：片尾卡在最后一句话音落下后还要停留多久（2026-09-29 评审：
             # 0.45s 的片尾等于话音没落就黑屏）。_duration 会把同样的留白加进
             # 总时长，所以这里只改片尾卡出场时刻，不挤占正文。

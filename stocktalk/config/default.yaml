@@ -2,7 +2,15 @@
 # 运行时行为见 stocktalk/pipeline.py。
 
 dialogue:
+  # LLM 供应商（2026-09-30 抽象）：bailian-cli（默认，`bl text chat` 子进程）或
+  # openai-compatible（任何 OpenAI 格式的 HTTP 端点，见 providers/openai_chat.py）。
+  # 新增供应商：在 stocktalk/modules/providers/ 写实现 + @register_llm 登记。
+  provider: bailian-cli
   model: qwen3.6-plus
+  # 供应商专属参数（openai-compatible 才需要）：
+  # options:
+  #   base_url: https://api.openai.com/v1   # 兼容端点
+  #   api_key_env: OPENAI_API_KEY           # 读 key 的环境变量名（key 不落配置文件）
   # 成片时长目标：2-5 分钟（120-300 秒）。2026-09-20 用户反馈"内容太短、
   # 得不到有效启示"，从原来的 70-110 秒上调——用时长换内容深度。
   # 权衡记录：平台分成只算有效播放，完播率是决定性因素，长片完播率更低，
@@ -66,18 +74,25 @@ characters:
   bull:
     name: 股市新手
     persona: 年轻乐观的女生，喜欢从生意角度聊公司——这家公司靠什么赚钱、增长从哪来；只讨论已给出的数据
-    # 系统音色：龙小淳（知性积极女）——和 bear 的龙橙（智慧青年男）形成辨识度
-    voice_id: longxiaochun_v3
+    # 豆包 2.0 音色（2026-10-07 换）：爽快思思（爽朗活泼，官方标「视频配音」场景）
+    # —— 10-06 用 Vivi 出了第一条成片后用户嫌「不够好」，A/B 试听选中思思。
+    # 情绪走 additions.context_texts，由 instruction 通道透传。
+    voice_id: zh_female_shuangkuaisisi_uranus_bigtts
+    # 豆包情感走 additions.context_texts，由 instruction 通道透传
+    supports_instruction: true
+    instruction: 用轻松愉快、兴奋分享的语气，像和朋友聊一家宝藏公司
     speed: 1.07
-    pitch: 1.03
+    pitch: 1.03   # 豆包接口无 pitch 参数，忽略（音高由音色与情感决定）
   bear:
     name: 股市老登
     persona: 老练理性，擅长从行业格局和经营风险角度提问，追问生意的短板与数据边界
-    # 系统音色：龙橙（智慧青年男）——像懂行的人坐下来聊天，清爽不端着；
-    # 之前的龙飞（热血磁性男）开口有电视广告/带货播音腔，已弃用
-    voice_id: longcheng_v3
+    # 豆包 2.0 音色：刘飞（沉稳冷静）+ 审视质疑指令。候选还有云舟
+    # zh_male_m191_uranus_bigtts，一行换。
+    voice_id: zh_male_liufei_uranus_bigtts
+    supports_instruction: true
+    instruction: 用沉稳冷静、带审视和质疑的语气指出风险，语气笃定
     speed: 1.0
-    pitch: 0.96
+    pitch: 0.96   # 同上，豆包忽略
 
 compliance:
   forbidden_words:
@@ -88,6 +103,17 @@ compliance:
     - 一定赚
 
 tts:
+  # TTS 供应商（2026-10-05 切到豆包，体验新版声音）：
+  #   volcengine-doubao —— 火山引擎豆包语音合成 2.0（抖音流行音色同源），
+  #                        key 走环境变量 VOLCENGINE_TTS_API_KEY（语音控制台专用，
+  #                        与 Ark 大模型 key 不通用）。
+  #   bailian-cli / dashscope-ws / auto —— 百炼链路（回滚把 provider 改回 auto 即可）。
+  provider: volcengine-doubao
+  # 豆包供应商专属参数（bailian 的 model 字段对 volcengine 无效，音色在 characters.voice_id）
+  options:
+    api_key_env: VOLCENGINE_TTS_API_KEY
+    resource_id: seed-tts-2.0
+  # 下面这些仅 bailian 链路使用，保留作回滚底座
   model: cosyvoice-v3-flash
   output_format: wav
   # 音频会保留约 60ms 尾音，再留 120ms 对话换气，避免机械空档。
@@ -97,6 +123,10 @@ tts:
   volume: 1.0
   seed: 20260911
   trim_silence: true
+  # TTS 失败时的行为（2026-10-06 事故后改默认）：false = 硬失败，拒绝出静音片
+  # （与「数据缺失就 abort」同一哲学——发出去的废片比不发更糟）。
+  # true = 旧的静音兜底（纯预览/占位场景用），错误会记进 sidecar audio.tts_error。
+  allow_silent_fallback: false
   leading_silence: 0.025
   trailing_silence: 0.06
   fade_seconds: 0.025
@@ -161,11 +191,14 @@ topics:
 # accounts 里每个平台对应一个账号名；headless=true 时上传在后台浏览器执行。
 publish:
   # 已开通的发布渠道。未登录或 cookie 失效的平台会在发布前预检时被跳过并提示。
-  # 小红书 2026-09-25 恢复：用户要求加回。PLATFORM_SPECS 能力一直在（title 20、
-  # tags 10、AI 声明走 --ai-content-label）。已知遗留：本机生成的 3:4 封面在该
-  # 平台曾只有背景图（Chrome 截图不稳定）——封面失败只会降级为不带封面发布，
-  # 不中断；真复发就先 `sau xiaohongshu upload-video` 裸传观察。
-  platforms: [douyin, bilibili, kuaishou, xiaohongshu, tencent, baijiahao]
+  # 小红书 2026-10-07 移出（用户决定）。PLATFORM_SPECS 能力保留，加回只需把
+  # xiaohongshu 塞回 platforms。背景：09-25/09-26 两条被官方判「利用AI工具托管
+  # 运营账号」未通过（API punish_reason 明文）；此后每次发布点发布后服务端静默
+  # 不受理 → 卡「冲刺发布视频」900s 超时（09-29/10-01/10-06 均如此）。登录态本身
+  # 仍有效（creator 后台可看笔记管理）。重试无意义，等内容形态改变（真人出镜/
+  # 真人口播）或申诉成功再考虑。注：成功页判定 "**/publish/success?**" 也可能
+  # 已随改版失效（内容管理页 /content/content 已 404 → /new/note-manager）。
+  platforms: [douyin, bilibili, kuaishou, tencent, baijiahao]
   # 各平台账号名（对应 sau login --account 时的命名）。
   accounts:
     douyin: default
@@ -321,6 +354,13 @@ daemon:
   # tongstock）、/opt/homebrew/bin、/usr/local/bin 和当前 venv；只有把 node 装在
   # 别处（如 nvm）时才需要在这里补。
   path: []
+  # launchd 不加载 .zshrc —— shell 里 export 的 API key 到不了守护进程（2026-10-06
+  # 事故：TTS key 缺失）。这里写的键值对会写进 plist 的 EnvironmentVariables：
+  #   env:
+  #     VOLCENGINE_TTS_API_KEY: sk-xxx
+  # 改完要重新 `tangulunjin --daemon-install` 才生效。plist 在 ~/Library/LaunchAgents，
+  # 本机保护级别与 .zshrc 相同，只放机器本机凭据。
+  env: {}
 
 # 结果反馈：每次定时运行结束后，把「发了什么、成没成」推给你。
 #

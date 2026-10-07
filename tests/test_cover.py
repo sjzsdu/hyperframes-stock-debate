@@ -218,3 +218,14 @@ def test_png_size_reads_ihdr(tmp_path: Path) -> None:
     assert _png_size(path) == (1080, 1440)
     path.write_bytes(b"not a png")
     assert _png_size(path) is None
+
+def test_cover_html_carries_the_spotlight():
+    """首帧冲突数字与封面同源：有 spotlight 就渲染，没有就不出现空壳。"""
+    gen = CoverGenerator({"cover": {"chrome_path": ""}})
+    html = gen._html(STOCK, {**SCRIPT, "spotlight": {"label": "经营现金流", "value": "-2.4亿→+8000万"}},
+                     "601689", "portrait", 1080, 1440)
+    assert "经营现金流" in html
+    assert "-2.4亿→+8000万" in html
+
+    plain = gen._html(STOCK, SCRIPT, "601689", "portrait", 1080, 1440)
+    assert 'class="spotlight"' not in plain

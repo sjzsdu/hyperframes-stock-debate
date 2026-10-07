@@ -123,3 +123,13 @@ def test_fund_flow_phrases_are_whitelisted_not_rewritten():
     label, text, issues, _ = "片尾·提问", *agent._review_plain("片尾·提问", "机构净卖出之后你会加仓吗？", frame=True)
     assert "净卖出" in text
     assert any("加仓" in issue for issue in issues)
+
+def test_review_covers_the_first_frame_spotlight():
+    """spotlight 直接上首帧大卡与封面，必须与 hook 同一道 frame 审查。"""
+    reviewed = ComplianceAgent({}).review({
+        "turns": [{"speaker": "bull", "line": "这家公司靠色釉陶瓷赚钱。"}],
+        "spotlight": {"label": "经营现金流", "value": "-2.4亿→+8000万必涨"},
+    })
+    spot = reviewed["spotlight"]
+    assert "必涨" not in spot["value"]
+    assert any("禁用词" in issue for issue in reviewed["compliance_issues"])

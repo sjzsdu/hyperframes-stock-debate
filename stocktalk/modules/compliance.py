@@ -215,6 +215,21 @@ class ComplianceAgent:
                     rewrites.extend(changes)
             approved_script["sides"] = clean_sides
 
+        # spotlight（首帧/封面冲突数字）同样上屏，必须过同一道 frame 审查
+        spotlight = approved_script.get("spotlight")
+        if isinstance(spotlight, Mapping):
+            clean_spot = dict(spotlight)
+            for key, label in (("label", "首帧·指标名"), ("value", "首帧·冲突数字")):
+                if key not in spotlight:
+                    continue
+                original = str(spotlight.get(key) or "")
+                text, extra, changes = self._review_plain(label, original, frame=True)
+                issues.extend(extra)
+                if text != original:
+                    clean_spot[key] = text
+                    rewrites.extend(changes)
+            approved_script["spotlight"] = clean_spot
+
         existing = approved_script.get("disclaimers", [])
         if not isinstance(existing, list):
             existing = []

@@ -1,16 +1,16 @@
-"""谈股论金对话脚本的百炼 TTS 编排。
+"""谈股论金对话脚本的 TTS 编排（provider 可插拔，默认百炼 CLI）。
 
 每句对话单独渲染，以便视频时间轴准确切换活跃说话者。
 字幕时间是从生成的音频中导出的，而不是根据行中字符数估算的。
+
+本模块只负责业务：逐句 prosody（语速/音调/SSML break）、静音裁剪、
+时长统计与字幕对齐。传输（CLI 子进程 / DashScope WebSocket）在
+``stocktalk.modules.providers``，按 ``tts.provider`` 配置挑选。
 """
 
 from __future__ import annotations
 
-import asyncio
-import base64
-import json
 import math
-import os
 import re
 import shutil
 import struct
@@ -19,25 +19,25 @@ from pathlib import Path
 from typing import Any, Dict, List, Mapping
 
 from stocktalk.modules.arcs import resolve_speakers
+from stocktalk.modules.dialogue_generator import EMOTION_DIRECTIVES
 from stocktalk.modules.numbers import to_display
-
-try:
-    import websockets
-except ImportError:
-    websockets = None
+from stocktalk.modules.providers import TTSJob, TTSProviderError, create_tts_provider
 
 
 class TTSSynthesisError(RuntimeError):
-    """Raised when Bailian cannot produce a usable audio segment."""
+    """Raised when the TTS provider cannot produce a usable audio segment."""
 
 
 class TTSAgent:
     """Generate independent bull/bear voice tracks and aligned SRT subtitles."""
 
-    def __init__(self, config: Mapping[str, Any]):
+    def __init__(self, config: Mapping[str, Any], tts_provider: Any = None):
         self.config = config
         self.tts_config = config.get("tts", {})
         self.characters = config.get("characters", {})
+        # 传输层：显式注入 > 工厂（tts.provider，auto 按模型名分流，缺省=旧行为）。
+        self._provider = tts_provider if tts_provider is not None else create_tts_provider(self.tts_config)
+        self._supports_prosody = bool(getattr(self._provider, "supports_line_prosody", True))
         # 说话的角色由配置决定，不写死：硬编码 {"bull","bear"} 会让配置里新增的
         # 角色在这一步被静默丢掉（台词消失且不报错），是最难查的一类坑。
         # 默认两名角色始终可用，配置只覆盖其中一个时不会误判。
@@ -54,21 +54,19 @@ class TTSAgent:
         ``script['turns']`` is an ordered list of speaker/line mappings.  A synthesis failure is not hidden: an
         estimated timestamp would put later subtitles out of sync.
         """
-        if not self._is_websocket_model:
-            self._require_bailian_cli()
-        if self._is_websocket_model and websockets is None:
-            raise TTSSynthesisError("websockets package is required for qwen3-tts-vd-realtime models (pip install websockets)")
+        self._provider.check_ready()  # 依赖齐备性（CLI/包/密钥）在入口查一次
         audio_dir = self.output_dir / "audio"
         audio_dir.mkdir(parents=True, exist_ok=True)
 
-        turns = [(str(turn["speaker"]), str(turn["line"])) for turn in self._turns(script)]
-        jobs = [(character, line, audio_dir / f"{index:02d}_{character}.{self._audio_format}")
-                for index, (character, line) in enumerate(turns, start=1)]
-        if self._is_websocket_model:
-            rendered = self._synthesize_all_ws(jobs)
+        turns = [(str(turn["speaker"]), str(turn["line"]), str(turn.get("emotion", "")))
+                 for turn in self._turns(script)]
+        jobs = [(character, line, emotion, audio_dir / f"{index:02d}_{character}.{self._audio_format}")
+                for index, (character, line, emotion) in enumerate(turns, start=1)]
+        if self._supports_prosody:
+            rendered = [self._synthesize_line_cli(line, character, output_path, emotion)
+                        for character, line, emotion, output_path in jobs]
         else:
-            rendered = [self._synthesize_line_cli(line, character, output_path)
-                        for character, line, output_path in jobs]
+            rendered = self._synthesize_all_ws(jobs)
 
         segments: List[Dict[str, Any]] = []
         cursor = 0.0
@@ -90,63 +88,76 @@ class TTSAgent:
         """Read the natural-turn contract, with legacy round support for old files."""
         turns = script.get("turns", [])
         if isinstance(turns, list):
-            return [{"speaker": str(item.get("speaker")), "line": str(item.get("line"))}
+            return [{"speaker": str(item.get("speaker")), "line": str(item.get("line")),
+                     "emotion": str(item.get("emotion") or "")}
                     for item in turns if isinstance(item, Mapping) and item.get("speaker") in self.speakers and item.get("line")]
         result: List[Dict[str, str]] = []
         for round_data in script.get("rounds", []):
             if isinstance(round_data, Mapping):
                 for speaker in self.speakers:
                     line = TTSAgent._line_from(round_data.get(speaker))
-                    if line: result.append({"speaker": speaker, "line": line})
+                    if line: result.append({"speaker": speaker, "line": line, "emotion": ""})
         return result
+
+    def _line_instruction(self, character: str, emotion: str) -> str | None:
+        """本句的演绎指令：角色基础指令 + 按轮情绪短语（2026-10-07）。
+
+        通道开关语义与旧版一致：CLI 路径要 ``supports_instruction`` 显式开启
+        （系统 _v3 音色传 instruction 会 428）；WebSocket 设计音色的
+        ``voice_direction`` 一直直传、无需开关。情绪短语只在
+        ``supports_instruction`` 通道激活时叠加——豆包 context_texts 每次调用
+        独立传，逐句合成的架构正好一句一个情绪。
+        """
+        cfg = self.characters.get(character, {}) or {}
+        if cfg.get("supports_instruction"):
+            parts = [str(cfg.get("instruction") or "").strip()]
+            directive = EMOTION_DIRECTIVES.get(emotion, "")
+            if directive:
+                parts.append(directive)
+        else:
+            parts = [str(cfg.get("voice_direction") or "").strip()]
+        merged = "；".join(p for p in parts if p)
+        return merged or None
 
     @property
     def _audio_format(self) -> str:
         value = str(self.tts_config.get("output_format", "wav")).lower()
         if value not in {"mp3", "pcm", "wav", "opus"}:
-            raise ValueError(f"Unsupported Bailian audio format: {value}")
+            raise ValueError(f"Unsupported audio format: {value}")
         return value
 
-    @property
-    def _is_websocket_model(self) -> bool:
-        """Design-voice models (qwen3-tts-vd-realtime) require WebSocket synthesis."""
-        model = str(self.tts_config.get("model", "cosyvoice-v3-flash"))
-        return "vd-realtime" in model or "tts-vd" in model
-
     def _synthesize_all_ws(
-        self, jobs: List[tuple[str, str, Path]]
+        self, jobs: List[tuple[str, str, str, Path]]
     ) -> List[Dict[str, Any]]:
-        """Synthesize every line over one persistent WebSocket per character.
+        """实时设计音色：同一角色复用一条持久 WebSocket（见 dashscope_ws_tts）。
 
-        Design voices drift in timbre when each line opens a fresh session: the
-        server re-seeds prosody per connection.  Keeping a single connection per
-        speaker and issuing ``input_text_buffer.commit`` per line yields separate
-        audio files while sharing one voice/session context, so the same speaker
-        sounds consistent across the whole video.
+        这条路径不做逐句 prosody：设计音色只接受会话级语速/音调，
+        会话参数在 provider 建连时一次性下发。
         """
-        if websockets is None:
-            raise TTSSynthesisError("websockets package is required (pip install websockets)")
-        api_key = os.environ.get("DASHSCOPE_API_KEY", "")
-        if not api_key:
-            raise TTSSynthesisError("DASHSCOPE_API_KEY environment variable is not set")
-        for character, _, _ in jobs:
+        for character, _, _, _ in jobs:
             voice_id = (self.characters.get(character, {}) or {}).get("voice_id")
             if not voice_id or voice_id == "default":
                 raise TTSSynthesisError(f"No voice_id configured for {character}")
 
+        tts_jobs: List[TTSJob] = []
+        for character, line, emotion, output_path in jobs:
+            cfg = self.characters.get(character, {}) or {}
+            tts_jobs.append(TTSJob(
+                text=line, voice=str(cfg.get("voice_id")), out_path=output_path,
+                audio_format=self._audio_format,
+                speed=float(cfg.get("speed", self.tts_config.get("speed", 1.0))),
+                pitch=float(cfg.get("pitch", self.tts_config.get("pitch", 1.0))),
+                volume=self.tts_config.get("volume", 1.0),
+                instruction=self._line_instruction(character, emotion),
+                label=character,
+            ))
         try:
-            files = asyncio.run(self._run_ws_batch(jobs, api_key))
-        except TTSSynthesisError:
-            raise
-        except Exception as exc:
-            raise TTSSynthesisError(f"WebSocket TTS batch failed: {exc}") from exc
+            self._provider.synthesize_lines(tts_jobs)
+        except TTSProviderError as exc:
+            raise TTSSynthesisError(str(exc)) from exc
 
         segments: List[Dict[str, Any]] = []
-        for (character, line, output_path), raw in zip(jobs, files):
-            if not raw:
-                raise TTSSynthesisError(f"WebSocket TTS produced no audio for {character}")
-            with open(output_path, "wb") as f:
-                f.write(self._ensure_wav(raw))
+        for character, line, _, output_path in jobs:
             if self.tts_config.get("trim_silence", True):
                 self._trim_and_fade(output_path)
             character_config = self.characters.get(character, {})
@@ -158,99 +169,6 @@ class TTSAgent:
                 "duration": self._audio_duration(output_path),
             })
         return segments
-
-    @staticmethod
-    def _ensure_wav(raw: bytes, sample_rate: int = 24000) -> bytes:
-        """Wrap bare PCM in a RIFF/WAVE header; pass WAV/MP3 streams through.
-
-        The realtime server only emits a RIFF header on the FIRST response of a
-        session; later ``commit`` responses arrive as headerless PCM, so every
-        segment must be normalised to a standalone playable WAV.
-        """
-        if raw[:4] == b"RIFF":
-            return raw
-        return (struct.pack("<4sI4s4sIHHIIHH4sI",
-                            b"RIFF", 36 + len(raw), b"WAVE", b"fmt ", 16,
-                            1, 1, sample_rate, sample_rate * 2, 2, 16,
-                            b"data", len(raw)) + raw)
-
-    async def _run_ws_batch(
-        self, jobs: List[tuple[str, str, Path]], api_key: str
-    ) -> List[bytes]:
-        model = str(self.tts_config.get("model", "qwen3-tts-vd-realtime-2025-12-16"))
-        ws_url = f"wss://dashscope.aliyuncs.com/api-ws/v1/realtime?model={model}"
-        timeout = float(self.tts_config.get("websocket_timeout_seconds", 30))
-        volume = self.tts_config.get("volume", 1.0)
-        try:
-            volume = max(0, min(100, round(float(volume) * 100 if float(volume) <= 1 else float(volume))))
-        except (TypeError, ValueError):
-            volume = 100
-
-        async def connect_character(character: str):
-            cfg = self.characters.get(character, {})
-            speed = float(cfg.get("speed", self.tts_config.get("speed", 1.0)))
-            pitch = float(cfg.get("pitch", self.tts_config.get("pitch", 1.0)))
-            instructions = str(cfg.get("voice_direction", "")).strip() or None
-            ws = await websockets.connect(ws_url, additional_headers={"Authorization": f"Bearer {api_key}"})
-            try:
-                await ws.recv()  # session.created
-                # Uniform PCM on the wire: only the session's first response
-                # carries a RIFF header, so we normalise every segment ourselves.
-                wire_format = "pcm" if self._audio_format in {"wav", "pcm"} else self._audio_format
-                session_config: dict[str, Any] = {
-                    "voice": cfg.get("voice_id"),
-                    "response_format": wire_format,
-                    "sample_rate": 24000,
-                    "mode": "commit",
-                    "speech_rate": speed,
-                    "pitch_rate": pitch,
-                    "volume": volume,
-                    "language_type": "zh",
-                }
-                if instructions:
-                    session_config["instructions"] = instructions
-                await ws.send(json.dumps({"type": "session.update", "session": session_config}))
-                reply = json.loads(await asyncio.wait_for(ws.recv(), timeout=timeout))
-                if reply.get("type") == "error":
-                    raise TTSSynthesisError(f"WebSocket session error ({character}): {reply.get('error', {}).get('message', reply)}")
-            except Exception:
-                await ws.close()
-                raise
-            return ws
-
-        async def synth_line(ws, line: str) -> bytes:
-            await ws.send(json.dumps({"type": "input_text_buffer.append", "text": line}))
-            await ws.send(json.dumps({"type": "input_text_buffer.commit"}))
-            chunks: list[bytes] = []
-            while True:
-                data = json.loads(await asyncio.wait_for(ws.recv(), timeout=timeout))
-                t = data.get("type", "")
-                if t == "response.audio.delta":
-                    chunks.append(base64.b64decode(data["delta"]))
-                elif t == "response.done":
-                    break
-                elif t == "error":
-                    raise TTSSynthesisError(f"WebSocket synthesis error: {data.get('error', {}).get('message', data)}")
-            return b"".join(chunks)
-
-        connections: dict[str, Any] = {}
-        results: List[bytes] = []
-        try:
-            for character, line, _ in jobs:
-                if character not in connections:
-                    connections[character] = await connect_character(character)
-                results.append(await synth_line(connections[character], line))
-        finally:
-            for ws in connections.values():
-                try:
-                    await ws.send(json.dumps({"type": "session.finish"}))
-                except Exception:
-                    pass
-                try:
-                    await asyncio.wait_for(ws.close(), timeout=5)
-                except Exception:
-                    pass
-        return results
 
     @staticmethod
     def _clamp(value: float, low: float, high: float) -> float:
@@ -313,7 +231,8 @@ class TTSAgent:
             return f"<speak>{text}</speak>", True
         return line, False
 
-    def _synthesize_line_cli(self, line: str, character: str, output_path: Path) -> Dict[str, Any]:
+    def _synthesize_line_cli(self, line: str, character: str, output_path: Path,
+                             emotion: str = "") -> Dict[str, Any]:
         character_config = self.characters.get(character, {})
         voice_id = character_config.get("voice_id")
         if not voice_id or voice_id == "default":
@@ -326,45 +245,20 @@ class TTSAgent:
         # down; strategic <break> tags add rhetorical rhythm.  The original line
         # is kept untouched for subtitles.
         synth_text, speed, pitch, use_ssml = self._apply_prosody(line, character_config)
-        command = [
-            "bl", "speech", "synthesize",
-            "--text", synth_text,
-            "--model", str(self.tts_config.get("model", "cosyvoice-v3-flash")),
-            "--format", self._audio_format,
-            "--out", str(output_path),
-        ]
-        command.extend(["--voice", str(voice_id)])
-        if use_ssml:
-            command.append("--enable-ssml")
-
-        sample_rate = self.tts_config.get("sample_rate")
-        if sample_rate:
-            command.extend(["--sample-rate", str(sample_rate)])
-        command.extend(["--rate", str(speed)])
-        volume = self.tts_config.get("volume")
-        if volume is not None:
-            volume_f = float(volume)
-            command.extend(["--volume", str(round(volume_f * 100) if volume_f <= 1 else round(volume_f))])
-        if pitch is not None and 0.5 <= float(pitch) <= 2.0:
-            command.extend(["--pitch", str(pitch)])
-        # Some cloned/designed voices support natural-language instructions.
-        # CosyVoice v3 system voices currently reject this parameter (428), so
-        # voice_direction remains useful documentation unless explicitly opted in.
-        instruction = character_config.get("instruction") if character_config.get("supports_instruction") else None
-        if instruction:
-            command.extend(["--instruction", str(instruction)])
-        seed = self.tts_config.get("seed")
-        if seed is not None:
-            command.extend(["--seed", str(seed)])
-        command.extend(["--language", "zh"])
-
+        job = TTSJob(
+            text=synth_text, voice=str(voice_id), out_path=output_path,
+            audio_format=self._audio_format,
+            speed=speed, pitch=pitch, volume=self.tts_config.get("volume"),
+            use_ssml=use_ssml,
+            sample_rate=self.tts_config.get("sample_rate"),
+            seed=self.tts_config.get("seed"),
+            instruction=self._line_instruction(character, emotion),
+            label=character,
+        )
         try:
-            completed = subprocess.run(command, capture_output=True, text=True, timeout=120, check=False)
-        except (OSError, subprocess.TimeoutExpired) as exc:
-            raise TTSSynthesisError(f"Failed to run Bailian TTS for {character}: {exc}") from exc
-        if completed.returncode != 0 or not output_path.is_file() or output_path.stat().st_size == 0:
-            detail = completed.stderr.strip() or completed.stdout.strip() or "no audio file was created"
-            raise TTSSynthesisError(f"Bailian TTS failed for {character}: {detail}")
+            self._provider.synthesize_lines([job])
+        except TTSProviderError as exc:
+            raise TTSSynthesisError(str(exc)) from exc
 
         if self.tts_config.get("trim_silence", True):
             self._trim_and_fade(output_path)
@@ -521,8 +415,3 @@ class TTSAgent:
         minutes, milliseconds = divmod(milliseconds, 60_000)
         whole_seconds, milliseconds = divmod(milliseconds, 1_000)
         return f"{hours:02d}:{minutes:02d}:{whole_seconds:02d},{milliseconds:03d}"
-
-    @staticmethod
-    def _require_bailian_cli() -> None:
-        if not shutil.which("bl"):
-            raise TTSSynthesisError("Bailian CLI 'bl' is not installed or not on PATH")

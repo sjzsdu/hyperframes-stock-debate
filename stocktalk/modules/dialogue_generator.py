@@ -1,10 +1,13 @@
-"""Generate natural, business-focused stock conversations with Bailian."""
+"""Generate natural, business-focused stock conversations via a pluggable LLM.
+
+传输层走 ``stocktalk.modules.providers``（默认百炼 CLI，可配置切换到任何
+OpenAI-compatible 端点）；本模块只负责业务：prompt 构造、骨架选择、
+响应解包与脚本归一化。
+"""
 from __future__ import annotations
 
 import json
 import re
-import shutil
-import subprocess
 from dataclasses import dataclass
 from datetime import date
 from typing import Any, Callable, Mapping, Sequence
@@ -13,6 +16,8 @@ from stocktalk.modules.arcs import (Arc, ArcChoice, Beat, beats_by_key,
                                     resolve_speakers, select_arc)
 from stocktalk.modules.hyperframes_builder import short_business_label
 from stocktalk.modules.numbers import repair_spoken_numbers, to_display
+from stocktalk.modules.providers import ProviderError, create_llm_client
+from stocktalk.modules.providers.bailian_chat import BailianChatClient
 from stocktalk.modules.stock_data import StockDataClient
 from stocktalk.modules.story_spotter import spot_stories
 
@@ -29,6 +34,20 @@ Runner = Callable[[Sequence[str], float], str]
 # prompt turns a duration target into a character budget with this rate, because
 # asking a model for "a 90-second dialogue" reliably overshoots.
 SPEECH_CHARS_PER_SECOND = 4.8
+
+# 按轮情绪（2026-10-07）：模型每轮自报台词的当下情绪，TTS 按轮注入演绎指令——
+# 「情绪在对话里起伏」是听感从平铺到有戏的最大杠杆（豆包 context_texts 每次调用
+# 独立传，逐句合成架构正好一一对应）。词表同时是归一化的校验白名单；
+# 短语是 TTS 端的演绎描述（EMOTION_DIRECTIVES 由 tts_agent 消费）。
+TURN_EMOTIONS = ("反驳", "质疑", "惊叹", "顿悟", "坚守", "平述")
+EMOTION_DIRECTIVES = {
+    "反驳": "这一句用反驳的语气，锋芒毕露、寸步不让",
+    "质疑": "这一句用怀疑审视的语气，带着不解和追问感",
+    "惊叹": "这一句用惊讶、难以置信的语气，像刚看到一个意外的数字",
+    "顿悟": "这一句用恍然大悟的语气，像刚刚想通一件事",
+    "坚守": "这一句用笃定沉稳的语气，立场坚定不被说服",
+    "平述": "",
+}
 
 # 成片时长目标 2-5 分钟（2026-09-20 用户反馈"内容太短、得不到有效启示"）。
 # 2026-09-22 用户反馈：轮次多一点、每人一次讲短一点——短交锋才有辩论的节奏，
@@ -57,7 +76,8 @@ class DialogueConfig:
 class DialogueGenerator:
     """Return ordered turns, not artificial paired debate rounds."""
 
-    def __init__(self, config: Mapping[str, Any] | None = None, runner: Runner | None = None) -> None:
+    def __init__(self, config: Mapping[str, Any] | None = None, runner: Runner | None = None,
+                 llm: Any = None) -> None:
         source = dict((config or {}).get("dialogue", config or {}))
         self.config = DialogueConfig(
             model=str(source.get("model", DialogueConfig.model)),
@@ -82,7 +102,15 @@ class DialogueGenerator:
         # 静默丢弃——一个不报错的坑。配置里加了角色就自动可用。
         self.speakers = resolve_speakers(self.characters)
         self._active: ArcChoice | None = None
-        self._runner = runner or self._run_subprocess
+        # LLM 传输层：显式注入 > 旧 runner 契约（包成百炼 client，测试无需改动）
+        # > 按配置走工厂（dialogue.provider，默认 bailian-cli）。
+        if llm is not None:
+            self._llm = llm
+        elif runner is not None:
+            self._llm = BailianChatClient(model=self.config.model, runner=runner,
+                                          default_timeout=self.config.timeout_seconds)
+        else:
+            self._llm = create_llm_client(config, default_timeout=self.config.timeout_seconds)
 
     def select_arc(self, payload: Mapping[str, Any]) -> ArcChoice:
         """按这只票的数据挑骨架，并记下选择结果供 prompt 与审计复用。"""
@@ -102,7 +130,6 @@ class DialogueGenerator:
     def generate(self, stock_data: Mapping[str, Any]) -> dict[str, Any]:
         if not isinstance(stock_data, Mapping):
             raise TypeError("stock_data must be a mapping")
-        self._require_bailian_cli()
         payload = self._compact_data(stock_data)
         # 本期重点（2026-09-29）：按个股数据挑出的讨论角度——每期视频「有个性」
         # 的入口。没有足够数据（新股/块缺失）时就是空表，prompt 里不会出现。
@@ -110,15 +137,15 @@ class DialogueGenerator:
         if stories:
             payload["本期重点"] = stories
         choice = self.select_arc(payload)
-        raw = self._runner(self._command(self._system_prompt(choice.arc),
-                                         self._user_prompt(payload, choice.arc)),
-                           self.config.timeout_seconds)
+        try:
+            raw = self._llm.chat(self._system_prompt(choice.arc),
+                                 self._user_prompt(payload, choice.arc),
+                                 max_tokens=self.config.max_tokens,
+                                 temperature=self.config.temperature,
+                                 timeout=self.config.timeout_seconds)
+        except ProviderError as exc:
+            raise DialogueGenerationError(str(exc)) from exc
         return self._normalize_script(self._decode_response(raw), payload, choice)
-
-    def _command(self, system: str, message: str) -> list[str]:
-        return ["bl", "text", "chat", "--model", self.config.model, "--system", system, "--message", message,
-                "--max-tokens", str(self.config.max_tokens), "--temperature", str(self.config.temperature),
-                "--output", "json", "--quiet"]
 
     def _system_prompt(self, arc: Arc | None = None) -> str:
         choice = self._choice_for(arc)
@@ -164,6 +191,11 @@ class DialogueGenerator:
             "8. 台词要有情绪起伏和口语节奏：多使用反问、设问、惊讶、质疑、认同后转折；"
             "在最想强调的词和数字上自然用上\u201c！\u201d\u201c？\u201d\u201c……\u201d\u201c——\u201d等标点，"
             "但不要每句都感叹，该克制时克制，做到有张有弛。\n"
+            "8b. 每轮输出一个 emotion 字段，标注这句台词**说出口那一刻**的情绪，"
+            "只能取：反驳/质疑/惊叹/顿悟/坚守/平述。它是配音的情绪脚本（配音会据此调整语气），"
+            "不是台词的一部分：被驳斥时的回击→反驳，摆事实提疑点→质疑，听到意外的数字→惊叹，"
+            "刚想通一个关联→顿悟，守住立场不被说服→坚守，普通陈述→平述。"
+            "同一情绪不要连用超过三轮；全片「平述」超过一半等于没打——辩论的情绪就在起伏里。\n"
             "9. 数字必须写完整读法，禁止缩略：写「四亿五千一百万」不要写「四亿五一」，"
             "写「百分之八十二点七」不要写「八成二七」，写「十八点二九」不要写「十八二九」；"
             "缩略数字配音会念错，观众也听不懂。\n"
@@ -177,6 +209,11 @@ class DialogueGenerator:
             "让人立刻想问「为什么」；前两句里要埋一个信息缺口——反差、反问或未解的因果，"
             "观众为了补上这个缺口才会把片子看完。不要用行业定性开场（「这是一家做XX的公司」），"
             "公司是谁、做什么生意，让观众从数据交锋里自己拼出来。"
+            "\n叙事铺排（重要）：最强的反差数字/反常识事实是本期的「底牌」，不许在中段平铺掉——"
+            "开头埋钩（只露一半，让人想问另一半）、中段造张力（顺着质疑把代价和疑点铺深）、"
+            "把底牌安排在整体进度的 60%-75% 处揭晓（揭晓那一刻要有情绪：惊叹/沉默/重新评估），"
+            "片尾收束再把分歧留给观众。这只改变**已有数据的出场顺序和悬念话术**："
+            "不许为了戏剧性夸大、预判或编造任何数字，数据说什么就是什么。\n"
             "\n对话节奏（重要）：长度由内容决定，该长则长、该短则短。允许某一轮只有几个字"
             "（如“嗯”“有道理”“但是——”“等等，这个不对”），用来表示认可、打断或迟疑；"
             "也允许一方连续追问、另一方长答后短驳。不要为了凑字数把每一轮都写满，也不要每轮等长。"
@@ -283,11 +320,13 @@ class DialogueGenerator:
             {"speaker": "bull", "line": f"一句完整自然的话，{floor_chars} 到 {self.config.max_line_chars} 字；"
                                         f"说不下就拆成两轮说；短回应可以只有 2-8 字",
              "beat": f"骨架节拍，只能取：{'/'.join(beat_keys)}",
+             "emotion": "平述（只能取：反驳/质疑/惊叹/顿悟/坚守/平述，见系统提示 8b）",
              "visual": ["line 中提到的关键词1", "关键词2"]}],
             "sides": {"bull": "看多一方的一句话立场（只讲生意层面的分歧）",
                       "bear": "看空一方的一句话立场"},
             "hook": "下一期要盯的一个可验证的具体变量",
             "question": "抛给观众的一个生意层面二选一问题",
+            "spotlight": {"label": "指标名（≤8字）", "value": "冲突数字短语（≤16字，阿拉伯数字）"},
             }
         return (
             f"生成一段成片时长在 {min_s}-{max_s} 秒（约 {minutes}）的中文对话流："
@@ -329,6 +368,11 @@ class DialogueGenerator:
             "禁止询问买卖、点位、涨跌、能不能涨；"
             "sides —— 多空各一句立场，只讲生意层面的分歧（渠道、产能、价格能不能传导、谁会替代谁），"
             "一句话说完；禁止出现点位、目标价、买卖动作、收益暗示。"
+            "另外必须产出一个 spotlight 字段——首帧大卡与封面的「冲突数字」：从数据里挑本期最反差的一个数字，"
+            "label 是指标名（不超过 8 个字，如「经营现金流」），value 是冲突表达（不超过 16 个字，"
+            "阿拉伯数字，如「-2.4亿→+8000万」「毛利率38%→31%」）。"
+            "它必须原样来自提供的数据，禁止换算、推算或暗示涨跌方向；"
+            "它是纯上屏元素（不进配音台词），所以数字直接写阿拉伯写法。\n"
             # --message 的注入点：选材与侧重参考，紧挨 JSON 结构说明之前——
             # 数据 JSON 仍留在提示最尾部，模型的"最后读到的是数据"不变。
             + self._message_section()
@@ -378,6 +422,13 @@ class DialogueGenerator:
             if beat and beat.speaker and beat.speaker != speaker:
                 notes.append(f"[第{index}轮] 骨架指定由 {beat.speaker} 说这段（{beat.key}），模型派给了 {speaker}")
             visuals = self._clean_visuals(entry.get("visual"))
+            # 按轮情绪：词表外/缺省一律回落「平述」并留痕——TTS 端拿到的 emotion
+            # 必须是 EMOTION_DIRECTIVES 里存在的 key，不许未定义行为。
+            emotion = str(entry.get("emotion") or "").strip()
+            if emotion not in TURN_EMOTIONS:
+                if emotion:
+                    notes.append(f"[第{index}轮] emotion “{emotion}” 不在词表内，按平述处理")
+                emotion = "平述"
             # 模型没管住字数时，把超长台词拆成同说话人的续轮——一个字都不丢，
             # 而且正好贴合"轮次多一点、每次讲短一点"的节奏（2026-09-22 用户反馈）。
             pieces = self._split_line(line)
@@ -387,6 +438,8 @@ class DialogueGenerator:
                               # 只有首段能算短回应；续轮是正常发言，别跳过图板
                               "short": short and offset == 0,
                               "visual": visuals,
+                              # 续轮继承同一情绪：它们是同一句话的拆分，语气不该变
+                              "emotion": emotion,
                               "character_name": self._character(speaker, speaker, "")["name"]})
         quote = stock_data.get("quote") if isinstance(stock_data.get("quote"), Mapping) else {}
         code, name = str(stock_data.get("code") or quote.get("code") or ""), str(quote.get("name") or stock_data.get("code") or "股票")
@@ -400,6 +453,8 @@ class DialogueGenerator:
                 "hook": self._clean_text(response.get("hook"), 60),
                 "question": self._clean_text(response.get("question"), 60),
                 "sides": self._clean_sides(response.get("sides")),
+                # 首帧/封面冲突数字（上屏专用）；模型没给就 None，画面不硬凑
+                "spotlight": self._clean_spotlight(response),
                 "char_count": char_count,
                 # 按实测语速换算的自估时长。长片最容易出的偏差是模型多写几百字，
                 # 把它留在结果里，pipeline 就能在渲染前提醒（而不是渲完才发现超长）。
@@ -409,6 +464,23 @@ class DialogueGenerator:
             # 旁边的 JSON / 审查页里看到原话，否则提示词是一条断掉的回溯链。
             script["message"] = self.config.message
         return script
+
+    @staticmethod
+    def _clean_spotlight(response: Mapping[str, Any]) -> dict[str, str] | None:
+        """首帧/封面冲突数字（2026-10-07）。
+
+        纯上屏元素，value 统一过 ``to_display`` 转阿拉伯——模型偶尔会把口播
+        的完整读法（「四亿五千万」）带进来，上屏必须回到「4.5亿」。
+        label/value 任一缺失就返回 None：画面不硬凑一个空壳。
+        """
+        raw = response.get("spotlight")
+        if not isinstance(raw, Mapping):
+            return None
+        label = re.sub(r"\s+", "", str(raw.get("label") or ""))[:8]
+        value = re.sub(r"\s+", "", str(raw.get("value") or ""))[:16]
+        if not label or not value:
+            return None
+        return {"label": label, "value": to_display(value)}
 
     @staticmethod
     def _resolve_beat(reported: Any, beats: Sequence[Beat], cursor: int, index: int,
@@ -631,17 +703,6 @@ class DialogueGenerator:
                 except json.JSONDecodeError as exc: raise DialogueGenerationError("Bailian returned invalid JSON script") from exc
             else: break
         return parsed
-
-    @staticmethod
-    def _run_subprocess(argv: Sequence[str], timeout: float) -> str:
-        try: completed = subprocess.run(argv, capture_output=True, text=True, timeout=timeout, check=False)
-        except (OSError, subprocess.TimeoutExpired) as exc: raise DialogueGenerationError(f"Failed to run Bailian chat: {exc}") from exc
-        if completed.returncode != 0: raise DialogueGenerationError(f"Bailian chat failed: {completed.stderr.strip() or completed.stdout.strip() or 'unknown error'}")
-        return completed.stdout
-
-    @staticmethod
-    def _require_bailian_cli() -> None:
-        if not shutil.which("bl"): raise DialogueGenerationError("Bailian CLI 'bl' is not installed or not on PATH")
 
 
 def generate_dialogue(stock_data: Mapping[str, Any], config: Mapping[str, Any] | None = None) -> dict[str, Any]:

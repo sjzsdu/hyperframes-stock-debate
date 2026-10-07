@@ -308,9 +308,19 @@ class Pipeline:
                 self.tts.output_dir = project_dir
                 audio = self._retry("TTS synthesis", lambda: self.tts.synthesize(approved))
             except PipelineError as exc:
+                # 2026-10-06 事故：静音兜底太安静 —— key 没进进程环境，一条没有声音的
+                # 成片照常渲染、照常发布，直到人看了才发现。与「数据缺失就 abort」同一
+                # 哲学：废片发出去比不发更糟。默认改为硬失败；确要旧兜底（如纯预览），
+                # 显式配 tts.allow_silent_fallback: true，且错误会记进 sidecar。
+                if not (self.config.get("tts", {}) or {}).get("allow_silent_fallback", False):
+                    raise PipelineError(
+                        f"TTS synthesis failed: {exc} —— 拒绝发布静音成片。"
+                        "先修 TTS（检查 API key 环境变量/供应商配置）；"
+                        "确要静音兜底请显式配置 tts.allow_silent_fallback: true") from exc
                 srt_path = project_dir / f"{tag}.srt"
                 self.console.print(f"[yellow]{exc}; continuing with silent video and subtitles.[/yellow]")
                 audio = self._silent_timeline(approved, srt_path)
+                audio["tts_error"] = str(exc)
             progress.advance(task)
 
             progress.update(task, description="Building HyperFrames project")

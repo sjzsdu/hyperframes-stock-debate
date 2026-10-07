@@ -26,8 +26,9 @@ def test_every_platform_names_its_preferred_canvas() -> None:
 
     platform_canvas 同时决定「一次运行渲几版」：这里列了两种画幅，
     所以会渲出横竖两个 MP4，各平台取自己那一版。
-    小红书 2026-09-25 恢复（用户要求加回）：纯移动端 9:16 平台走 vertical，
-    与快手共用同一版竖片，不新增渲染成本。
+    小红书 2026-10-07 移出 platforms（账号被官方判「AI托管运营」禁止发布，
+    详见 default.yaml 注释），但 platform_canvas / ai_content_label 的能力
+    配置保留——加回平台时只动 platforms 一行。
     """
     canvases = _config()["publish"]["platform_canvas"]
     assert set(canvases) == {"douyin", "bilibili", "kuaishou", "xiaohongshu", "tencent", "baijiahao"}
@@ -39,7 +40,7 @@ def test_every_platform_names_its_preferred_canvas() -> None:
     # 快手激励不强制横屏且流量收益集中在竖屏；小红书同为竖屏社区。
     assert canvases["kuaishou"] == "vertical"
     assert canvases["xiaohongshu"] == "vertical"
-    assert "xiaohongshu" in _config()["publish"]["platforms"]
+    assert "xiaohongshu" not in _config()["publish"]["platforms"]
 
 
 def test_safe_areas_cover_platform_ui() -> None:
@@ -90,7 +91,10 @@ def test_long_script_budget_gets_headroom_for_tokens_and_timeouts() -> None:
 
 
 def test_ai_content_label_is_configured_for_the_cli_platforms() -> None:
-    """快手与小红书走 --ai-content-label 通道，选项文案必须在配置里。"""
+    """快手与小红书走 --ai-content-label 通道，选项文案必须在配置里。
+
+    小红书虽已移出 platforms（2026-10-07），文案保留以备加回。
+    """
     label = _config()["publish"]["ai_content_label"]
     assert label["kuaishou"]
     assert label["xiaohongshu"]

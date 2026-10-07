@@ -17,7 +17,7 @@ class DialogueGeneratorTests(unittest.TestCase):
         calls = []
         generator = DialogueGenerator({"dialogue": {"max_line_chars": 80}, "characters": {"bull": {"name": "新手"}}},
                                       runner=lambda argv, timeout: calls.append((argv, timeout)) or self._response())
-        with patch("stocktalk.modules.dialogue_generator.shutil.which", return_value="bl"):
+        with patch("stocktalk.modules.providers.bailian_chat.shutil.which", return_value="bl"):
             script = generator.generate({"code": "000001", "quote": {"name": "平安银行", "price": 10.5}})
         self.assertNotIn("rounds", script)
         self.assertEqual([turn["speaker"] for turn in script["turns"]], ["bull", "bear", "bull"])
@@ -102,7 +102,7 @@ class DialogueGeneratorTests(unittest.TestCase):
         generator = DialogueGenerator({"dialogue": {"max_line_chars": 80},
                                        "characters": {"bull": {"name": "新手"}, "bear": {"name": "老手"}}},
                                       runner=lambda argv, timeout: response)
-        with patch("stocktalk.modules.dialogue_generator.shutil.which", return_value="bl"):
+        with patch("stocktalk.modules.providers.bailian_chat.shutil.which", return_value="bl"):
             script = generator.generate({"code": "000001", "quote": {"name": "平安银行"}})
         turns = script["turns"]
         self.assertGreater(len(turns), 1, "超长台词必须拆成多轮")
@@ -131,7 +131,7 @@ class DialogueGeneratorTests(unittest.TestCase):
     def test_script_reports_estimated_speech_duration(self):
         """结果里带上字数与换算时长，好让流水线在渲染前就能提醒超长。"""
         generator = DialogueGenerator(runner=lambda argv, timeout: self._response())
-        with patch("stocktalk.modules.dialogue_generator.shutil.which", return_value="bl"):
+        with patch("stocktalk.modules.providers.bailian_chat.shutil.which", return_value="bl"):
             script = generator.generate({"code": "000001", "quote": {"name": "平安银行"}})
 
         chars = sum(len(turn["line"]) for turn in script["turns"])
@@ -140,7 +140,7 @@ class DialogueGeneratorTests(unittest.TestCase):
 
     def test_script_has_no_disclaimer_or_visual_prompt_fields(self):
         generator = DialogueGenerator(runner=lambda argv, timeout: self._response())
-        with patch("stocktalk.modules.dialogue_generator.shutil.which", return_value="bl"):
+        with patch("stocktalk.modules.providers.bailian_chat.shutil.which", return_value="bl"):
             script = generator.generate({"code": "000001", "quote": {"name": "平安银行"}})
         self.assertNotIn("disclaimer", script)
         for turn in script["turns"]:
@@ -149,13 +149,13 @@ class DialogueGeneratorTests(unittest.TestCase):
     def test_accepts_bailian_json_envelope(self):
         response = json.dumps({"content": json.dumps({"turns": [{"speaker": "bear", "line": "数据的边界比结论更重要。"}]}, ensure_ascii=False)})
         generator = DialogueGenerator(runner=lambda argv, timeout: response)
-        with patch("stocktalk.modules.dialogue_generator.shutil.which", return_value="bl"):
+        with patch("stocktalk.modules.providers.bailian_chat.shutil.which", return_value="bl"):
             script = generator.generate({"code": "1"})
         self.assertEqual(script["turns"][0]["speaker"], "bear")
 
     def test_rejects_missing_or_invalid_speaker(self):
         generator = DialogueGenerator(runner=lambda argv, timeout: '{"turns":[{"speaker":"host","line":"x"}]}')
-        with patch("stocktalk.modules.dialogue_generator.shutil.which", return_value="bl"):
+        with patch("stocktalk.modules.providers.bailian_chat.shutil.which", return_value="bl"):
             with self.assertRaises(DialogueGenerationError): generator.generate({"code": "1"})
 
     def test_prompt_includes_trimmed_recent_market_digest(self):
@@ -255,7 +255,7 @@ class DialogueGeneratorTests(unittest.TestCase):
 
     def test_system_prompt_renders_the_chosen_arc_instead_of_a_fixed_mainline(self):
         generator = self._annual_generator()
-        with patch("stocktalk.modules.dialogue_generator.shutil.which", return_value="bl"):
+        with patch("stocktalk.modules.providers.bailian_chat.shutil.which", return_value="bl"):
             generator.generate(self._full_data())
         system = generator._system_prompt()
         # 骨架的节拍与分工进了 prompt
@@ -281,7 +281,7 @@ class DialogueGeneratorTests(unittest.TestCase):
         self.assertIn("可验证的具体变量", message)
 
     def test_script_records_the_arc_beats_and_interaction_copy(self):
-        with patch("stocktalk.modules.dialogue_generator.shutil.which", return_value="bl"):
+        with patch("stocktalk.modules.providers.bailian_chat.shutil.which", return_value="bl"):
             script = self._annual_generator().generate(self._full_data())
         self.assertEqual(script["arc"]["id"], "annual")
         self.assertEqual(script["arc"]["beats"], ["revenue", "margin", "cash", "occupied", "shadow", "closing"])
@@ -293,7 +293,7 @@ class DialogueGeneratorTests(unittest.TestCase):
 
     def test_missing_interaction_fields_degrade_without_breaking(self):
         """模型没给 hook/question/sides 时不能抛错——只是片尾退化成原样。"""
-        with patch("stocktalk.modules.dialogue_generator.shutil.which", return_value="bl"):
+        with patch("stocktalk.modules.providers.bailian_chat.shutil.which", return_value="bl"):
             script = self._annual_generator(response=self._response()).generate(self._full_data())
         self.assertEqual(script["hook"], "")
         self.assertEqual(script["question"], "")
@@ -305,7 +305,7 @@ class DialogueGeneratorTests(unittest.TestCase):
             {"speaker": "bull", "beat": "revenue", "line": "收入结构先看主营构成。"},
             {"speaker": "bear", "beat": "生意本质", "line": "这个 beat 不在年报逐条里。"},
         ]}, ensure_ascii=False)
-        with patch("stocktalk.modules.dialogue_generator.shutil.which", return_value="bl"):
+        with patch("stocktalk.modules.providers.bailian_chat.shutil.which", return_value="bl"):
             script = self._annual_generator(response=response).generate(self._full_data())
         self.assertEqual([turn["beat"] for turn in script["turns"]], ["revenue", "revenue"])
         self.assertTrue(any("不在本期骨架内" in note for note in script["arc_notes"]))
@@ -315,14 +315,14 @@ class DialogueGeneratorTests(unittest.TestCase):
             {"speaker": "bull", "beat": "cash", "line": "先跳到现金流。"},
             {"speaker": "bear", "beat": "revenue", "line": "又想回到收入结构。"},
         ]}, ensure_ascii=False)
-        with patch("stocktalk.modules.dialogue_generator.shutil.which", return_value="bl"):
+        with patch("stocktalk.modules.providers.bailian_chat.shutil.which", return_value="bl"):
             script = self._annual_generator(response=response).generate(self._full_data())
         self.assertEqual([turn["beat"] for turn in script["turns"]], ["cash", "cash"])
         self.assertTrue(any("回退了骨架顺序" in note for note in script["arc_notes"]))
 
     def test_short_reply_is_flagged_and_tolerated(self):
         """一句"嗯"也是合法的一轮：标成 short，交给渲染层跳过换图板。"""
-        with patch("stocktalk.modules.dialogue_generator.shutil.which", return_value="bl"):
+        with patch("stocktalk.modules.providers.bailian_chat.shutil.which", return_value="bl"):
             script = self._annual_generator().generate(self._full_data())
         short = next(turn for turn in script["turns"] if turn["line"] == "嗯。")
         self.assertTrue(short["short"])
@@ -332,7 +332,7 @@ class DialogueGeneratorTests(unittest.TestCase):
         """配置强制一条骨架、这只票却没那份数据时，不能产出一个缺开场的空壳。"""
         generator = DialogueGenerator({"dialogue": {"arc": "peers"}, "characters": {}},
                                       runner=lambda argv, timeout: self._response())
-        with patch("stocktalk.modules.dialogue_generator.shutil.which", return_value="bl"):
+        with patch("stocktalk.modules.providers.bailian_chat.shutil.which", return_value="bl"):
             generated = generator.generate({"code": "1", "quote": {"name": "平安银行"}})
         self.assertEqual(generated["arc"]["id"], "peers")   # 显式配置要被尊重
         self.assertTrue(generated["arc"]["forced"])
@@ -361,7 +361,7 @@ class OperatorMessageTests(unittest.TestCase):
         calls = []
         generator = DialogueGenerator({"dialogue": {"message": "这期重点讲零售息差"}},
                                       runner=lambda argv, timeout: calls.append(argv) or self._response())
-        with patch("stocktalk.modules.dialogue_generator.shutil.which", return_value="bl"):
+        with patch("stocktalk.modules.providers.bailian_chat.shutil.which", return_value="bl"):
             generator.generate({"code": "000001", "quote": {"name": "平安银行"}})
 
         sent = calls[0][calls[0].index("--message") + 1]
@@ -405,7 +405,7 @@ class OperatorMessageTests(unittest.TestCase):
 
     def test_message_is_written_into_the_script_for_audit(self):
         """审查页/结果 JSON 要能核对「这期让模型讲了什么」。"""
-        with patch("stocktalk.modules.dialogue_generator.shutil.which", return_value="bl"):
+        with patch("stocktalk.modules.providers.bailian_chat.shutil.which", return_value="bl"):
             script = self._generator("这期重点讲零售息差").generate({"code": "000001", "quote": {"name": "平安银行"}})
 
         self.assertEqual(script["message"], "这期重点讲零售息差")
@@ -413,7 +413,7 @@ class OperatorMessageTests(unittest.TestCase):
     def test_script_omits_the_key_when_no_message_was_given(self):
         """没用 --message 就不写这个键：默认路径的结果 JSON 不该多出一堆空字段。"""
         generator = DialogueGenerator(runner=lambda argv, timeout: self._response())
-        with patch("stocktalk.modules.dialogue_generator.shutil.which", return_value="bl"):
+        with patch("stocktalk.modules.providers.bailian_chat.shutil.which", return_value="bl"):
             script = generator.generate({"code": "000001", "quote": {"name": "平安银行"}})
 
         self.assertNotIn("message", script)
@@ -451,3 +451,57 @@ class OpeningClosingTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+    def test_emotion_passes_through_and_falls_back(self):
+        """emotion 在词表内原样透传；词表外/缺省回落「平述」并留痕。"""
+        response = json.dumps({"title": "t", "turns": [
+            {"speaker": "bull", "line": "第一句。", "emotion": "惊叹"},
+            {"speaker": "bear", "line": "第二句。", "emotion": "胡说的"},
+            {"speaker": "bull", "line": "第三句。"},
+        ]}, ensure_ascii=False)
+        generator = DialogueGenerator(runner=lambda argv, timeout: response)
+        with patch("stocktalk.modules.providers.bailian_chat.shutil.which", return_value="bl"):
+            script = generator.generate({"code": "000001", "quote": {"name": "平安银行"}})
+        turns = script["turns"]
+        self.assertEqual(turns[0]["emotion"], "惊叹")
+        self.assertEqual(turns[1]["emotion"], "平述")
+        self.assertEqual(turns[2]["emotion"], "平述")
+        self.assertTrue(any("emotion" in note for note in script["arc_notes"]))
+
+    def test_prompt_declares_the_emotion_vocabulary(self):
+        generator = DialogueGenerator(runner=lambda argv, timeout: self._response())
+        system = generator._system_prompt()
+        message = generator._user_prompt({"code": "000001"})
+        self.assertIn("emotion", system)
+        self.assertIn("反驳/质疑/惊叹/顿悟/坚守/平述", system)
+        self.assertIn("反驳/质疑/惊叹/顿悟/坚守/平述", message)
+
+    def test_prompt_contains_the_delayed_reveal_rule(self):
+        """延迟揭晓：最强反差 60%-75% 处揭晓，且不许夸大数据。"""
+        generator = DialogueGenerator(runner=lambda argv, timeout: self._response())
+        system = generator._system_prompt()
+        self.assertIn("叙事铺排", system)
+        self.assertIn("60%-75%", system)
+        self.assertIn("不许为了戏剧性夸大、预判或编造任何数字", system)
+
+    def test_spotlight_is_normalized_and_falls_back(self):
+        """spotlight：label/value 清洗透传；结构不对/缺字段回落 None（画面不硬凑）。"""
+        response = json.dumps({"title": "t", "turns": [
+            {"speaker": "bull", "line": "第一句。"}],
+            "spotlight": {"label": " 经营现金流 ", "value": "毛利率38%→31%"}},
+            ensure_ascii=False)
+        generator = DialogueGenerator(runner=lambda argv, timeout: response)
+        with patch("stocktalk.modules.providers.bailian_chat.shutil.which", return_value="bl"):
+            script = generator.generate({"code": "000001", "quote": {"name": "平安银行"}})
+        self.assertEqual(script["spotlight"], {"label": "经营现金流", "value": "毛利率38%→31%"})
+
+        empty = DialogueGenerator(runner=lambda argv, timeout: json.dumps({"turns": [{"speaker": "bull", "line": "x"}]}))
+        with patch("stocktalk.modules.providers.bailian_chat.shutil.which", return_value="bl"):
+            script2 = empty.generate({"code": "000001", "quote": {"name": "平安银行"}})
+        self.assertIsNone(script2["spotlight"])
+
+    def test_prompt_declares_the_spotlight_field(self):
+        generator = DialogueGenerator(runner=lambda argv, timeout: self._response())
+        message = generator._user_prompt({"code": "000001"})
+        self.assertIn("spotlight", message)
+        self.assertIn("禁止换算、推算或暗示涨跌方向", message)

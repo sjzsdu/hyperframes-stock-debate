@@ -146,6 +146,14 @@
     font-size: min(5.2vw, 4.0vh); line-height: 1.38; font-weight: 700;
     color: var(--text); text-shadow: 0 1vh 3vh rgba(0,0,0,.55);
   }
+  /* 首帧冲突数字（2026-10-07）：与视频 intro-card 同源——
+     缩略图里一个具体数字比一句悬念更能在 3 米外被读到。 */
+  .hook .spotlight { display: flex; align-items: baseline; gap: 1.2vw; margin-bottom: 1.2vh; }
+  .hook .spotlight em { font-style: normal; font-size: min(1.9vw, 1.4vh);
+    color: var(--muted); letter-spacing: .12em; }
+  .hook .spotlight b { font-size: min(3.6vw, 2.8vh); font-weight: 800;
+    color: var(--accent); font-variant-numeric: tabular-nums;
+    text-shadow: 0 .8vh 2.6vh rgba(0,0,0,.5); }
 
   .tags { grid-area: tags; display: flex; gap: 1.1vw; flex-wrap: wrap; }
   .tags span {
@@ -204,6 +212,8 @@
 
   <div class="hook">
     <span class="kicker">本期看点</span>
+    {# 首帧冲突数字（2026-10-07）：与视频 intro-card 同源，缩略图里数字比句子更抓眼。 #}
+    {% if spotlight_value %}<div class="spotlight"><em>{{ spotlight_label }}</em><b>{{ spotlight_value }}</b></div>{% endif %}
     <div class="text">{{ hook }}</div>
   </div>
 

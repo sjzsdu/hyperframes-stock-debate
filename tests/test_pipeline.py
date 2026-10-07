@@ -14,7 +14,7 @@ from unittest.mock import MagicMock
 import pytest
 
 import stocktalk.pipeline as pipeline_module
-from stocktalk.pipeline import Pipeline, load_config
+from stocktalk.pipeline import Pipeline, PipelineError, load_config
 
 
 # ---------------------------------------------------------------------------
@@ -122,7 +122,10 @@ def test_pipeline_stores_result_json(tmp_path: Path) -> None:
 
 
 def test_pipeline_tts_failure_falls_back_to_silent_subtitles(tmp_path: Path) -> None:
-    pipeline = Pipeline({"output": {"dir": str(tmp_path / "out")}}, sleep=lambda _: None)
+    # 2026-10-06 起，静音兜底必须显式 opt-in（tts.allow_silent_fallback: true）；
+    # 兜底时错误会记进 audio.tts_error。
+    pipeline = Pipeline({"output": {"dir": str(tmp_path / "out")},
+                         "tts": {"allow_silent_fallback": True}}, sleep=lambda _: None)
     pipeline.stock_client.get_stock_data = MagicMock(return_value=FAKE_STOCK_DATA)
     pipeline.dialogue_gen.generate = MagicMock(return_value=FAKE_SCRIPT)
     pipeline.compliance.review = MagicMock(return_value=FAKE_SCRIPT)
@@ -133,8 +136,23 @@ def test_pipeline_tts_failure_falls_back_to_silent_subtitles(tmp_path: Path) -> 
 
     assert pipeline.tts.synthesize.call_count == 3
     assert result["audio"]["fallback"] == "silent"
+    assert "service unavailable" in result["audio"]["tts_error"]
     assert Path(result["srt"]).is_file()
     pipeline.builder.build.assert_called_once()
+
+
+def test_pipeline_tts_failure_aborts_by_default(tmp_path: Path) -> None:
+    """TTS 挂了默认不出静音片（发出去的废片比不发更糟，2026-10-06 事故）。"""
+    pipeline = Pipeline({"output": {"dir": str(tmp_path / "out")}}, sleep=lambda _: None)
+    pipeline.stock_client.get_stock_data = MagicMock(return_value=FAKE_STOCK_DATA)
+    pipeline.dialogue_gen.generate = MagicMock(return_value=FAKE_SCRIPT)
+    pipeline.compliance.review = MagicMock(return_value=FAKE_SCRIPT)
+    pipeline.tts.synthesize = MagicMock(side_effect=RuntimeError("missing api key"))
+    pipeline.builder.build = MagicMock(return_value={})
+
+    with pytest.raises(PipelineError, match="静音成片"):
+        pipeline.run("000001", render=False)
+    pipeline.builder.build.assert_not_called()
 
 
 def test_pipeline_renders_unless_disabled(tmp_path: Path) -> None:
