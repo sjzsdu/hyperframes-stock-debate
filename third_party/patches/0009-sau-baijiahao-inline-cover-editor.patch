@@ -1,0 +1,163 @@
+diff --git a/third_party/social-auto-upload/uploader/baijiahao_uploader/main.py b/third_party/social-auto-upload/uploader/baijiahao_uploader/main.py
+index 9bb1020..ac2c2a1 100644
+--- a/third_party/social-auto-upload/uploader/baijiahao_uploader/main.py
++++ b/third_party/social-auto-upload/uploader/baijiahao_uploader/main.py
+@@ -13,6 +13,7 @@ import asyncio
+ import inspect
+ import json as _json
+ import os
++import re
+ import time
+ from pathlib import Path
+ 
+@@ -414,11 +415,11 @@ class BaiJiaHaoVideo(BaseVideoUploader):
+         baijiahao_logger.info(_msg("🏷️", f"标题已填写: {title}"))
+ 
+     async def _set_title_via_panel(self, page: Page) -> None:
+-        """新版发布页把标题挪进了右下角「封面/标题板」弹层，主表单只有作品描述。
++        """旧版发布页的「封面/标题板」弹层标题流程（2026-10-06 起入口已下线）。
+ 
+-        弹层入口的 enabled 状态不稳定（实测同一会话时有时无），整段按尽力而为
+-        处理：任何一步失败只记 warning——百家号会预填视频文件名当标题，发布
+-        不因此阻塞（与 AI 声明步骤同一容错原则）。
++        新版把标题并入「作品描述」输入框（contentEditable，即右侧预览的标题），
++        ``_fill_title`` 已经把它填好——本步骤只剩空跑探测，入口不存在就立刻返回，
++        不再等 45s。保留是为兼容旧版页面尚未灰度完全的情况。
+         """
+         try:
+             btn = page.locator('button:has-text("封面/标题板")').first
+@@ -521,69 +522,86 @@ class BaiJiaHaoVideo(BaseVideoUploader):
+     async def _upload_thumbnail(self, page: Page) -> None:
+         """上传横版封面（必填）。
+ 
+-        流程：点击「选择封面」→ 弹窗中点「上传」按钮 → 设置图片文件 → 等待上传完成 → 确认。
+-        如果没有提供 thumbnail_path，等待系统自动生成封面即可。
++        2026-10-06 百家号发布页改版（10-02 还正常，10-06 起线上连挂）：
++        「选择封面」独立弹窗流程整体下线，封面区改成 FeEditorApp 内联卡片
++        （系统帧候选 + 智能推荐封面）。旧流程 get_by_text("选择封面", exact=True)
++        必然超时——瓦片文案在候选生成后会变成「编辑封面」甚至整块消失，
++        三种实测状态（r1 候选图+编辑封面 / r2 空瓦片+选择封面 / r3 无瓦片）。
++
++        新流程（2026-10-09 实测走通）：封面编辑器的 image/* file input **常驻
++        DOM（隐藏）**，直接 set_input_files 即可触发「封面截取」裁剪弹层，
++        点「确定」提交——完全不依赖瓦片文案与可见性。旧点击流程保留为兜底。
+         """
+         if not self.thumbnail_path:
+             # 没有自定义封面，等系统自动生成
+             await self._wait_cover_ready(page)
+             return
+ 
++        # 改版新增的「视频新增一键填写功能」公告弹层：不关也不挡封面流程的
++        # 按钮，但留着可能挡后续步骤（AI 声明/发布），尽力而为关掉。
+         try:
+-            # 1) 点击「选择封面」入口
+-            cover_entry = page.locator('[data-testid="select-cover"]').first
+-            if not await cover_entry.count():
+-                # 备选：通过文本定位
+-                cover_entry = page.get_by_text("选择封面", exact=True).first
+-            await cover_entry.scroll_into_view_if_needed()
+-            await cover_entry.click(timeout=10000)
+-            baijiahao_logger.info(_msg("🏃", "已点击「选择封面」"))
+-            await page.wait_for_timeout(2000)
+-
+-            # 2) 弹窗中找「上传」按钮并点击
+-            # 百家号封面弹窗通常有「上传」tab/按钮
+-            upload_btn = page.locator('button:has-text("上传"), div:has-text("上传"):not(:has(*)):visible').first
+-            if not await upload_btn.count():
+-                upload_btn = page.get_by_text("上传", exact=True).first
+-            await upload_btn.click(timeout=8000)
+-            await page.wait_for_timeout(1500)
++            await page.get_by_text("我知道了", exact=True).first.click(timeout=2000)
++            baijiahao_logger.info(_msg("🧾", "已关闭「一键填写」公告弹层"))
++            await page.wait_for_timeout(1000)
++        except Exception:
++            pass
+ 
+-            # 3) 设置图片文件到 file input
+-            # 弹窗中会出现 input[type=file]
+-            img_input = page.locator('input[type="file"][accept*="image"], input[type="file"][accept*="jpg"], input[type="file"][accept*="png"]').first
+-            if not await img_input.count():
+-                # 通用 fallback：弹窗内最新出现的 file input
+-                img_input = page.locator('input[type="file"]').last
++        try:
++            # 新版直传：隐藏 image file input 挂在 FeEditorApp-*-cover-container
++            # 下，横竖两块封面瓦片各一个；第一个即横封面（与 --thumbnail 横版一致）。
++            img_input = page.locator('input[type="file"][accept*="image"]').first
++            await img_input.wait_for(state="attached", timeout=20000)
+             await img_input.set_input_files(self.thumbnail_path)
+             baijiahao_logger.info(_msg("🏃", f"已选择封面图片: {self.thumbnail_path}"))
++        except Exception as exc:
++            baijiahao_logger.warning(_msg("⚠️", f"封面直传失败（{exc}），回落旧点击流程"))
++            await self._upload_thumbnail_via_click(page)
++            return
+ 
+-            # 4) 等待并点击确认/完成按钮（如有裁剪弹窗）。
+-            #    裁剪弹窗渲染有延迟（图片上传+服务端处理），之前用固定 sleep(3s) 后
+-            #    一次性检查 confirm_btn，弹窗还没渲染出来时会被误判为"无需确认"而跳过点击，
+-            #    导致封面选择实际未提交，但日志仍打「封面已上传」成功——这是本次线上
+-            #    百家号视频没有封面、日志却显示成功的根因。改为轮询等待（不放大超时时长本身
+-            #    不算错误：裁剪弹窗本就是可选的，等不到也可能是流程本身没有该弹窗）。
++        # 裁剪弹层（「封面截取 / AI 封面」）确认：轮询等「确定/完成/确认」，
++        # 不冒充成功——等不到就交给 _wait_cover_ready 核实/兜底。
++        try:
+             confirm_btn = page.locator('button:has-text("确定"), button:has-text("完成"), button:has-text("确认")').first
+-            confirmed = False
+-            try:
+-                await confirm_btn.wait_for(state="visible", timeout=15000)
+-                await confirm_btn.click(timeout=8000)
+-                await page.wait_for_timeout(1000)
+-                confirmed = True
+-            except PWTimeoutError:
+-                baijiahao_logger.debug("封面确认按钮未出现，可能本次流程无需裁剪确认")
+-
+-            if confirmed:
+-                baijiahao_logger.success(_msg("🖼️", "封面已上传"))
+-            else:
+-                # 没有等到确认按钮：不确定封面是否真正生效，不再冒充成功，
+-                # 交给下方 except 分支同一套"等待系统自动封面"兜底逻辑核实/兜底。
+-                raise RuntimeError("封面确认按钮未出现，无法确认封面是否生效")
++            await confirm_btn.wait_for(state="visible", timeout=15000)
++            await confirm_btn.click(timeout=8000)
++            await page.wait_for_timeout(1000)
++            baijiahao_logger.success(_msg("🖼️", "封面已上传"))
+         except Exception as exc:
+-            baijiahao_logger.warning(_msg("⚠️", f"封面上传失败: {exc}，尝试等待系统自动封面"))
+-            # fallback：等系统自动生成
++            baijiahao_logger.warning(_msg("⚠️", f"封面确认未完成（{exc}），尝试等待系统自动封面"))
+             await self._wait_cover_ready(page)
+ 
++    async def _upload_thumbnail_via_click(self, page: Page) -> None:
++        """旧版点击流程兜底：封面瓦片 → 上传按钮 → file input。
++
++        2026-10 改版后瓦片文案在「选择封面/编辑封面」间切换（系统候选是否
++        已生成），用正则同时认两种，避免 exact 文本等不到。
++        """
++        cover_entry = page.locator('[data-testid="select-cover"]').first
++        if not await cover_entry.count():
++            cover_entry = page.get_by_text(re.compile("选择封面|编辑封面")).first
++        await cover_entry.scroll_into_view_if_needed(timeout=10000)
++        await cover_entry.click(timeout=10000)
++        baijiahao_logger.info(_msg("🏃", "已点击「选择封面」"))
++        await page.wait_for_timeout(2000)
++
++        upload_btn = page.locator('button:has-text("上传"), div:has-text("上传"):not(:has(*)):visible').first
++        if not await upload_btn.count():
++            upload_btn = page.get_by_text("上传", exact=True).first
++        await upload_btn.click(timeout=8000)
++        await page.wait_for_timeout(1500)
++
++        img_input = page.locator('input[type="file"][accept*="image"], input[type="file"][accept*="jpg"], input[type="file"][accept*="png"]').first
++        if not await img_input.count():
++            img_input = page.locator('input[type="file"]').last
++        await img_input.set_input_files(self.thumbnail_path)
++        baijiahao_logger.info(_msg("🏃", f"已选择封面图片: {self.thumbnail_path}"))
++
++        confirm_btn = page.locator('button:has-text("确定"), button:has-text("完成"), button:has-text("确认")').first
++        await confirm_btn.wait_for(state="visible", timeout=15000)
++        await confirm_btn.click(timeout=8000)
++        await page.wait_for_timeout(1000)
++        baijiahao_logger.success(_msg("🖼️", "封面已上传"))
++
+     async def _check_ai_declaration(self, page: Page) -> None:
+         """选择「含AI生成内容」创作声明，并**验证写入成功**。
+ 

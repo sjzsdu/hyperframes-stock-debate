@@ -58,7 +58,9 @@ def test_pruning_drops_the_beats_this_stock_cannot_support() -> None:
     """有就加，没有数据就不要——剪掉撑不起来的节拍，而不是让它硬凑。"""
     full = prune_beats(ARCS["annual"], FULL)
     thin = prune_beats(ARCS["annual"], THIN)
-    assert [beat.key for beat in full] == ["revenue", "margin", "cash", "occupied", "shadow", "closing"]
+    # FULL 带资讯：news 拍保留；THIN 没资讯：news 拍被剪（optional，只影响自己）
+    assert [beat.key for beat in full] == ["revenue", "margin", "cash", "occupied", "shadow",
+                                           "news", "closing"]
     # 只有行情时，年报逐条只剩那个不依赖数据的隐患节拍（closing 无数据依赖，保留）
     assert [beat.key for beat in thin] == ["shadow", "closing"]
     assert "f10.主营构成.明细" in missing_needs(ARCS["annual"], THIN)
@@ -68,7 +70,9 @@ def test_thin_data_falls_back_to_the_mainline() -> None:
     choice = select_arc(THIN, code="000001", day="2026-09-22")
     assert choice.arc is MAINLINE
     assert choice.eligible == ()
-    assert [beat.key for beat in choice.beats] == [beat.key for beat in MAINLINE.beats]
+    # THIN 没资讯：回退主线的 news 拍也被剪掉，剩下的就是这串
+    assert [beat.key for beat in choice.beats] == ["business", "industry", "financial",
+                                                   "risk", "valuation", "wrap", "closing"]
     # 为什么没用数据驱动骨架，要能事后解释（缺哪份数据）
     assert {arc_id for arc_id, _ in choice.skipped} == {"crack", "customer", "annual", "peers"}
 
@@ -146,6 +150,30 @@ def test_report_is_serialisable_for_the_review_page() -> None:
     assert set(report) == {"id", "name", "forced", "beats", "pruned", "eligible", "skipped"}
     assert isinstance(report["beats"], list) and report["beats"]
     assert isinstance(report["skipped"], dict)
+
+
+def test_news_beat_is_present_with_news_and_optional_without() -> None:
+    """2026-10-08 用户反馈：用户选题时几乎总挑有新闻的票，每条骨架都要有一块
+    正面响应最新资讯的内容；但没抓到资讯的那天只剪这一拍，不连累骨架资格。
+    """
+    for arc in ARCS.values():
+        assert "news" in [beat.key for beat in arc.beats], f"{arc.id} 缺资讯拍"
+        assert all(beat.optional for beat in arc.beats if beat.key == "news"), arc.id
+
+    # 有资讯：news 拍在，且依赖全中（news.items 是压平后的 payload 路径）
+    with_news = select_arc(FULL, code="001216", day="2026-09-22")
+    assert "news" in [beat.key for beat in with_news.beats]
+    assert missing_needs(with_news.arc, FULL) == ()
+
+    # 没资讯：news 拍被剪，但数据驱动骨架照样够格，不回退、不硬凑
+    no_news = {key: value for key, value in FULL.items() if key != "news"}
+    choice = select_arc(no_news, code="001216", day="2026-09-22")
+    assert choice.arc.id in {"crack", "customer", "annual", "peers"}
+    assert "news" not in [beat.key for beat in choice.beats]
+    assert "news" in choice.report()["pruned"]
+    # news 的缺席不会出现在 skipped 解释里（它不是落选原因）
+    for _arc_id, missing in choice.skipped:
+        assert "news.items" not in missing
 
 
 if __name__ == "__main__":

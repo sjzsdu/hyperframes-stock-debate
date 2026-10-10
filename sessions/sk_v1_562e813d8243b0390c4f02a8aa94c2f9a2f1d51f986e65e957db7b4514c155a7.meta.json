@@ -1,0 +1,29 @@
+{
+  "key": "sk_v1_562e813d8243b0390c4f02a8aa94c2f9a2f1d51f986e65e957db7b4514c155a7",
+  "summary": "",
+  "skip": 0,
+  "count": 2,
+  "created_at": "2026-10-09T09:23:25.4144+08:00",
+  "updated_at": "2026-10-09T09:24:03.817226+08:00",
+  "scope": {
+    "version": 1,
+    "channel": "cli",
+    "account": "default",
+    "dimensions": [
+      "chat"
+    ],
+    "values": {
+      "chat": "direct:direct"
+    }
+  },
+  "aliases": [
+    "agent:news-summarize:main",
+    "agent:news-summarize:direct:cron",
+    "agent:news-summarize:cli:direct:cron",
+    "agent:news-summarize:cli:default:direct:cron",
+    "agent:news-summarize:direct:direct",
+    "agent:news-summarize:cli:direct:direct",
+    "agent:news-summarize:cli:default:direct:direct",
+    "news-summarize"
+  ]
+}

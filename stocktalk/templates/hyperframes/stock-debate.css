@@ -250,6 +250,7 @@ svg text[data-hl="1"] { fill: var(--gold) !important; font-weight: 700; }
 .outro-title { font-size: 54px; font-weight: 800; letter-spacing: 1px; text-shadow: 0 10px 40px rgba(0,0,0,.55); max-width: 1400px; text-align: center; }
 .outro-svg { display: none; }
 .outro-tip { font-size: 26px; color: var(--muted); letter-spacing: 2px; }
+.outro-risk { font-size: 20px; color: rgba(219,231,245,.5); letter-spacing: 4px; }
 
 /* ---- Shared SVG chart styling ---- */
 .axis { stroke: #365976; fill: none; }
@@ -352,6 +353,7 @@ svg text[data-hl="1"] { fill: var(--gold) !important; font-weight: 700; }
 #root.layout-vertical .outro-kicker { font-size: 34px; }
 #root.layout-vertical .outro-title { font-size: 66px; max-width: calc(100% - var(--safe-side-left) - var(--safe-side-right)); }
 #root.layout-vertical .outro-tip { font-size: 36px; }
+#root.layout-vertical .outro-risk { font-size: 26px; }
 
 /* ---- 竖屏：说话人徽标 / 字幕色条 / 角色出场行的 1080 布局适配 ---- */
 /* 竖屏面板 top=safe+432：徽标挂在面板右上角内侧，不与 board 标题同排。 */

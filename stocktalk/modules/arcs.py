@@ -38,6 +38,10 @@ class Beat:
     # 用户 2026-09-22："对话有长有短，有时候只是说一个'嗯'，对对方观点的认可而已"。
     short: bool = False
     max_chars: int | None = None
+    # 可选节拍（2026-10-08）：有 needs 但这份数据给不起时，只把这一拍剪掉，
+    # **不**让整条骨架失去资格（missing_needs 会跳过它）。资讯拍用这个语义：
+    # 用户选题时几乎总带着新闻，但不能因为某天恰好没抓到资讯就把好骨架全废掉。
+    optional: bool = False
 
 
 @dataclass(frozen=True)
@@ -58,6 +62,22 @@ class Arc:
 # 骨架注册表
 # ---------------------------------------------------------------------------
 
+# 资讯拍（2026-10-08 用户反馈）：用户选题时几乎总挑「当下有新闻的票」，观众也是
+# 因为这条新闻点进来的——所以每条骨架都要有一块**正面响应最新资讯**的内容，
+# 而不是像以前那样把 news 当可有可无的佐证素材。位置统一放在收束之前：
+# 先把生意讲明白，再用最新消息检验前面的判断（印证/矛盾/只是交易异动），
+# 观众看完正好知道「今天这条新闻对这门生意意味着什么」。
+# optional=True：某天真没抓到资讯就整拍剪掉，不硬凑、也不连累骨架资格。
+NEWS_BEAT = Beat(
+    "news",
+    "正面响应最新资讯：从 news.items 里挑最新、与这门生意最相关的一条，"
+    "说清日期与信息类型（公告/研报/快讯/龙虎榜），再把它和前面聊的生意判断连线——"
+    "印证了什么、矛盾在哪、或说明这只是交易层面的异动；"
+    "只复述标题与摘要里已有的信息，不脑补细节、不据此预测股价",
+    needs=("news.items",),
+    optional=True,
+)
+
 # 六层主线：改动前唯一的那条线，保留为**回退**（数据太薄、或没有骨架可用时走它）。
 # 保持 6 个节拍不变，这样默认配置下的轮数区间与改动前一致。
 MAINLINE = Arc(
@@ -70,7 +90,9 @@ MAINLINE = Arc(
         Beat("financial", "用营收/利润/毛利率/ROE 等真实数字印证或推翻前面的生意判断，把数字翻译成生意含义"),
         Beat("risk", "把风险与不确定性落到某个具体环节（存货、应收、外销依赖、产能爬坡等）", speaker="bear"),
         Beat("valuation", "只讲市场预期与估值处在什么位置的事实，不做买卖判断"),
-        Beat("wrap", "对这门生意做一次小结式收束，不要戛然而止", speaker="bull"),
+        NEWS_BEAT,
+        Beat("wrap", "对这门生意做一次小结式收束，顺手把本期最值得观众带走的一两个认知点"
+                     "（行业门道、看财报的方法或公司价值逻辑）用一句话钉住，不要戛然而止", speaker="bull"),
         Beat("closing", "对方接一句短回应收束：一句认可、一句保留，或把最关键的分歧钉一次；禁止一方独白结束",
              speaker="bear", short=True, max_chars=24),
     ),
@@ -92,6 +114,7 @@ CRACK = Arc(
         Beat("concede", "极短回应：一句认可、或一句更硬的追问，允许只有几个字", speaker="bear",
              short=True, max_chars=20),
         Beat("fork", "把两个人在哪里仍然不一致讲清楚——不劝和、不给结论，把分歧留给观众"),
+        NEWS_BEAT,
         Beat("closing", "对方接一句短回应收束：若上一拍是 bull 长篇，由 bear 接（反之亦然）；"
                         "一句认可、一句保留，或把分歧钉一次；禁止一方独白结束",
              short=True, max_chars=24),
@@ -114,7 +137,8 @@ CUSTOMER = Arc(
              speaker="bull", needs=("f10.经营评述|f10.所属行业",)),
         Beat("swap", "谁可能把客户抢走：同类产品、替代品、客户自建，用真实数据说", speaker="bear",
              needs=("f10.行业地位.同行家数|board.industry",)),
-        Beat("wrap", "收束：这门生意对客户的不可替代性到底有多强"),
+        NEWS_BEAT,
+        Beat("wrap", "收束：这门生意对客户的不可替代性到底有多强，把本期最值得带走的认知点一句话钉住"),
         Beat("closing", "对方接一句短回应收束：若上一拍是 bull 长篇，由 bear 接（反之亦然）；"
                         "一句认可、一句保留，或把分歧钉一次；禁止一方独白结束",
              short=True, max_chars=24),
@@ -138,6 +162,7 @@ ANNUAL = Arc(
         Beat("occupied", "钱压在哪：存货与应收账款各相当于多少营收，货有没有变成钱",
              speaker="bear", needs=("financials.存货(亿元)|financials.应收账款(亿元)",)),
         Beat("shadow", "隐患：这条账里最容易被忽略的一处，明明数据摆着但容易看漏"),
+        NEWS_BEAT,
         Beat("closing", "对方接一句短回应收束：若上一拍是 bull 长篇，由 bear 接（反之亦然）；"
                         "一句认可、一句保留，或把分歧钉一次；禁止一方独白结束",
              short=True, max_chars=24),
@@ -161,7 +186,8 @@ PEERS = Arc(
         Beat("rank", "用 F10 行业分析里的真实排名做证据（市场表现/公司规模/估值水平/财务状况），"
                      "没上榜的维度就说没上榜，不猜",
              speaker="bull", needs=("f10.行业地位.市场表现|f10.行业地位.公司规模|f10.行业地位.估值水平|f10.行业地位.财务状况",)),
-        Beat("wrap", "收束：它在同行里的位置是护城河还是天花板"),
+        NEWS_BEAT,
+        Beat("wrap", "收束：它在同行里的位置是护城河还是天花板，把本期最值得带走的认知点一句话钉住"),
         Beat("closing", "对方接一句短回应收束：若上一拍是 bull 长篇，由 bear 接（反之亦然）；"
                         "一句认可、一句保留，或把分歧钉一次；禁止一方独白结束",
              short=True, max_chars=24),
@@ -231,9 +257,13 @@ def prune_beats(arc: Arc, payload: Mapping[str, Any]) -> tuple[Beat, ...]:
 
 
 def missing_needs(arc: Arc, payload: Mapping[str, Any]) -> tuple[str, ...]:
-    """这条骨架在这份数据下缺了哪些依赖（用于日志与审查，便于事后解释选择）。"""
-    return tuple(group for beat in arc.beats for group in beat.needs
-                 if not satisfies(payload, (group,)))
+    """这条骨架在这份数据下缺了哪些依赖（用于日志与审查，便于事后解释选择）。
+
+    optional 拍（资讯拍）的缺数据不算在内：它缺席只影响自己被剪掉，
+    不该把整条骨架判为不够格——否则某天没抓到资讯，好骨架会全体落选。
+    """
+    return tuple(group for beat in arc.beats if not beat.optional
+                 for group in beat.needs if not satisfies(payload, (group,)))
 
 
 # ---------------------------------------------------------------------------
@@ -319,8 +349,10 @@ def select_arc(payload: Mapping[str, Any], *, configured: str = "auto",
         return ArcChoice(arc=ARC_FALLBACK, beats=beats or ARC_FALLBACK.beats,
                          eligible=(), skipped=tuple(skipped))
 
+    # 够格的骨架里 optional 拍仍可能因缺数据被剪（资讯拍），所以返回剪枝后的
+    # 节拍，而不是原始 beats——否则 prompt 会指挥模型去讲一拍没有数据的新闻。
     picked = qualified[0] if len(qualified) == 1 else _stable_pick(qualified, code, day)
-    return ArcChoice(arc=picked, beats=picked.beats,
+    return ArcChoice(arc=picked, beats=prune_beats(picked, payload),
                      eligible=tuple(arc.id for arc in qualified), skipped=tuple(skipped))
 
 

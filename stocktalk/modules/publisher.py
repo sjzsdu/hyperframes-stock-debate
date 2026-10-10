@@ -274,11 +274,11 @@ PLATFORM_SPECS: dict[str, dict[str, Any]] = {
                     "ai_statement_cli": False,
                     "covers": (("--thumbnail-portrait", "portrait"), ("--thumbnail-landscape", "landscape"))},
     # 百家号上传器强制要求横版封面（缺失直接 ValueError），标题上限 30 字。
-    # headed=True：百度滑块风控在 headless 下必弹且无法人工通过（2026-09-20
-    # 两次发布死于「百度安全验证」），所以无视 publish.headless 强制有头，
-    # 弹滑块时等用户在浏览器窗口里拖一下。
+    # 2026-10-09 改无头优先 + 有头兜底：无头冒烟实测新版发布页渲染/上传/
+    # 封面/AI 声明全通过（56s，系统 Chrome）。无头遇「百度安全验证」滑块必死
+    # （上传器内直接 raise），headed_fallback 让 _publish_one 转发一次。
     "baijiahao":   {"label": "百家号", "title": 30, "tags": 5,  "desc": 200, "runtime_flags": True,  "tid": None,
-                    "headed": True,
+                    "headed_fallback": True,
                     "ai_statement_cli": False,
                     "covers": (("--thumbnail", "wide"),)},
 }
@@ -1281,11 +1281,45 @@ class SauPublisher:
         label = self._ai_label_for(platform)
         if label and spec.get("ai_statement_cli"):
             command += ["--ai-content-label", label]
+        headed_mode = True
         if spec.get("runtime_flags"):
             # bilibili delegates to the biliup binary, whose CLI rejects these.
-            # baijiahao overrides to headed regardless of publish.headless.
-            headed = bool(spec.get("headed")) or not self.headless
-            command.append("--headed" if headed else "--headless")
+            headed_mode = bool(spec.get("headed")) or not self.headless
+            command.append("--headed" if headed_mode else "--headless")
+        result = self._execute_upload(platform, command)
+        # 无头失败且平台声明支持有头兜底（百家号）：headless 遇「百度安全验证」
+        # 滑块必死（上传器内直接 raise，无头无法人工拖滑块），转 --headed 用同一
+        # 条命令重试一次——人在电脑前能救回；无人值守时损失一次上传时长（与旧行为
+        # 弹窗等 5 分钟后失败等价）。限流不兜底：冷却期内再打一发只会加重。
+        if not result.ok and not headed_mode and spec.get("headed_fallback"):
+            verdict = self._classify(platform, result.detail, attempt=attempt)
+            if verdict.kind != "rate_limit":
+                headed_result = self._execute_upload(platform, command[:-1] + ["--headed"])
+                if headed_result.ok:
+                    return headed_result
+                result = PlatformResult(
+                    platform=platform, ok=False, command=headed_result.command,
+                    detail=f"无头模式失败：{result.detail}\n转有头重试仍失败：{headed_result.detail}")
+        if result.ok:
+            return PlatformResult(platform=platform, ok=True, command=result.command,
+                                  detail=result.detail[-800:])
+        if not result.retryable:
+            # StreamAbort 类「重试也无用」的失败（抖音短信验证窗口等）保持原样，
+            # 不能再进分类——分类把其余失败都当瞬时故障，会错误地放进重试队列。
+            return PlatformResult(platform=platform, ok=False, command=result.command,
+                                  detail=result.detail, retryable=False)
+        verdict = self._classify(platform, result.detail, attempt=attempt)
+        shown = result.detail[-800:] + (f"\n{verdict.hint}" if verdict.hint else "")
+        return PlatformResult(platform=platform, ok=False, command=result.command, detail=shown,
+                              retryable=verdict.retryable, retry_after=verdict.wait_seconds)
+
+    def _execute_upload(self, platform: str, command: list[str]) -> PlatformResult:
+        """Run one sau upload command, mapping every failure mode into the result.
+
+        Classification (retryability, cooldown hints) stays with the caller —
+        this only wraps process-level outcomes so the caller can re-run the
+        same command with a different browser mode (headed fallback).
+        """
         try:
             completed = self._runner(command, self.workdir)
         except StreamAbort as exc:
@@ -1298,12 +1332,7 @@ class SauPublisher:
             return PlatformResult(platform=platform, ok=False, command=command, detail=str(exc))
         ok = completed.returncode == 0
         detail = (completed.stderr or completed.stdout or ("ok" if ok else "unknown failure")).strip()
-        if ok:
-            return PlatformResult(platform=platform, ok=True, command=command, detail=detail[-800:])
-        verdict = self._classify(platform, detail, attempt=attempt)
-        shown = detail[-800:] + (f"\n{verdict.hint}" if verdict.hint else "")
-        return PlatformResult(platform=platform, ok=False, command=command, detail=shown,
-                              retryable=verdict.retryable, retry_after=verdict.wait_seconds)
+        return PlatformResult(platform=platform, ok=ok, command=command, detail=detail)
 
     def _ai_label_for(self, platform: str) -> str:
         """Resolve the AI-content option text for one platform.

@@ -103,6 +103,8 @@
     <div class="outro-title">{{ outro_title }}</div>
     <div class="outro-svg">{{ outro_svg|safe }}</div>
     <div class="outro-tip">{{ outro_tip }}</div>
+    {# 固定风险提示（2026-10-08）：最后一帧观众必看的标准合规用语，程序写死、不靠模型。 #}
+    <div class="outro-risk">股市有风险，投资需谨慎</div>
   </section>
 
   {% for segment in segments if segment.audio_path %}

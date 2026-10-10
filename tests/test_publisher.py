@@ -135,9 +135,9 @@ def test_publish_builds_sau_commands_for_all_platforms(tmp_path: Path) -> None:
     assert bili[bili.index("--tid") + 1] == str(BILIBILI_FINANCE_TID)
 
 
-def test_baijiahao_is_always_headed_even_in_headless_mode(tmp_path: Path) -> None:
-    """百度滑块风控在 headless 下必弹且无法人工通过（2026-09-20 实测），
-    百家号无视 publish.headless 强制 --headed。"""
+def test_baijiahao_runs_headless_first(tmp_path: Path) -> None:
+    """2026-10-09 起百家号无头优先：无头冒烟实测新版发布页全流程可跑，
+    不再强制 --headed。"""
     commands: list[list[str]] = []
     video = tmp_path / "video.mp4"
     video.write_bytes(b"\x00\x00\x00\x18ftypmp42")
@@ -149,8 +149,61 @@ def test_baijiahao_is_always_headed_even_in_headless_mode(tmp_path: Path) -> Non
     report = publisher.publish(video, SCRIPT, "冰轮环境", "000811")
 
     bj = commands[0]
-    assert "--headed" in bj and "--headless" not in bj
+    assert "--headless" in bj and "--headed" not in bj
     assert report["succeeded"] == ["baijiahao"]
+
+
+def test_baijiahao_headless_failure_retries_headed_once(tmp_path: Path) -> None:
+    """无头遇「百度安全验证」滑块必死（上传器直接 raise）；转 --headed 重试
+    一次——人在电脑前能拖滑块救回。"""
+    commands: list[list[str]] = []
+    calls: list[int] = []
+
+    def failing_headless_runner(command, cwd):
+        commands.append([*command])
+        if command[-1] == "--headless":
+            calls.append(1)
+            return FakeCompleted(returncode=1, stdout="",
+                                 stderr="RuntimeError: 出现百度安全验证，需人工处理")
+        return FakeCompleted()
+
+    video = tmp_path / "video.mp4"
+    video.write_bytes(b"\x00\x00\x00\x18ftypmp42")
+    publisher = SauPublisher(
+        {"publish": {"platforms": ["baijiahao"], "headless": True,
+                     "preflight": False, "sau_dir": str(tmp_path / "nonexistent")}},
+        runner=failing_headless_runner, sau_bin="sau",
+    )
+    report = publisher.publish(video, SCRIPT, "冰轮环境", "000811")
+
+    assert report["succeeded"] == ["baijiahao"]
+    assert len(commands) == 2
+    first, second = commands
+    assert first[-1] == "--headless" and second[-1] == "--headed"
+    assert second[:-1] == first[:-1]  # 同一条命令，只换浏览器模式
+
+
+def test_baijiahao_headless_and_headed_both_fail_reports_merged_detail(tmp_path: Path) -> None:
+    """两次都失败时，报告里要同时带无头失败原因和有头重试结果。"""
+    commands: list[list[str]] = []
+
+    def always_failing_runner(command, cwd):
+        commands.append([*command])
+        return FakeCompleted(returncode=1, stdout="", stderr="boom")
+
+    video = tmp_path / "video.mp4"
+    video.write_bytes(b"\x00\x00\x00\x18ftypmp42")
+    publisher = SauPublisher(
+        {"publish": {"platforms": ["baijiahao"], "headless": True,
+                     "preflight": False, "sau_dir": str(tmp_path / "nonexistent")}},
+        runner=always_failing_runner, sau_bin="sau",
+    )
+    report = publisher.publish(video, SCRIPT, "冰轮环境", "000811")
+
+    assert report["succeeded"] == []
+    assert len(commands) == 2
+    detail = report["failed"][0]["detail"]
+    assert "无头模式失败" in detail and "转有头重试仍失败" in detail
 
 
 def test_ai_content_label_only_goes_to_platforms_that_need_it(tmp_path: Path) -> None:

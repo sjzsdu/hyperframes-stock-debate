@@ -380,7 +380,7 @@ def test_volcengine_tts_builds_request_and_writes_audio(tmp_path):
     urlopen, holder = _capture_request(fake)
     provider = mod.VolcengineTTSProvider(api_key="vk-test", urlopen=urlopen)
     provider.synthesize_lines([_tts_job(tmp_path, voice="zh_female_vv_uranus_bigtts",
-                                       speed=1.07, volume=1.0, instruction="兴奋的语气")])
+                                       speed=1.07, pitch=1.0, volume=1.0, instruction="兴奋的语气")])
 
     request = holder[0]
     assert request.full_url == mod.TTS_ENDPOINT
@@ -406,6 +406,36 @@ def test_volcengine_tts_strips_ssml_break_tags(tmp_path):
     params = json.loads(holder[0].data)["req_params"]
     assert "<break" not in params["text"]
     assert params["text"] == "前半句后半句"
+
+
+def test_volcengine_tts_maps_pitch_ratio_to_post_process_semitones(tmp_path):
+    """倍率 pitch → additions.post_process.pitch（半音，-12..12）；1.0 不传。"""
+    import stocktalk.modules.providers.volcengine_tts as mod
+
+    cases = [(1.12, 2), (1.04, 1), (0.96, -1), (1.0, None)]
+    for ratio, semitones in cases:
+        urlopen, holder = _capture_request(_ndjson_urlopen([b"x"]))
+        provider = mod.VolcengineTTSProvider(api_key="vk-test", urlopen=urlopen)
+        provider.synthesize_lines([_tts_job(tmp_path, pitch=ratio, instruction=None)])
+
+        raw = json.loads(holder[0].data)["req_params"]
+        additions = json.loads(raw["additions"]) if "additions" in raw else {}
+        if semitones is None:
+            assert "post_process" not in additions
+        else:
+            assert additions["post_process"] == {"pitch": semitones}
+
+
+def test_volcengine_tts_pitch_clamps_to_the_api_range(tmp_path):
+    import stocktalk.modules.providers.volcengine_tts as mod
+
+    for ratio in (3.0, 0.1):  # 远超 ±12 半音的倍率都应被夹紧
+        urlopen, holder = _capture_request(_ndjson_urlopen([b"x"]))
+        provider = mod.VolcengineTTSProvider(api_key="vk-test", urlopen=urlopen)
+        provider.synthesize_lines([_tts_job(tmp_path, pitch=ratio, instruction=None)])
+
+        additions = json.loads(json.loads(holder[0].data)["req_params"]["additions"])
+        assert abs(additions["post_process"]["pitch"]) <= 12
 
 
 def test_volcengine_tts_requires_the_api_key(tmp_path, monkeypatch):

@@ -8,8 +8,9 @@
 - 响应：NDJSON，每行 ``{"code":0,"data":"<base64>"}``，``{"code":20000000}`` 结束
 
 情感控制走 ``additions.context_texts``（自然语言，部分 2.0 音色有效）；
-语速映射 ``speech_rate``（-50..100，100=2 倍速）。pitch 在该接口无对应参数，
-超范围时忽略（豆包 2.0 的情感表达由 context_texts 承担）。
+语速映射 ``speech_rate``（-50..100，100=2 倍速）；音量映射 ``loudness_rate``；
+音调映射 ``additions.post_process.pitch``（**半音**，-12..12；TTSJob 的倍率 pitch
+按 12*log2(ratio) 换算，1.0 不传）。
 
 音色 id 语义（characters.voice_id 直接填）：
 - ``zh_female_vv_uranus_bigtts``（可爱女生/Vivi，情感响应好）
@@ -21,6 +22,7 @@ from __future__ import annotations
 
 import base64
 import json
+import math
 import os
 import re
 import subprocess
@@ -104,6 +106,13 @@ class VolcengineTTSProvider:
             return 0
         return max(-50, min(100, round((float(volume) - 1.0) * 100)))
 
+    @staticmethod
+    def _pitch_semitones(pitch: float | None) -> int:
+        """倍率 pitch → 半音（接口范围 [-12, 12]）：1.12 → +2；1.0 → 0（不传）。"""
+        if not pitch or float(pitch) == 1.0:
+            return 0
+        return max(-12, min(12, round(12 * math.log2(float(pitch)))))
+
     def _synthesize(self, job: TTSJob) -> None:
         api_key = self._resolve_api_key()
         if not api_key:
@@ -122,9 +131,15 @@ class VolcengineTTSProvider:
         }
         if self._model:
             req_params["model"] = self._model
+        # additions 是「JSON 序列化后的字符串」，不是对象——接口最常见坑
+        additions: dict[str, Any] = {}
         if job.instruction:
-            # additions 是「JSON 序列化后的字符串」，不是对象——接口最常见坑
-            req_params["additions"] = json.dumps({"context_texts": [job.instruction]}, ensure_ascii=False)
+            additions["context_texts"] = [job.instruction]
+        semitones = self._pitch_semitones(job.pitch)
+        if semitones:
+            additions["post_process"] = {"pitch": semitones}
+        if additions:
+            req_params["additions"] = json.dumps(additions, ensure_ascii=False)
 
         body = json.dumps({
             "user": {"uid": "stocktalk"},

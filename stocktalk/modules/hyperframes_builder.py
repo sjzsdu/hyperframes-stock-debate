@@ -7,6 +7,7 @@ import math
 import os
 import shutil
 import subprocess
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
@@ -18,6 +19,18 @@ from stocktalk.modules.numbers import to_display, unbreakable_spans
 
 class HyperFramesBuildError(RuntimeError):
     """Raised when a project cannot be built or rendered."""
+
+
+def _parallel_capture_timed_out(detail: str) -> bool:
+    """渲染器并行抓帧的 worker 超时特征（可用 --workers 1 重试解决的那类）。
+
+    600825 实锤日志两处特征：error 行 "Parallel worker operation timeout
+    exceeded after 30000ms: worker=N phase=session_init"，以及 WARN 行
+    "Parallel capture timed out with N workers. ... Retry with --workers 1"。
+    只认这两种签名，别的渲染失败不浪费一次重试。
+    """
+    return ("Parallel worker operation timeout" in detail
+            or "Parallel capture timed out" in detail)
 
 
 Runner = Callable[[Sequence[str], Path], subprocess.CompletedProcess[str]]
@@ -466,9 +479,26 @@ class HyperFramesBuilder:
             ) from exc
         except (OSError, subprocess.SubprocessError) as exc:
             raise HyperFramesBuildError(f"HyperFrames render could not start: {exc}") from exc
+        detail = (completed.stderr or completed.stdout or "").strip()
+        if completed.returncode != 0 and _parallel_capture_timed_out(detail):
+            # 2026-10-08 实锤（600825）：并行抓帧起 3 个 headless Chrome，
+            # 偶发某个 worker 的 session_init 30s 超时（资源竞争，与合成内容无关
+            # ——0 个视频也一样挂）。渲染器自己的 WARN 就是答案：--workers 1。
+            # 顺序抓 3724 帧约 3 分钟，可接受；自动重试一次，失败再把原始报错抛出。
+            print("[tangulunjin] 并行抓帧超时，自动改用 --workers 1 重试渲染……", file=sys.stderr)
+            try:
+                completed = self._runner((*command, "--workers", "1"), directory, env=env)
+            except subprocess.TimeoutExpired as exc:
+                raise HyperFramesBuildError(
+                    f"HyperFrames render timed out after {timeout_seconds:g}s — "
+                    "raise video.render_timeout_seconds in the config (long scripts need far more than 15 minutes)"
+                ) from exc
+            except (OSError, subprocess.SubprocessError) as exc:
+                raise HyperFramesBuildError(f"HyperFrames render could not start: {exc}") from exc
+            if completed.returncode != 0:
+                detail = (completed.stderr or completed.stdout or "unknown renderer failure").strip()
         if completed.returncode != 0:
-            detail = (completed.stderr or completed.stdout or "unknown renderer failure").strip()
-            raise HyperFramesBuildError(f"HyperFrames render failed: {detail}")
+            raise HyperFramesBuildError(f"HyperFrames render failed: {detail or 'unknown renderer failure'}")
         if not destination.is_file() or destination.stat().st_size == 0:
             raise HyperFramesBuildError("HyperFrames render completed without creating a usable MP4")
         return destination
@@ -690,14 +720,20 @@ class HyperFramesBuilder:
             keyword_entries.append((start, duration, "||".join(keywords),
                                     {"keywords": keywords, "character": character, "topic": topic}))
             # 短回应（"嗯""有道理"）不换图板：一句话的认可没必要把整块图板重画一遍。
-            # 不追加这一段，上一块图板就会一直留在屏上直到下一个真正的图板进场
-            # （GSAP 只在下一版进场时才隐藏前一层）。片尾互动图板例外——它挂在
-            # 最后一轮上，不能因为那一轮短就被跳过。注意这里不能 continue：
-            # 短回应轮照样要有字幕和进度。
+            # 片尾互动图板例外——它挂在最后一轮上，不能因为那一轮短就被跳过。
+            # 注意这里不能 continue：短回应轮照样要有字幕和进度。
             if index and (not segment.get("short") or segment.get("cta")):
                 visual = str(segment.get("visual") or "")
                 # 片尾互动图板要留够阅读时间：一直挂到成片结束。
                 run = max(duration, max(0.6, total - start)) if segment.get("cta") else duration
+                # 渲染器按 data-start/data-duration 窗口硬性显隐 clip，不会手下留情
+                # （002058_20261009 实锤：短回应轮没有自己的图板条目，上一块图板
+                # 到点整块消失，中央画面出现 2-6s 空窗）。新图板进场前，把上一块
+                # 的窗口显式延长到本块进场时刻——短回应轮与轮间换气都由上一块
+                # 图板继续持有，visual 轨道从第一块进场起无缝。
+                last_start, last_run, last_key, last_payload = visual_entries[-1]
+                if last_start + last_run < start:
+                    visual_entries[-1] = (last_start, round(start - last_start, 3), last_key, last_payload)
                 visual_entries.append((start, run, visual, {"kind": "board", "svg": visual, "topic": topic}))
             turn_start = float(segment.get("start") or 0.0)
             for caption in (segment.get("caption_lines") or []):
@@ -1076,6 +1112,10 @@ class HyperFramesBuilder:
                        '你怎么看</text>')
             out.append(f'<text x="176" y="{qy}" fill="#dbe7f5" font-size="26">'
                        f'{html.escape(question[:44])}</text>')
+        # 固定风险提示（2026-10-08）：压在图板右下角，弱化但不缺席。合规审查的
+        # 画面禁词是「免责/不构成/投资建议」，这句标准风险用语不含其中任何一个。
+        out.append(f'<text x="{W - 34}" y="{H - 26}" text-anchor="end" fill="rgba(219,231,245,.42)" '
+                   f'font-size="18" letter-spacing="2">股市有风险，投资需谨慎</text>')
         out.append('</svg>')
         return ''.join(out)
 

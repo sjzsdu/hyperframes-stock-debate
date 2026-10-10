@@ -303,6 +303,45 @@ class HyperFramesBuilderTests(unittest.TestCase):
         self.assertEqual(captured["env"]["HF_DE_PARALLEL_STREAM"], "true")
         self.assertIn("render", captured["command"])
 
+    def test_parallel_capture_timeout_retries_once_with_single_worker(self):
+        """2026-10-08 600825 实锤：3 个 headless Chrome 偶发 session_init 超时，
+        渲染器 WARN 自己建议 --workers 1。这个降级必须自动做，不该让人工重跑。"""
+        calls: list[tuple[str, ...]] = []
+
+        def flaky_runner(command, cwd, env=None):
+            calls.append(tuple(command))
+            if "--workers" not in command:
+                return subprocess.CompletedProcess(command, 1, "", (
+                    "Parallel worker operation timeout exceeded after 30000ms: "
+                    "worker=2 phase=session_init frame=n/a"))
+            return subprocess.CompletedProcess(command, 0, "", "")
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            destination = root / "out.mp4"
+            destination.write_bytes(b"x")
+            builder = HyperFramesBuilder(self._config(root), runner=flaky_runner)
+            project = builder.build_project({}, {}, {})
+            builder.render_mp4(project, destination)
+        self.assertEqual(len(calls), 2, "并行失败后应恰好重试一次")
+        self.assertEqual(calls[1][-2:], ("--workers", "1"))
+
+    def test_other_render_failures_do_not_trigger_the_worker_retry(self):
+        """只认并行超时的签名；别的渲染失败重跑也不会好，不浪费几分钟。"""
+        calls: list[tuple[str, ...]] = []
+
+        def failing_runner(command, cwd, env=None):
+            calls.append(tuple(command))
+            return subprocess.CompletedProcess(command, 1, "", "some other renderer failure")
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            builder = HyperFramesBuilder(self._config(root), runner=failing_runner)
+            project = builder.build_project({}, {}, {})
+            with self.assertRaises(HyperFramesBuildError):
+                builder.render_mp4(project, root / "missing.mp4")
+        self.assertEqual(len(calls), 1)
+
     # ---- Per-stock identity: board, temperament tags, ambience --------------
 
     def test_board_comes_from_the_symbol_prefix(self) -> None:
@@ -397,6 +436,8 @@ class HyperFramesBuilderTests(unittest.TestCase):
         self.assertIn("你怎么看", content)
         self.assertIn("你更信渠道还是产能？", content)
         self.assertIn("本期骨架 · 年报逐条", content)
+        # 固定风险提示（2026-10-08）：片尾图板右下角 + 收尾卡都要有
+        self.assertEqual(content.count("股市有风险，投资需谨慎"), 2)
         for banned in ("看多", "看空", "免责", "不构成", "投资建议", "AI", "生成"):
             self.assertNotIn(banned, content)
 
@@ -410,6 +451,8 @@ class HyperFramesBuilderTests(unittest.TestCase):
             content = project.composition_path.read_text(encoding="utf-8")
 
         self.assertNotIn("两方还没谈拢的地方", content)
+        # 互动图板缺席，但收尾卡上的固定风险提示仍在
+        self.assertIn("股市有风险，投资需谨慎", content)
         self.assertEqual(HyperFramesBuilder._cta_payload({"hook": "", "sides": {}}), {})
         self.assertEqual(HyperFramesBuilder._cta_payload({"sides": {"bull": "  ", "bear": ""}}), {})
 
@@ -437,6 +480,37 @@ class HyperFramesBuilderTests(unittest.TestCase):
 
         self.assertEqual(visual_slots([first, second]),
                          visual_slots([first, ack, second]))
+
+    def test_short_reply_extends_the_previous_board_window(self):
+        """短回应轮的中央画面不许空窗（002058_20261009 事故回归）。
+
+        渲染器按 data-start/data-duration 窗口硬性显隐 clip：短回应轮不追加
+        图板时，上一块图板的窗口只覆盖它自己那轮的音频，短回应期间整块消失
+        （成片 28.0-30.4s、103.6-109.6s 两段空白中央）。修复后上一块图板的
+        窗口必须延长到短回应轮结束——visual 轨道从第一块进场起不允许任何
+        空窗，连续短回应也一样。
+        """
+        first = {"speaker": "bull", "line": "主营是色釉陶瓷，九成收入都来自这一块业务。"}
+        ack1 = {"speaker": "bear", "line": "嗯。", "short": True}
+        second = {"speaker": "bull", "line": "存货和应收都压在账上，现金能不能回来要盯。"}
+        ack2 = {"speaker": "bear", "line": "有道理。", "short": True}
+        ack3 = {"speaker": "bull", "line": "先看着。", "short": True}
+        third = {"speaker": "bear", "line": "行业竞争在加剧，估值也不便宜，风险要留意。"}
+        with tempfile.TemporaryDirectory() as temp:
+            builder = HyperFramesBuilder(self._config(temp))
+            project = builder.build_project({}, {"turns": [first, ack1, second, ack2, ack3, third]}, {})
+            content = project.composition_path.read_text(encoding="utf-8")
+        windows = sorted(
+            (float(start), float(duration))
+            for start, duration in re.findall(
+                r'class="visual-item[^"]*" data-start="([0-9.]+)" data-duration="([0-9.]+)"', content))
+        # 首块 market 图板 + 后续两块（每块长论点各一块）；短回应不追加条目。
+        self.assertEqual(len(windows), 3)
+        held_until = windows[0][0] + windows[0][1]
+        for start, duration in windows[1:]:
+            self.assertLessEqual(start, held_until + 1e-6,
+                                 "visual 轨道出现空窗：上一块图板退场后下一块才进场")
+            held_until = max(held_until, start + duration)
 
     def test_outro_headline_reads_the_hook_and_question(self):
         """收尾大标题优先用本期的 hook——"下次一起跟踪验证"这句承诺才有实际内容。"""

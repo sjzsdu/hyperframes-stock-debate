@@ -18,6 +18,7 @@ from stocktalk.modules.hyperframes_builder import short_business_label
 from stocktalk.modules.numbers import repair_spoken_numbers, to_display
 from stocktalk.modules.providers import ProviderError, create_llm_client
 from stocktalk.modules.providers.bailian_chat import BailianChatClient
+from stocktalk.modules.risk_exchange import build as build_risk_exchange
 from stocktalk.modules.stock_data import StockDataClient
 from stocktalk.modules.story_spotter import spot_stories
 
@@ -34,6 +35,13 @@ Runner = Callable[[Sequence[str], float], str]
 # prompt turns a duration target into a character budget with this rate, because
 # asking a model for "a 90-second dialogue" reliably overshoots.
 SPEECH_CHARS_PER_SECOND = 4.8
+
+# 片尾风险提示交换轮（2026-10-08 第二版）：一人一句、按个股特征变化。
+# 模板池与挑选逻辑见 stocktalk/modules/risk_exchange.py——有数据才用特征模板，
+# 合格候选按 (代码, 日期) 稳定分散，同一只票同一天可复现、不同票不撞形。
+# dialogue.risk_exchange: false 可整体关闭。
+RISK_A = "股市有风险"
+RISK_B = "投资需谨慎"
 
 # 按轮情绪（2026-10-07）：模型每轮自报台词的当下情绪，TTS 按轮注入演绎指令——
 # 「情绪在对话里起伏」是听感从平铺到有戏的最大杠杆（豆包 context_texts 每次调用
@@ -71,6 +79,8 @@ class DialogueConfig:
     # prompt 的**选材与侧重参考**——「这期多讲点什么」。它是提示而非新约束：
     # 合规红线、数据真实性、骨架节拍与字数额度都照旧有效（见 _message_section）。
     message: str = ""
+    # 片尾风险提示交换轮（2026-10-08 第二版）：false = 关闭。
+    risk_exchange: bool = True
 
 
 class DialogueGenerator:
@@ -90,6 +100,7 @@ class DialogueGenerator:
             arc=str(source.get("arc", DialogueConfig.arc) or DialogueConfig.arc),
             short_line_chars=int(source.get("short_line_chars", DialogueConfig.short_line_chars)),
             message=self._normalize_message(source.get("message")),
+            risk_exchange=source.get("risk_exchange", source.get("risk_line", True)) not in (False, "", None, "false", "0"),
         )
         if (self.config.min_duration_seconds < 1 or self.config.max_duration_seconds < self.config.min_duration_seconds
                 or not 30 <= self.config.max_line_chars <= 150 or self.config.max_tokens < 1):
@@ -179,9 +190,12 @@ class DialogueGenerator:
             "风险藏在哪个环节。\n"
             "4. 有多少数据聊多少内容：充分利用数据里的财务指标、每股指标、利润/资产负债/现金流构成和历史走势；"
             "结合最近的行情节奏（涨跌、量能、位置）自然展开，可以引用带日期的具体数字，但只解读不预测。\n"
-            "5. 真实资讯是重要素材：数据里的 news/资讯 是该股票最近的公开新闻、研报和快讯标题，"
-            "挑与生意最相关的 2-4 条自然融进对话（说清日期和信息类型，如\u201c九月初有研报提到……\u201d）；"
-            "只能复述标题和摘要里已有的信息，不得脑补细节、不得据此预测股价；没有资讯或都不相关就完全不提。\n"
+            "5. 最新资讯是每期的必答块（2026-10-08）：数据里的 news/资讯 是该股票最近的公开新闻、研报和快讯。"
+            "骨架里出现 news 节拍时，必须至少用一轮正面响应最新的一条——说清日期与信息类型"
+            "（如\u201c10月8日龙虎榜……\u201d\u201c九月初有研报提到……\u201d），并把它和前面的生意判断连线"
+            "（印证了什么/矛盾在哪/或说明只是交易层面的异动），这正是观众点进来的原因；"
+            "只能复述标题和摘要里已有的信息，不得脑补细节、不得据此预测股价；"
+            "骨架里没有 news 节拍（数据里没给资讯）时才完全不提。\n"
             "6. 多用通俗类比和生活化举例把生意讲透（如把经销网络比作水管、把预收款比作客户先排队交钱）；"
             "关键数字要说清楚\u201c意味着什么\u201d，而不是只报数字。\n"
             "7. 每轮对话都要给出画面指引：从 line 中提取 2-4 个关键词或短语（公司名、业务词、财务指标名、"
@@ -344,6 +358,15 @@ class DialogueGenerator:
             "素材和数据多就往上限展开，素材少就收得住（不低于下限），不要为凑时长注水，也不要意犹未尽地草草收尾。"
             "至少一半的篇幅围绕公司业务和行业本身（生意模式、行业格局、竞争与需求），技术信号最多作为一句带过的佐证。"
             "开头几轮就把“这家公司靠什么赚钱”讲明白，让观众听完能多懂一门生意，而不是听了一段行情点评。"
+            "观众的获得感是这条视频的命：看完要让人觉得「学到了」，而不只是听了一嘴行情。"
+            "每一期至少让观众带走两个可复用的认知，从下面三类里至少覆盖两类："
+            "① 行业门道——这个行业的钱怎么流转、产业链上下游谁卡着谁、为什么这类生意毛利高或账期长，讲清一个运转机制；"
+            "② 看财报的方法——结合本期真实数字讲一个指标怎么读、容易看漏什么"
+            "（比如经营现金流为什么要和净利润对着看、存货和应收压着多少营收说明什么），"
+            "让观众下次自己翻开财报也会用这一招；"
+            "③ 公司价值——把商业模式翻译成「这门生意好在哪、脆弱在哪」，不要停在概念词上。"
+            "讲通用财识可以用行业常识，但涉及本期公司的数字必须原样来自数据；"
+            "知识点要长在交锋里自然讲出来，禁止开科普小课堂（「我们来了解一下」这类句式一律不要）。"
             f"本期必须按这条骨架展开（节拍顺序与分工见系统提示，第 1 拍就是开场）：{'→'.join(beat_keys)}。"
             "节拍只进不退，每拍大致对应一轮：closing 是唯一收束拍，只允许最后一轮、"
             "由上一轮说话人的对方用一句短回应（不超过25字）完成；骨架各拍走完后不得再新增论证轮——"
@@ -352,6 +375,8 @@ class DialogueGenerator:
             "涉及管理层时只能用公司档案里给出的姓名与职务，不评价个人能力、不推测动机；公司动作只说新闻里写了的，并带上出处和时间。"
             "收尾必须是对话收束，不要一方独白结束：最后一拍（closing）由上一拍说话人的对方用一句短回应接住"
             "——一句认可、一句保留，或把最关键的分歧再钉一次。"
+            "「股市有风险」「投资需谨慎」这两句固定风险提示由程序在收尾之后以一人一句的方式追加，"
+            "不要把它们（或同义说法）写进任何台词。"
             "收尾句式每期必须换（2026-09-29 复盘：十期里七期都是「那就看下一期/下一份财报……」收尾，"
             "观众会腻）：禁止再把「那就看下一…」「咱们看下一期……」当结语模板。要盯的变量会打在片尾画面上，"
             "台词点到变量本身即可，说法要从当期的分歧里自然长出来，例如：「行，那就拿交付量说话。」"
@@ -441,6 +466,28 @@ class DialogueGenerator:
                               # 续轮继承同一情绪：它们是同一句话的拆分，语气不该变
                               "emotion": emotion,
                               "character_name": self._character(speaker, speaker, "")["name"]})
+        # 片尾风险提示交换轮（2026-10-08 第二版）：一人一句的接力——「股市有风险」
+        # 由一位角色说出口，「投资需谨慎」由对方接住，像对话的最后一次交锋而不是
+        # 贴在片尾的免责声明。措辞按个股特征（行业/主营/股名）从模板池挑：有数据
+        # 才用特征模板，合格候选按 (代码, 日期) 稳定分散——同一只票同一天可复现，
+        # 不同票、不同日子不撞形（与骨架选择同一哲学）。全程确定性、不烧 LLM：
+        # 合规底线一期都不能漏，也不能押在模型自觉上。说话人按「与最后一轮对调」
+        # 分配，交替感与 TTS 音色切换天然成立；标 short——两句话不值得重画图板。
+        self._risk_choice: dict[str, str] = {}
+        if self.config.risk_exchange and turns:
+            quote = stock_data.get("quote") if isinstance(stock_data.get("quote"), Mapping) else {}
+            risk_code = str(stock_data.get("code") or quote.get("code") or "")
+            self._risk_choice = build_risk_exchange(stock_data, code=risk_code,
+                                                    day=date.today().isoformat())
+            last_speaker = turns[-1]["speaker"]
+            first_speaker = next((name for name in self.speakers if name != last_speaker),
+                                 last_speaker)
+            for offset, (speaker, line) in enumerate(
+                    ((first_speaker, self._risk_choice["a"]), (last_speaker, self._risk_choice["b"]))):
+                turns.append({"speaker": speaker, "line": line,
+                              "beat": "closing", "short": True, "visual": [],
+                              "emotion": "平述",
+                              "character_name": self._character(speaker, speaker, "")["name"]})
         quote = stock_data.get("quote") if isinstance(stock_data.get("quote"), Mapping) else {}
         code, name = str(stock_data.get("code") or quote.get("code") or ""), str(quote.get("name") or stock_data.get("code") or "股票")
         char_count = sum(len(turn["line"]) for turn in turns)
@@ -455,6 +502,8 @@ class DialogueGenerator:
                 "sides": self._clean_sides(response.get("sides")),
                 # 首帧/封面冲突数字（上屏专用）；模型没给就 None，画面不硬凑
                 "spotlight": self._clean_spotlight(response),
+                # 片尾风险提示交换（程序追加的两轮）：留痕供审查页核对「这期为什么是这句」
+                **({"risk_exchange": self._risk_choice} if self._risk_choice else {}),
                 "char_count": char_count,
                 # 按实测语速换算的自估时长。长片最容易出的偏差是模型多写几百字，
                 # 把它留在结果里，pipeline 就能在渲染前提醒（而不是渲完才发现超长）。

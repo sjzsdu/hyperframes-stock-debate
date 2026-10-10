@@ -49,18 +49,27 @@ dialogue:
   # 数据真实性要求，也改不了骨架节拍与字数额度（见 dialogue_generator._message_section）。
   # 写在这里的值对每次运行都生效：守护进程（-m 不会跟着子进程走）只能靠它。
   message: ""
+  # 片尾风险提示交换轮（2026-10-08 第二版）：一人一句的接力——「股市有风险」
+  # 一位角色说、「投资需谨慎」对方接。措辞按个股特征（行业/主营/股名）从
+  # stocktalk/modules/risk_exchange.py 的模板池挑：有数据才用特征模板，
+  # 合格候选按 (代码, 日期) 稳定分散——同一只票同一天可复现，不同票不撞形。
+  # 同时打在片尾互动图板与收尾卡上。false 关闭口播轮（画面提示仍在）。
+  risk_exchange: true
   # Measured end-to-end `bl text chat` latency for a full 2-5 min script is
   # ~90-100s; a short script is faster, but retries each cost the full
   # timeout, so keep a wide margin.
   timeout_seconds: 300
 
-# tongstock connects to the remote TDX server on every invocation, which
-# typically takes 20-30s.  The timeout must comfortably exceed that so a
-# single stock lookup does not spuriously fail.  Retries are kept low as a
-# failed slow command already costs the full timeout each time.
+# tongstock connects to the remote TDX server on every invocation.  The
+# comment below used to say 20-30s, but 2026-10-08 measured `quote 600825`
+# at 60.7s wall time — exactly on the old 60s timeout, so runs failed
+# intermittently the moment the connection ran a few seconds slower.
+# 120s keeps the margin; retries=1 rides out a one-off slow connect.
+# Retries stay low regardless: a failed slow command costs the full
+# timeout each attempt.
 stock_data:
-  retries: 0
-  timeout_seconds: 60
+  retries: 1
+  timeout_seconds: 120
   # 个股资讯（tongstock news query，东方财富/财联社真实数据）：作为对话创作素材
   # 与「近期资讯」画面的数据源。news_limit 为拉取条数；news_days 为 0 表示不限时间。
   news_limit: 12
@@ -82,17 +91,18 @@ characters:
     supports_instruction: true
     instruction: 用轻松愉快、兴奋分享的语气，像和朋友聊一家宝藏公司
     speed: 1.07
-    pitch: 1.03   # 豆包接口无 pitch 参数，忽略（音高由音色与情感决定）
+    pitch: 1.03   # post_process.pitch 已生效：1.03 → +1 半音（微亮）
   bear:
     name: 股市老登
     persona: 老练理性，擅长从行业格局和经营风险角度提问，追问生意的短板与数据边界
-    # 豆包 2.0 音色：刘飞（沉稳冷静）+ 审视质疑指令。候选还有云舟
-    # zh_male_m191_uranus_bigtts，一行换。
-    voice_id: zh_male_liufei_uranus_bigtts
+    # 豆包 2.0 音色：解说小明（视频配音场景，F0≈155Hz 洪亮解说腔）。
+    # 2026-10-07 二轮 A/B 选中（刘飞偏低 122Hz；云舟 106Hz 更低沉已淘汰；
+    # 磁性解说男声 152Hz 备选，样本在 output/_voice_ab_pitch/round2/）。
+    voice_id: zh_male_jieshuoxiaoming_uranus_bigtts
     supports_instruction: true
     instruction: 用沉稳冷静、带审视和质疑的语气指出风险，语气笃定
     speed: 1.0
-    pitch: 0.96   # 同上，豆包忽略
+    pitch: 1.0   # 解说小明本身够亮，不再升调（post_process.pitch 生效中）
 
 compliance:
   forbidden_words:
