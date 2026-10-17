@@ -143,6 +143,18 @@ h1 em { color: var(--accent); font-style: normal; font-size: 30px; font-weight: 
 #identity .identity-tags { flex-direction: row; flex-wrap: nowrap; overflow: hidden; gap: 10px; flex: none; }
 #identity .identity-tag { padding: 8px 14px; }
 
+/* A compact orientation cue for viewers who join mid-clip.  The fill and
+   speaker chip already explain what is happening now; this badge adds the
+   missing narrative promise: how many turns remain. */
+.round-badge { top: calc(var(--safe-top) + 246px); left: calc(var(--stage-left) + 28px);
+  z-index: 5200; display: inline-flex; align-items: center; padding: 7px 15px;
+  border: 1px solid var(--line); border-radius: 999px; background: rgba(6, 15, 29, .90);
+  color: var(--muted); font-size: 18px; font-weight: 700; letter-spacing: 1px;
+  box-shadow: 0 6px 18px rgba(0,0,0,.28); }
+.round-badge::before { content: ""; width: 8px; height: 8px; margin-right: 9px; border-radius: 50%; }
+.round-badge.bull::before { background: var(--bull); box-shadow: 0 0 10px var(--bull); }
+.round-badge.bear::before { background: var(--bear); box-shadow: 0 0 10px var(--bear); }
+
 /* ---- Slot 2: talking-point chips.  The kicker text was removed 2026-09-23
         (the board SVG carries its own Chinese title; the old label showed raw
         skeleton beat keys), so this row holds only the identity strip. ----
@@ -358,6 +370,7 @@ svg text[data-hl="1"] { fill: var(--gold) !important; font-weight: 700; }
 /* ---- 竖屏：说话人徽标 / 字幕色条 / 角色出场行的 1080 布局适配 ---- */
 /* 竖屏面板 top=safe+432：徽标挂在面板右上角内侧，不与 board 标题同排。 */
 #root.layout-vertical .speaker-chip { top: calc(var(--safe-top) + 448px); right: calc(var(--safe-side-right) + 34px); font-size: 24px; padding: 8px 20px 8px 14px; }
+#root.layout-vertical .round-badge { top: calc(var(--safe-top) + 448px); left: calc(var(--stage-left) + 34px); font-size: 20px; }
 #root.layout-vertical .caption-line::before { left: 18px; top: 36px; bottom: 36px; width: 8px; }
 #root.layout-vertical .intro-roles { gap: 18px; }
 #root.layout-vertical .intro-roles em { font-size: 34px; }

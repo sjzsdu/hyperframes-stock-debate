@@ -161,6 +161,24 @@ class HyperFramesBuilderTests(unittest.TestCase):
             self.assertEqual(content.count('data-slot="kicker"'), 0)
             self.assertEqual(content.count('data-slot="tint"'), 2)
 
+    def test_round_badge_orients_viewer_through_the_debate(self):
+        """The generated stage exposes deterministic progress through turns."""
+        with tempfile.TemporaryDirectory() as temp:
+            project = HyperFramesBuilder(self._config(temp)).build_project(
+                {"code": "600519", "quote": {"name": "贵州茅台", "price": 1500}},
+                {"turns": [
+                    {"speaker": "bull", "line": "营收增长明显。"},
+                    {"speaker": "bear", "line": "但估值偏高。"},
+                ]},
+                {},
+            )
+            content = project.composition_path.read_text(encoding="utf-8")
+            self.assertEqual(content.count('data-slot="round"'), 2)
+            self.assertIn("观点 1 / 2", content)
+            self.assertIn("观点 2 / 2", content)
+            motion = (project.directory / "stock-debate.js").read_text(encoding="utf-8")
+            self.assertIn("'round'", motion)
+
     def test_captions_are_single_rows_on_an_absolute_clock(self):
         """一行字幕按绝对时间排布：逐条递增、首条从 0 开始、都不超过一行上限。"""
         long_line = "这家公司的主营业务是锂电池和电子器件，产能扩张之后收入弹性很大，但资本开支也水涨船高。"

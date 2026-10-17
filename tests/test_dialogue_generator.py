@@ -58,6 +58,20 @@ class DialogueGeneratorTests(unittest.TestCase):
         self.assertIn("45-90 字", message)
         self.assertNotIn("分钟之间", message)
 
+    def test_short_form_prompt_switches_from_long_video_framing(self):
+        generator = DialogueGenerator({"dialogue": {"min_duration_seconds": 45, "max_duration_seconds": 75}})
+        message = generator._user_prompt({"code": "1"})
+        self.assertIn("信息流短视频", message)
+        self.assertNotIn("这是一条长视频", message)
+
+    def test_style_audit_exposes_cliches_without_rewriting_lines(self):
+        lines = [{"line": "说白了，这是一针见血的判断。"},
+                 {"line": "说白了，这是一针见血的判断。"}]
+        audit = DialogueGenerator._style_audit(lines)
+        self.assertEqual(audit["cliche_count"], 2)
+        self.assertEqual(audit["repeated_adjacent_lines"], 1)
+        self.assertTrue(audit["flags"])
+
     def test_default_budget_targets_a_two_to_five_minute_cut(self):
         """默认配置按 2-5 分钟算预算，轮次多、单轮短（2026-09-22 用户反馈）。
 

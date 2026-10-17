@@ -47,6 +47,13 @@
     {% endfor %}</ul>
   </aside>
 
+  {# Orientation cue: a viewer can join mid-clip and immediately see how far
+     the argument has progressed.  It follows the same absolute clock as the
+     dialogue, so it never drifts from the spoken turns. #}
+  {% for item in slots.round %}
+  <div class="round-badge {{ item.character }} clip" data-start="{{ item.start }}" data-duration="{{ item.duration }}" data-slot="round" data-layout-ignore><span>{{ item.label }}</span></div>
+  {% endfor %}
+
   {# Slot 1 — topic label: removed 2026-09-23.  The board SVG already carries
      its own Chinese title, and the old kicker showed raw skeleton beat keys
      ("books", "occupied") that mean nothing to a viewer.  The topic tag now

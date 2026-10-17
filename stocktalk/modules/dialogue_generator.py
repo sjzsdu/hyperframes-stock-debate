@@ -57,6 +57,15 @@ EMOTION_DIRECTIVES = {
     "平述": "",
 }
 
+# Deterministic style audit: these are not hard bans (a quote may legitimately
+# contain one), but repeated use is a strong signal of canned AI prose.  Keep
+# the audit observable in the run JSON so a human can decide whether to rewrite
+# a line instead of hiding a quality failure behind another full generation.
+STYLE_CLICHES = ("说白了", "总的来说", "值得注意的是", "不难发现", "在当前市场环境下",
+                 "我们先看", "接下来我们", "归根结底")
+STYLE_IDIOMS = ("一针见血", "锦上添花", "顺势而为", "乘风破浪", "稳中有进", "大有可为",
+                "水涨船高", "如火如荼", "不言而喻", "毋庸置疑")
+
 # 成片时长目标 2-5 分钟（2026-09-20 用户反馈"内容太短、得不到有效启示"）。
 # 2026-09-22 用户反馈：轮次多一点、每人一次讲短一点——短交锋才有辩论的节奏，
 # 一人一口气 27 秒太闷。单轮默认 80 字（约 17 秒），轮数按典型 60 字估。
@@ -352,8 +361,10 @@ class DialogueGenerator:
             "写完自己检查每轮是否是完整的话，结尾不能是“……的”“……反而”这种断句。"
             "不要编号、不要 Round、不要强制一来一回；"
             "允许一方连续追问、另一方长答后短驳，长短句交错，不要每轮等长。"
-            "这是一条长视频，不是快讯：观众交出的是几分钟的注意力，每一轮都要让他多懂一点这门生意。"
-            "多轮短交锋，别让一个人一口气讲太久：一轮只讲一个点，讲完就把话头递出去。"
+            + ("这是一条信息流短视频，不是快讯：每一轮都要让观众多懂一点这门生意，不能用铺垫消耗前几秒。"
+               if max_s <= 90 else
+               "这是一条长视频，不是快讯：观众交出的是几分钟的注意力，每一轮都要让他多懂一点这门生意。")
+            + "多轮短交锋，别让一个人一口气讲太久：一轮只讲一个点，讲完就把话头递出去。"
             "但每一轮仍必须有新信息、新数字或新角度，严禁把同一个意思换句话再说一遍。"
             "素材和数据多就往上限展开，素材少就收得住（不低于下限），不要为凑时长注水，也不要意犹未尽地草草收尾。"
             "至少一半的篇幅围绕公司业务和行业本身（生意模式、行业格局、竞争与需求），技术信号最多作为一句带过的佐证。"
@@ -508,11 +519,40 @@ class DialogueGenerator:
                 # 按实测语速换算的自估时长。长片最容易出的偏差是模型多写几百字，
                 # 把它留在结果里，pipeline 就能在渲染前提醒（而不是渲完才发现超长）。
                 "estimated_seconds": round(char_count / SPEECH_CHARS_PER_SECOND, 1)}
+        script["quality"] = self._style_audit(turns)
+        for flag in script["quality"]["flags"]:
+            notes.append(f"[文风检查] {flag}")
         if self.config.message:
             # 用了 --message 就要留痕：这期"为什么讲得跟别期不一样"必须能在成片
             # 旁边的 JSON / 审查页里看到原话，否则提示词是一条断掉的回溯链。
             script["message"] = self.config.message
         return script
+
+    @staticmethod
+    def _style_audit(turns: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+        """Expose lightweight, deterministic human-speech quality signals.
+
+        This intentionally reports instead of rewriting: a second LLM pass can
+        damage factual wording, while a reviewer can use the flags to target
+        only the offending lines.
+        """
+        lines = [str(turn.get("line") or "").strip() for turn in turns if str(turn.get("line") or "").strip()]
+        joined = "\n".join(lines)
+        cliche_hits = [phrase for phrase in STYLE_CLICHES if joined.count(phrase)]
+        idiom_count = sum(joined.count(phrase) for phrase in STYLE_IDIOMS)
+        repeated = sum(1 for left, right in zip(lines, lines[1:]) if left == right)
+        flags: list[str] = []
+        if cliche_hits:
+            flags.append("套话：" + "、".join(cliche_hits))
+        if idiom_count > max(1, len(lines) // 8):
+            flags.append(f"熟语密度偏高（{idiom_count}处）")
+        if repeated:
+            flags.append(f"相邻台词重复（{repeated}处）")
+        return {"cliche_count": sum(joined.count(phrase) for phrase in STYLE_CLICHES),
+                "cliche_hits": cliche_hits, "idiom_count": idiom_count,
+                "repeated_adjacent_lines": repeated,
+                "short_turn_ratio": round(sum(len(line) <= 20 for line in lines) / len(lines), 3) if lines else 0.0,
+                "flags": flags}
 
     @staticmethod
     def _clean_spotlight(response: Mapping[str, Any]) -> dict[str, str] | None:

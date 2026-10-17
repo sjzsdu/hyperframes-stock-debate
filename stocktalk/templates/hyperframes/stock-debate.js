@@ -60,7 +60,7 @@
       tl.set(previous, { visibility: 'hidden' }, start + DISSOLVE + .02);
     });
   };
-  ['tint', 'keywords', 'visual'].forEach(wireSlot);
+  ['tint', 'keywords', 'visual', 'round'].forEach(wireSlot);
 
   // ---- Keyword chips: stagger in when the topic changes --------------------
   // 容器本身仍然原地溶解（上面的 wireSlot）；chips 再逐个上浮一小段，给换题
