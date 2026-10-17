@@ -60,3 +60,11 @@ def test_wav_duration_ignores_corrupt_chunk_sizes(tmp_path: Path) -> None:
     _write_wav(audio, sample_rate=24000, frames=48000)  # 2.0s of actual audio
     agent = TTSAgent({"output": {"dir": str(tmp_path)}})
     assert agent._wav_duration(audio) == 2.0
+
+
+def test_line_prosody_keeps_pitch_variation_small(tmp_path: Path) -> None:
+    agent = TTSAgent({"output": {"dir": str(tmp_path)},
+                      "tts": {"prosody_pitch_delta": 0.02, "prosody_speed_delta": 0.03}})
+    _, speed, pitch, _ = agent._apply_prosody("真的这么贵？", {"pitch": 1.0, "speed": 1.0})
+    assert pitch == 1.02
+    assert speed == 0.98

@@ -84,6 +84,8 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--config", default=None, help="自定义配置文件路径")
     parser.add_argument("--output-dir", default=None, help="输出目录（默认 output/）")
     parser.add_argument("--duration-minutes", type=int, default=None, help="对话目标时长（分钟，默认 2-5）")
+    parser.add_argument("--short-form", action="store_true",
+                        help="信息流短版：将目标时长设为 45-75 秒，适合与默认长版做 A/B 测试")
     parser.add_argument("-m", "--message", action="append", default=None, metavar="TEXT",
                         help="本期提示词：注入剧本生成，给 LLM 当选材与侧重的参考"
                              "（如「重点讲海外收入占比」）。可重复，多条换行拼接；"
@@ -164,6 +166,11 @@ def main(argv: list[str] | None = None) -> None:
             parser.error("--duration-minutes 必须为正整数")
         seconds = args.duration_minutes * 60
         config.setdefault("dialogue", {}).update({"min_duration_seconds": seconds, "max_duration_seconds": seconds})
+    elif args.short_form:
+        # Keep the long-form default intact for existing publishing workflows;
+        # short-form is an explicit experiment so retention can be compared on
+        # the same stock and day instead of silently changing the product.
+        config.setdefault("dialogue", {}).update({"min_duration_seconds": 45, "max_duration_seconds": 75})
 
     if args.platforms:
         names = [p.strip() for p in args.platforms.replace("，", ",").split(",") if p.strip()]

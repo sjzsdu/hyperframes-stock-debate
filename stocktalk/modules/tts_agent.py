@@ -185,18 +185,23 @@ class TTSAgent:
         """
         base_pitch = float(character_config.get("pitch", self.tts_config.get("pitch", 1.0)))
         base_rate = float(character_config.get("speed", self.tts_config.get("speed", 1.0)))
+        # Keep a character's timbre stable across separately synthesized lines.
+        # Emotion still changes cadence, but the caller can tune the very small
+        # allowed movement instead of letting punctuation create a new voice.
+        pitch_limit = max(0.0, float(self.tts_config.get("prosody_pitch_delta", 0.02)))
+        speed_limit = max(0.0, float(self.tts_config.get("prosody_speed_delta", 0.03)))
         pitch_delta = rate_delta = 0.0
         if "？" in line or "?" in line:
-            pitch_delta += 0.06          # questions lift
-            rate_delta -= 0.02
+            pitch_delta += pitch_limit          # questions lift
+            rate_delta -= min(speed_limit, 0.02)
         if "！" in line or "!" in line:
-            pitch_delta += 0.05          # emphasis push
-            rate_delta += 0.04
+            pitch_delta += pitch_limit          # emphasis push
+            rate_delta += speed_limit
         if any(word in line for word in ("风险", "警惕", "回撤", "不确定", "小心", "危险", "亏损", "隐患")):
-            pitch_delta -= 0.02          # warnings sink and slow
-            rate_delta -= 0.06
+            pitch_delta -= min(pitch_limit, 0.01)  # warnings sink and slow
+            rate_delta -= speed_limit
         if any(word in line for word in ("你看", "打个比方", "说白了", "也就是说", "举个例子")):
-            rate_delta -= 0.03          # explanatory asides ease off
+            rate_delta -= min(speed_limit, 0.02)  # explanatory asides ease off
         pitch = round(self._clamp(base_pitch + pitch_delta, 0.82, 1.22), 3)
         speed = round(self._clamp(base_rate + rate_delta, 0.92, 1.18), 3)
         synth_text, use_ssml = self._with_breaks(line)

@@ -130,6 +130,11 @@ tts:
   pause_between_segments: 0.12
   speed: 1.0
   pitch: 1.0
+  # Per-line emotion is intentionally subtle: large pitch jumps make one
+  # character sound like several different voices after sentence-by-sentence
+  # synthesis.  Raise only for an explicit voice experiment.
+  prosody_pitch_delta: 0.02
+  prosody_speed_delta: 0.03
   volume: 1.0
   seed: 20260911
   trim_silence: true

@@ -650,7 +650,7 @@ class HyperFramesBuilder:
     # an unchanged slot is merged into a longer window and therefore never
     # re-animates, while a changed one dissolves in place.  Nothing on screen
     # translates or scales, which is what removes the per-turn "jump".
-    SLOT_NAMES = ("tint", "kicker", "keywords", "visual", "caption", "progress")
+    SLOT_NAMES = ("tint", "kicker", "keywords", "visual", "caption", "progress", "round")
     # When the permanent stage (headline, panel frame, caption box) fades in.
     # Deliberately early: the opening title card only covers the panel area, so
     # the headline and the first caption are live from the very first word.
@@ -747,6 +747,16 @@ class HyperFramesBuilder:
                 })
             slots["progress"].append({"start": round(turn_start, 3),
                                       "duration": round(max(0.2, float(segment.get("duration") or 1.0)), 3)})
+            # A small, persistent orientation cue prevents the debate from
+            # feeling like an unbounded stream.  It is derived from the actual
+            # rendered turns (never invented by the model), so it stays correct
+            # when a short response is merged into the previous board.
+            slots["round"].append({
+                "start": round(turn_start, 3),
+                "duration": round(max(0.2, float(segment.get("duration") or 1.0)), 3),
+                "label": f"观点 {index + 1} / {len(segments)}",
+                "character": character,
+            })
         slots["tint"] = self._merge_slot(tint_entries)
         slots["keywords"] = self._merge_slot(keyword_entries)
         slots["visual"] = self._merge_slot(visual_entries)
