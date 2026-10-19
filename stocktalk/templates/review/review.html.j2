@@ -103,7 +103,7 @@
       <h3>选题与数字额度</h3>
       <div><span class="k">主线</span>{{ episode_plan.story.angle or "—" }}</div>
       <div><span class="k">底牌素材</span>{{ episode_plan.story.reveal_material_id or "—" }}</div>
-      <div><span class="k">数字额度</span>{{ episode_plan.number_budget.used or 0 }} / {{ episode_plan.number_budget.total or 0 }}（口播的核心数字）</div>
+      <div><span class="k">数字额度</span>{{ episode_plan.number_budget.used or 0 }} 个（本期上场的口播数字）</div>
       {% if episode_plan.warnings %}
       <div><span class="k">缺来源</span>{{ episode_plan.warnings|join('、') }}（已跳过，未补猜）</div>
       {% endif %}

@@ -458,13 +458,12 @@ class DialogueGenerator:
         beats = list(choice.beats) if choice else []
         beat_keys = beats_by_key(beats)
         turns: list[dict[str, Any]] = []
+        # 每轮最终台词对应的模型原始条目：章节分配在拆分之后统一做，那时还要按它
+        # 读模型自己给的 round_id/visual_id。
+        entries: list[Mapping[str, Any]] = []
         notes: list[str] = []
         cursor = 0
-        # 章节分配要按「最终会有多少轮台词」算，而不是只算模型给的轮数：片尾
-        # 风险提示交换轮是程序追加的，算漏了末章就会被正文的倒数第二轮顶掉。
-        # （turns 为空时不会追加，那种情况 raw_turns 也为空，整个生成会先失败。）
         append_risk = bool(self.config.risk_exchange) and bool(raw_turns)
-        total_turns = len(raw_turns) + (2 if append_risk else 0)
         for index, entry in enumerate(raw_turns, 1):
             if not isinstance(entry, Mapping):
                 raise DialogueGenerationError(f"turn {index} is not an object")
@@ -505,7 +504,6 @@ class DialogueGenerator:
             # 而且正好贴合"轮次多一点、每次讲短一点"的节奏（2026-09-22 用户反馈）。
             pieces = self._split_line(line)
             for offset, piece in enumerate(pieces):
-                metadata = self._turn_metadata(entry, index, episode_plan, total=total_turns)
                 turns.append({"speaker": speaker, "line": piece,
                               "beat": beat.key if beat else self._clean_beat(entry.get("beat")),
                               # 只有首段能算短回应；续轮是正常发言，别跳过图板
@@ -513,8 +511,14 @@ class DialogueGenerator:
                               "visual": visuals,
                               # 续轮继承同一情绪：它们是同一句话的拆分，语气不该变
                               "emotion": emotion,
-                              "character_name": self._character(speaker, speaker, "")["name"],
-                              **metadata})
+                              "character_name": self._character(speaker, speaker, "")["name"]})
+                entries.append(entry)
+        # 章节分配的轮数基准必须是「最终成片有几轮」：超长台词会被 _split_line 拆成
+        # 续轮，拿模型给的轮数当基准时，片尾两轮的 index 会溢出 total，末章判定的
+        # {total, total-1} 匹配不上——收尾两句会落进 R4 章，R5 全片 0 轮，规划好的
+        # timeline 图一次都不出现。片尾风险提示交换轮是程序追加的，同样要算进来，
+        # 算漏了末章也会被正文的倒数第二轮顶掉。
+        total_turns = len(turns) + (2 if append_risk else 0)
         # 片尾风险提示交换轮（2026-10-08 第二版）：一人一句的接力——「股市有风险」
         # 由一位角色说出口，「投资需谨慎」由对方接住，像对话的最后一次交锋而不是
         # 贴在片尾的免责声明。措辞按个股特征（行业/主营/股名）从模板池挑：有数据
@@ -536,8 +540,12 @@ class DialogueGenerator:
                 turns.append({"speaker": speaker, "line": line,
                               "beat": "closing", "short": True, "visual": [],
                               "emotion": "平述",
-                              "character_name": self._character(speaker, speaker, "")["name"],
-                              **self._turn_metadata({}, len(turns) + 1, episode_plan, total=total_turns)})
+                              "character_name": self._character(speaker, speaker, "")["name"]})
+        # 章节标记统一在这里打：此时轮数已经定死（超长台词的续轮、片尾两轮都在里面），
+        # index 与 total 用的是同一个基准，末章判定在 0～N 次拆行下都成立。
+        for position, turn in enumerate(turns, 1):
+            entry = entries[position - 1] if position <= len(entries) else {}
+            turn.update(self._turn_metadata(entry, position, episode_plan, total=total_turns))
         quote = stock_data.get("quote") if isinstance(stock_data.get("quote"), Mapping) else {}
         code, name = str(stock_data.get("code") or quote.get("code") or ""), str(quote.get("name") or stock_data.get("code") or "股票")
         char_count = sum(len(turn["line"]) for turn in turns)
@@ -611,8 +619,12 @@ class DialogueGenerator:
             if selected is None:
                 selected = body[min(len(body) - 1, cls._chapter_index(index, total, len(body)))]
         visual = selected.get("visual") if isinstance(selected.get("visual"), Mapping) else {}
+        # 这一轮上场的口播数字 = 本章的 anchor + analogy（R2 讲的是毛利率那条 analogy，
+        # 只看 anchor 会让它的指标追溯为空）。
+        spoken_metrics = [*list(selected.get("anchor_metric_ids") or []),
+                          *list(selected.get("analogy_metric_ids") or [])]
         return {"round_id": str(selected.get("id") or ""), "material_ids": list(entry.get("material_ids") or selected.get("material_ids") or []),
-                "metric_ids": list(entry.get("metric_ids") or selected.get("anchor_metric_ids") or []),
+                "metric_ids": list(entry.get("metric_ids") or spoken_metrics),
                 "visual_id": str(entry.get("visual_id") or visual.get("id") or "")}
 
     @staticmethod

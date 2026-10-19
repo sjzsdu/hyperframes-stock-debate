@@ -76,7 +76,7 @@ def test_review_page_shows_the_episode_plan(tmp_path: Path) -> None:
     plan = {
         "version": 1, "stock_code": "000811", "as_of": "2026-10-19",
         "story": {"angle": "温控方案收入占比抬升", "reveal_material_id": "mat.financial.0"},
-        "number_budget": {"total": 6, "used": 3},
+        "number_budget": {"used": 3},
         "rounds": [{"id": "r1_hook", "purpose": "反差开门", "material_ids": ["mat.product.0"],
                     "visual": {"id": "vis.r1_hook", "template": "composition",
                                "fallback": ["mindmap", "source_card"]}}],
@@ -91,7 +91,7 @@ def test_review_page_shows_the_episode_plan(tmp_path: Path) -> None:
 
     assert "本期叙事统筹" in html
     assert "温控方案收入占比抬升" in html
-    assert "3 / 6" in html
+    assert "3 个（本期上场的口播数字）" in html
     assert "mat.product.0" in html
     assert "composition" in html and "vis.r1_hook" in html
     assert "mindmap → source_card" in html

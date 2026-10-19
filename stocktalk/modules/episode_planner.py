@@ -57,8 +57,16 @@ ROUND_MATERIALS: dict[str, str] = {
     "news_event": "mat.event.0",
 }
 
-# 全片口播的核心数字额度（设计定稿：全片 ≤6 个、单章 ≤2 个）。
-NUMBER_BUDGET_TOTAL = 6
+# 章 → 本章优先念哪一级数字（按顺序取，取到就停；取不到就退下一级）。
+# R1 只露半张底牌，要的是原值；R2「生意怎么转」要讲的是哪块最赚钱，所以先拿
+# 产品毛利率那条 analogy 的白话换算，而不是把 R1 的收入占比再念一遍。
+ROUND_NUMBER_POLICY: dict[str, tuple[str, ...]] = {
+    "r1_hook": ("anchor",),
+    "r2_mechanism": ("analogy", "anchor"),
+    "r3_moat_pressure": ("analogy", "anchor"),
+    "r4_ledger_test": ("anchor",),
+    "r5_open_verdict": (),
+}
 
 
 def _ref(path: str, as_of: str | None = None) -> list[dict[str, str]]:
@@ -103,8 +111,10 @@ class MaterialExtractor:
                 continue
             metrics: list[dict[str, Any]] = []
             # 口径与画面上的收入构成图一致：`收入占比(%)`/`毛利率(%)` 是 F10 原文字段。
+            # 毛利率走 analogy：它是"每 100 元收入有 X 元是毛利"这种确定换算，
+            # 只上屏不口播的话，R2「生意怎么转」就讲不出哪块最赚钱。
             for key, label, unit, policy in (("收入占比(%)", "收入占比", "%", "anchor"),
-                                             ("毛利率(%)", "毛利率", "%", "visual_only")):
+                                             ("毛利率(%)", "毛利率", "%", "analogy")):
                 value = _number(row.get(key))
                 if value is None:
                     continue
@@ -198,6 +208,9 @@ class EpisodePlanner:
 
         rounds: list[dict[str, Any]] = []
         used = 0
+        # 同一条指标全片只上场一次：章节之间各取 anchors[:1] 会取到同一条，
+        # 同一个数字念两遍、额度计两次（R1/R2 共用产品素材的「收入占比」就是这么撞的）。
+        claimed: set[str] = set()
         for rid, purpose, lead, category in ROUND_DEFS:
             material_id = ROUND_MATERIALS.get(category)
             if material_id not in by_id:
@@ -208,9 +221,19 @@ class EpisodePlanner:
             # 数字三级：anchor 原值口播，analogy 讲确定换算后的白话，visual_only 只上屏。
             anchors = [str(m["id"]) for m in metrics if m.get("spoken_policy") == "anchor"]
             analogies = [str(m["id"]) for m in metrics if m.get("spoken_policy") == "analogy"]
-            # 额度按章分摊（全片 ≤6）：本章拿到的 anchor/analogy 计进 used。
-            take_anchors = anchors[:1]
-            take_analogies = analogies[:1]
+            # 按本章的口径偏好挑一条上场：已被别的章拿走的指标不再重复计额度。
+            pools = {"anchor": [i for i in anchors if i not in claimed],
+                     "analogy": [i for i in analogies if i not in claimed]}
+            take_anchors: list[str] = []
+            take_analogies: list[str] = []
+            for policy in ROUND_NUMBER_POLICY.get(rid, ("anchor", "analogy")):
+                pool = pools.get(policy) or []
+                if not pool:
+                    continue
+                picked = pool[:1]
+                (take_anchors if policy == "anchor" else take_analogies).extend(picked)
+                claimed.update(picked)
+                break
             used += len(take_anchors) + len(take_analogies)
             rounds.append({"id": rid, "purpose": purpose, "turn_budget": [2, 4], "lead": lead,
                            "material_ids": mids,
@@ -238,7 +261,9 @@ class EpisodePlanner:
                       "counter_thesis": "看空一方要验证压力是否会反噬",
                       "reveal_material_id": "mat.financial.0" if "mat.financial.0" in selected else None},
             # used 是实际上场的 anchor+analogy 数，不是写死的 0：数字纪律要能核对。
-            "number_budget": {"total": NUMBER_BUDGET_TOTAL, "used": used},
+            # 这里没有全片上限——上限只由 prompt 的数字纪律给出，计划里再放一个
+            # 对不上的 total 反而让人误判它是生效的口径。
+            "number_budget": {"used": used},
             "selected_material_ids": selected,
             "rounds": rounds,
             "rejected_materials": [{"id": str(m["id"]), "reason": "缺少可靠结构化来源"} for m in missing],

@@ -90,7 +90,32 @@ class EpisodePlannerTests(unittest.TestCase):
                        for r in plan["rounds"])
         self.assertGreater(expected, 0)
         self.assertEqual(plan["number_budget"]["used"], expected)
-        self.assertLessEqual(plan["number_budget"]["used"], plan["number_budget"]["total"])
+        # 全片上限只在 prompt 的数字纪律里：计划里再躺一个不生效的 total 会让人误判
+        self.assertNotIn("total", plan["number_budget"])
+
+    def test_spoken_metric_is_never_shared_between_chapters(self) -> None:
+        """同一条指标不许在两章各念一遍、额度计两次。
+
+        R1/R2 都取产品素材的 anchors[:1]，念的是同一个「收入占比」。
+        """
+        plan = EpisodePlanner().plan(STOCK_DATA)
+        spoken = [mid for chapter in plan["rounds"]
+                  for mid in [*chapter["anchor_metric_ids"], *chapter["analogy_metric_ids"]]]
+        self.assertEqual(len(spoken), len(set(spoken)), spoken)
+        by_round = {c["id"]: [*c["anchor_metric_ids"], *c["analogy_metric_ids"]]
+                    for c in plan["rounds"]}
+        # R1 露原值、R2 讲"哪块最赚钱"，两章拿到的必须是不同的指标
+        self.assertTrue(by_round["r1_hook"])
+        self.assertTrue(by_round["r2_mechanism"])
+        self.assertFalse(set(by_round["r1_hook"]) & set(by_round["r2_mechanism"]))
+
+    def test_product_line_exposes_a_gross_margin_analogy(self) -> None:
+        """毛利率只有 visual_only 时，R2 讲不了「哪块最赚钱」。"""
+        material = next(m for m in MaterialExtractor().extract(STOCK_DATA)
+                        if m["id"] == "mat.product.0")
+        policies = {m["label"]: m["spoken_policy"] for m in material["metrics"]}
+        self.assertEqual(policies["收入占比"], "anchor")
+        self.assertEqual(policies["毛利率"], "analogy")
 
     def test_material_metrics_are_source_backed_and_missing_stays_rejected(self) -> None:
         materials = MaterialExtractor().extract(STOCK_DATA)
@@ -158,6 +183,46 @@ class TurnMetadataTests(unittest.TestCase):
         meta = self._gen()._turn_metadata({"round_id": "r3_moat_pressure"}, 1, plan, total=12)
         self.assertEqual(meta["round_id"], "r3_moat_pressure")
         self.assertEqual(meta["visual_id"], "vis.r3_moat_pressure")
+
+
+class SplitAwareChapterTests(unittest.TestCase):
+    """章节分配必须走 ``_normalize_script`` 的真实拆行路径。
+
+    直接喂 ``_turn_metadata`` 会绕过 ``_split_line``：轮数基准一旦按拆分前的轮数
+    算，片尾两轮的 index 就溢出 total，末章的 ``{total, total-1}`` 匹配不上——
+    收尾两句落进 R4 章，R5 全片 0 轮，规划好的 timeline 图一次都不出现。
+    """
+
+    LONG = ("这门生意到底靠什么赚钱，数据摆在这里，收入占比和毛利率一起看才说得清楚，"
+            "别只盯着营收规模。")
+
+    def _turns(self, long_count: int) -> list[dict[str, Any]]:
+        gen = DialogueGenerator({"dialogue": {"max_line_chars": 40, "risk_exchange": True}},
+                                llm=object())
+        plan = EpisodePlanner().plan(STOCK_DATA)
+        raw = [{"speaker": "bull" if i % 2 == 0 else "bear",
+                "line": self.LONG if i < long_count else "那这一块呢，真的撑得住吗？"}
+               for i in range(10)]
+        script = gen._normalize_script({"turns": raw}, STOCK_DATA, None, plan)
+        return list(script["turns"])
+
+    def test_final_two_turns_hold_the_last_chapter_whatever_the_split_count(self) -> None:
+        for long_count in (0, 1, 2, 5, 10):
+            turns = self._turns(long_count)
+            # 10 轮正文 + long_count 次拆行产生的续轮 + 片尾风险提示两轮
+            self.assertEqual(len(turns), 12 + long_count, long_count)
+            order = [turn["round_id"] for turn in turns]
+            self.assertEqual(order[-2:], ["r5_open_verdict"] * 2, (long_count, order))
+            self.assertEqual([turn["visual_id"] for turn in turns[-2:]],
+                             ["vis.r5_open_verdict"] * 2, (long_count, order))
+            # 末章只归片尾两轮；正文按位置单调不回退，五章一章不少
+            body = order[:-2]
+            self.assertNotIn("r5_open_verdict", body, (long_count, order))
+            self.assertEqual(body, sorted(body, key=lambda rid: ["r1_hook", "r2_mechanism",
+                                                                 "r3_moat_pressure",
+                                                                 "r4_ledger_test"].index(rid)),
+                             (long_count, order))
+            self.assertEqual(set(order), {rid for rid, *_ in ROUND_DEFS}, (long_count, order))
 
 
 class PlanDrivesChartTests(unittest.TestCase):
