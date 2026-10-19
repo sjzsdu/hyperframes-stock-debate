@@ -853,7 +853,7 @@ class FinancePoolTests(ChartLibraryTests):
     def test_composition_revenue_never_collides_with_margin_column(self) -> None:
         """首行占比 100% 时金额改画进条内，绝不压到毛利列（用户截图 bug）。"""
         f10 = {"profile": {"主营构成": {"报告期": "2026-06-30", "明细": [
-            {"项目": "消费电子(行业)", "收入": "84.68亿", "收入占比(%)": "100", "毛利率(%)": "45.02"},
+            {"项目": "消费电子(产品)", "收入": "84.68亿", "收入占比(%)": "100", "毛利率(%)": "45.02"},
             {"项目": "其他业务(产品)", "收入": "0.38亿", "收入占比(%)": "0.5", "毛利率(%)": "72.41"},
         ]}}}
         vertical = HyperFramesBuilder({"video": {"canvas": "vertical"}})

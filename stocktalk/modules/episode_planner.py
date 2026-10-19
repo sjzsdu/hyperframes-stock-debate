@@ -21,6 +21,12 @@ import hashlib
 from datetime import date
 from typing import Any, Mapping, Sequence
 
+from stocktalk.modules.business_rows import (
+    CHANNEL_ROW_SUFFIXES as _CHANNEL_ROW_SUFFIXES,
+)
+from stocktalk.modules.business_rows import (
+    NON_PRODUCT_ROW_SUFFIXES as _NON_PRODUCT_ROW_SUFFIXES,
+)
 from stocktalk.modules.story_spotter import spot_stories
 
 # 五章骨架：(id, 目的, 主讲方, 素材类别)
@@ -86,7 +92,15 @@ ROUND_VISUAL_BINDINGS: dict[str, tuple[str, ...]] = {
 # 主营构成里「渠道/地区」那几行：F10 把产品行、销售模式行、地区行混在同一张
 # 明细表里，只能靠行名后缀区分（``直销(销售模式)`` / ``华东(地区)``）。
 # 这是阶段 B2 唯一新接的源，和产品线同一套 source_refs 纪律。
-CHANNEL_ROW_SUFFIXES: tuple[str, ...] = ("(销售模式)", "(地区)")
+# 口径定义在 ``business_rows``：``hyperframes_builder`` 的兜底渲染器也要用同一套，
+# 两边各写一份迟早会漂（阶段 B3 已踩过一次）。
+CHANNEL_ROW_SUFFIXES: tuple[str, ...] = _CHANNEL_ROW_SUFFIXES
+
+# 主营构成里**不是产品线**的那几行的全部后缀。渠道/地区之外还有 ``(行业)``：
+# F10 会把「汽车零部件(行业)」和真正的产品行挤在同一张表里，之前它被当成
+# 产品线画上卡组，第一张卡就是行业名（2026-10-19 记的已知项）。
+NON_PRODUCT_ROW_SUFFIXES: tuple[str, ...] = _NON_PRODUCT_ROW_SUFFIXES
+
 
 # 章 → 本章优先念哪一级数字（按顺序取，取到就停；取不到就退下一级）。
 # R1 只露半张底牌，要的是原值；R2「生意怎么转」要讲的是哪块最赚钱，所以先拿
@@ -120,9 +134,6 @@ NUMBER_CAP_ANALOGY = 4
 # 与数字都是**那一期**的说法，只借用它的修辞动作，不是可以照抄的内容——下发时
 # prompt 里会明说这一点。
 ROUND_SENTENCE_SEEDS: dict[str, tuple[tuple[str, str, str], ...]] = {
-    "r1_hook": (("bull", "事实反差", "一千四百多亿的营收，八成四来自同一瓶酒。"),
-                ("bear", "反向设问", "如果明天这桌饭不喝它了，这家公司还剩下什么？"),
-                ("bull", "场景代入", "先想一个画面：一桌饭，主位旁边那个红盒子——它为什么总在那儿？")),
     "r2_mechanism": (("bull", "链路拆解", "一瓶酒出厂以后要过三道手：经销商、批价、终端。每过一道，价格和风险就换个人扛。"),
                      ("bear", "追问", "四成三自己卖，那经销商还剩下什么用？"),
                      ("bull", "算账", "同一瓶酒，自己卖和给经销商卖，差的不是价格，是谁替它垫钱、谁替它压货。")),
@@ -132,10 +143,94 @@ ROUND_SENTENCE_SEEDS: dict[str, tuple[tuple[str, str, str], ...]] = {
     "r4_ledger_test": (("bear", "数字对撞", "毛利九成二，净利五成——中间那四成，谁拿走了？"),
                        ("bull", "反向解释", "被税拿走的那部分，是它替所有想进场的人先交的门票。"),
                        ("bear", "一句话钉", "毛利率是过去的价格权，净利率才是今天的成本权。")),
-    "r5_open_verdict": (("bull", "只给变量", "下一份年报只盯一个数：直销占比。"),
-                        ("bear", "给阈值", "四成三是条线。掉下去，说明它自己卖不动了。"),
-                        ("bull", "短收", "行，等这个数。")),
 }
+# 开场（R1）与收尾（R5）不再各带一组种子：它们由下面的 STORY_LINES 成对供给。
+# 只给一节配种子、另一节按章轮换，就是"开头和结尾各讲一件事"——那正是
+# 2026-10-19 用户反馈的「结尾太固定」的根：结尾从来没跟着开头走。
+
+# 五条叙事线：**同一期只走一条线，开头与结尾同源**。
+# 这是「开头不够理想、结尾太固定」的正面解法：
+#   * 开头：五条线的开场动作互不相同（场景代入 / 顺着一只手问 / 反常识判断 /
+#     把镜头拉远 / 从最近的一件事说起），而且**没有一条用会计科目、财务比率、
+#     股价、报告期开场**——「合同负债从八十亿骤降到三十一亿」那种开场，是这条
+#     视频最该消失的东西；
+#   * 结尾：五条线收在不同地方（闭环回扣 / 一个能自己去看的动作 / 一句代价判断 /
+#     只说处境不给结论 / 挂到一个能看见的落点），**没有一条是「等下季度报告
+#     验证」**那种固定悬念——它以前不是收尾方式之一，是唯一方式；
+#   * 配对：开头讲什么，结尾就回到什么。只换句式不换线的话，五期之后观众照样
+#     能预判——"不固定"要靠整期换题，不是换措辞。
+#   * 画面：末章图板随线走（回扣产品卡组 / 渠道链路 / 行业排名 / 事件线 /
+#     收入构成），不再每期都是同一条事件时间线。
+# 每条示范句里的公司名、产品名、数字仍然只借用修辞动作，prompt 会明说这一点。
+STORY_LINES: tuple[dict[str, Any], ...] = (
+    {"id": "thing",
+     "label": "先把它看清楚：这东西到底是谁在买",
+     "r1": ("bull", "场景代入",
+            "先别急着看纸面：这个东西每天出现在谁的桌上、谁的货架上？先把它看清楚。"),
+     "r5": ("bear", "闭环回扣",
+            "回到开头那个东西——它今天还站在原来的位置上吗？这一期我们没能回答的就是这一点。"),
+     "r5_template": "product_portfolio",
+     "r5_materials": ("product",)},
+    {"id": "hands",
+     "label": "谁在替它把货送到你面前",
+     "r1": ("bear", "顺着一只手问",
+            "这东西到你手里之前，经过了几只手？每过一只手，它就换一次价、换一个人扛风险。"),
+     "r5": ("bull", "给一个能自己去看的动作",
+            "下次进店别先问价格，看它摆在货架第几层、有没有人在补货——那一眼比任何预测都准。"),
+     "r5_template": "channel_flow",
+     "r5_materials": ("product", "channel_region")},
+    {"id": "price",
+     "label": "它凭什么卖这个价",
+     "r1": ("bull", "反常识判断",
+            "同样的东西，换个包装、换个说法，价格能差好几倍——差的那截不是用料，是别人愿意为它多付的理由。"),
+     "r5": ("bear", "一句代价判断",
+            "守住这个价，得一直有人替它买单：场合在，价就在；场合换了人，价就得重新谈。"),
+     "r5_template": "composition",
+     "r5_materials": ("product",)},
+    {"id": "crowd",
+     "label": "这条街上还有多少人做同一件事",
+     "r1": ("bear", "把镜头拉远",
+            "别只盯着这一家：这条街上做同一件事的人有多少，决定了它日子能过多舒服。"),
+     "r5": ("bull", "只说处境不给结论",
+            "现在的处境是：人还是那些人，位置还是那个位置，但门口在换客人。往哪边走，这一期说不清。"),
+     "r5_template": "ranking",
+     "r5_materials": ("competition",)},
+    {"id": "time",
+     "label": "最近发生的这件事说明了什么",
+     "r1": ("bull", "从最近的一件事说起",
+            "最近这家公司出了一件事，它比任何纸面上的数字都更能说明接下来会怎样。"),
+     "r5": ("bear", "挂到一个能看见的落点",
+            "这件事的影响不会先写在纸面上，它会先出现在订单和排产里——那才是要盯的地方。"),
+     "r5_template": "timeline",
+     "r5_materials": ("news_event",)},
+)
+
+# 末章图板随叙事线走，所以后退序列也得按模板各配一份：末级一律 source_card，
+# 序列里不许出现没注册的名字（阶段 B1 的坑）。
+R5_FALLBACKS_BY_TEMPLATE: dict[str, tuple[str, ...]] = {
+    "product_portfolio": ("composition", "mindmap", "source_card"),
+    "channel_flow": ("mindmap", "composition", "source_card"),
+    "ranking": ("composition", "mindmap", "source_card"),
+    "timeline": ("composition", "source_card"),
+    "composition": ("mindmap", "source_card"),
+}
+
+# 开头两句的禁用材质（2026-10-19 反馈「开头不够理想」的落地口径）。
+# 这不是"不许提数字"，是"不许用看不见的东西开场"：会计科目、财务比率、股价、
+# 报告期都在这里；产品名、渠道名、客户类型、一句生意的具体场景不在。
+OPENING_BANNED_TERMS: tuple[str, ...] = (
+    "合同负债", "预收款", "预收账款", "应收账款", "应付账款", "存货", "商誉",
+    "货币资金", "经营现金流", "现金流", "归母净利润", "净利润", "毛利率", "净利率",
+    "营业收入", "营收", "资产负债率", "市盈率", "市净率", "ROE", "PE", "PB",
+    "股价", "收盘", "涨跌", "市值", "K线", "报告期", "年报", "季报", "半年报",
+)
+
+# 收尾的禁用句式（「结尾太固定」的落地口径）：核心是把"等下季度/下一份报告
+# 来验证"这一类固定悬念判死——它以前是唯一收尾方式。
+CLOSING_BANNED_PHRASES: tuple[str, ...] = (
+    "下一季度", "下个季度", "下一份报告", "下一份年报", "下一期", "下次财报",
+    "等这个数", "等数据出来", "年报见", "到时候再看",
+)
 
 
 def _rotate_seed(seeds: Sequence[tuple[str, str, str]], code: str, day: str, rid: str) -> int:
@@ -148,6 +243,19 @@ def _rotate_seed(seeds: Sequence[tuple[str, str, str]], code: str, day: str, rid
         return -1
     digest = hashlib.sha256(f"{code}|{day}|{rid}".encode("utf-8")).hexdigest()
     return int(digest, 16) % len(seeds)
+
+
+def _rotate_line(code: str, day: str) -> int:
+    """按 ``(code, day)`` 稳定选出这一期的叙事线下标。
+
+    和 ``_rotate_seed`` 同一套哲学（同一天可复现、换一天换一条），但它是
+    **整期**的维度：一条线同时决定开头和结尾，所以五条线轮完，同一只票的
+    五期开头是五种不同的动作、结尾是五种不同的落点。
+    """
+    if not STORY_LINES:
+        return -1
+    digest = hashlib.sha256(f"{code}|{day}|storyline".encode("utf-8")).hexdigest()
+    return int(digest, 16) % len(STORY_LINES)
 
 
 def _ref(path: str, as_of: str | None = None) -> list[dict[str, str]]:
@@ -218,6 +326,11 @@ class MaterialExtractor:
             # 出现「直销」这种假产品线。
             if name.endswith(CHANNEL_ROW_SUFFIXES):
                 channel_rows.append((index, name, row))
+            elif name.endswith(NON_PRODUCT_ROW_SUFFIXES):
+                # `(行业)` 行既不是产品线也不是渠道：F10 把它和产品行挤在同一张
+                # 表里，当成产品线画上卡组，第一张卡就会是行业名（例如拓普的
+                # 「汽车零部件」）——观众会以为那是它卖的东西。跳过不抽。
+                continue
             else:
                 product_rows.append((index, name, row))
 
@@ -361,6 +474,10 @@ class EpisodePlanner:
         anchor_used = analogy_used = 0
         code = str(stock_data.get("code") or (stock_data.get("quote") or {}).get("code") or "")
         as_of = date.today().isoformat()
+        # 本期的叙事线：它同时决定开头（R1）和结尾（R5），所以这两章不再各自
+        # 按章轮换——分开轮换就是"开头讲一件事、结尾讲另一件事"。
+        line_index = _rotate_line(code, as_of)
+        line = STORY_LINES[line_index] if line_index >= 0 else None
         for rid, purpose, lead, category in ROUND_DEFS:
             material_id = ROUND_MATERIALS.get(category)
             if material_id not in by_id:
@@ -403,15 +520,39 @@ class EpisodePlanner:
                 warnings.append(f"{rid}:{'spoken_metrics_exhausted' if speakable else 'no_spoken_metric_source'}")
             # 图板上要用的素材：这一章的画面讲哪件事，就绑那件事的素材。
             # 口播素材（mids）和画面素材分开——R2 念的是产品线毛利率，画面画的
-            # 是厂商→渠道→客户，两者不是同一份数据。
-            bound_ids = [ROUND_MATERIALS[name] for name in ROUND_VISUAL_BINDINGS.get(rid, (category,))
+            # 是厂商→渠道→客户，两者不是同一份数据。末章的画面随叙事线走。
+            visual_materials = ((line or {}).get("r5_materials") or ROUND_VISUAL_BINDINGS.get(rid, (category,))
+                                if rid == "r5_open_verdict"
+                                else ROUND_VISUAL_BINDINGS.get(rid, (category,)))
+            bound_ids = [ROUND_MATERIALS[name] for name in visual_materials
                          if ROUND_MATERIALS.get(name) in by_id]
             bound_metric_ids = [str(m["id"])
                                 for bound in bound_ids
                                 for m in (by_id[bound].get("metrics") or [])
                                 if isinstance(m, Mapping) and m.get("id")]
-            seeds = ROUND_SENTENCE_SEEDS.get(rid, ())
-            seed_index = _rotate_seed(seeds, code, as_of, rid)
+            # 末章的图板也随线走：回扣产品卡组 / 渠道链路 / 行业排名 / 事件线 /
+            # 收入构成。每期都是同一条事件时间线，本身就是"结尾太固定"的一部分。
+            template = ROUND_TEMPLATES[rid]
+            fallbacks = ROUND_FALLBACKS[rid]
+            if rid == "r5_open_verdict" and line:
+                template = str(line.get("r5_template") or template)
+                fallbacks = R5_FALLBACKS_BY_TEMPLATE.get(template, fallbacks)
+            if rid in ("r1_hook", "r5_open_verdict"):
+                # 开头与结尾的种子来自同一条线：这两章不按章轮换。
+                seed = (line or {}).get("r1" if rid == "r1_hook" else "r5")
+                if seed:
+                    sentence_modes = [{"id": f"{rid}.{line['id']}",
+                                       "speaker": seed[0], "mode": seed[1], "text": seed[2]}]
+                else:
+                    sentence_modes = []
+            else:
+                seeds = ROUND_SENTENCE_SEEDS.get(rid, ())
+                seed_index = _rotate_seed(seeds, code, as_of, rid)
+                sentence_modes = ([{"id": f"{rid}.seed{seed_index + 1}",
+                                    "speaker": seeds[seed_index][0],
+                                    "mode": seeds[seed_index][1],
+                                    "text": seeds[seed_index][2]}]
+                                  if seed_index >= 0 else [])
             rounds.append({"id": rid, "purpose": purpose, "turn_budget": [2, 4], "lead": lead,
                            "material_ids": mids,
                            # 单章口播额度：按「解释单元」计（一组同口径对比算 1 个），
@@ -424,24 +565,22 @@ class EpisodePlanner:
                            "anchor_metric_ids": take_anchors,
                            "analogy_metric_ids": take_analogies,
                            "visual": {"id": f"vis.{rid}",
-                                      "template": ROUND_TEMPLATES[rid],
+                                      "template": template,
                                       # mat/metric 契约：图只认这里绑好的素材与指标，
                                       # 画不出就整个退回 fallback（不许渲染器自己
                                       # 去 f10 里另找一张表——那等于绕开统筹）。
                                       "data_binding": {"material_ids": bound_ids,
                                                        "metric_ids": bound_metric_ids},
-                                      "fallback": list(ROUND_FALLBACKS[rid]),
-                                      # 末章「待验证什么」：留给下一份报告的那个数。
-                                      # 只从已抽到的素材里挑，挑不出就空着——编一个
-                                      # 待验证项和编一个数字是同一条红线。
+                                      "fallback": list(fallbacks),
+                                      # 末章「待验证什么」：只挂在事件线上。别的收尾
+                                      # 方式（回扣 / 观察动作 / 代价判断 / 处境描述）
+                                      # 一律不挂——"每期都以一个待验证的数收尾"本身
+                                      # 就是被嫌弃的那个固定模式。
                                       "verify": (_verification_target(by_id)
-                                                 if rid == "r5_open_verdict" else "")},
-                           # 本章这一期要用的那条开法种子（每章一条，不把 15 条全塞给模型）。
-                           "sentence_modes": ([{"id": f"{rid}.seed{seed_index + 1}",
-                                                "speaker": seeds[seed_index][0],
-                                                "mode": seeds[seed_index][1],
-                                                "text": seeds[seed_index][2]}]
-                                              if seed_index >= 0 else []),
+                                                 if rid == "r5_open_verdict" and template == "timeline"
+                                                 else "")},
+                           # 本章这一期要用的那条开法种子（每章一条，不把全部种子塞给模型）。
+                           "sentence_modes": sentence_modes,
                            "transition": ""})
 
         missing = [m for m in materials if m.get("availability") == "missing"]
@@ -450,6 +589,8 @@ class EpisodePlanner:
             "version": 1,
             "stock_code": str(stock_data.get("code") or quote.get("code") or ""),
             "as_of": as_of,
+            # 本期走的叙事线：开头和结尾都由它决定，审查页要能看出这一期讲的是哪条线。
+            "story_line": ({"id": line["id"], "label": line["label"]} if line else None),
             "materials": materials,
             "story_candidates": stories,
             "story": {"angle": stories[0]["headline"] if stories else "公开资料中的业务结构",

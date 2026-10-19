@@ -104,6 +104,10 @@
     <div class="panel" style="flex: 2 1 0;">
       <h3>选题与数字额度</h3>
       <div><span class="k">主线</span>{{ episode_plan.story.angle or "—" }}</div>
+      {% if episode_plan.story_line %}
+      {# 叙事线决定开场和收尾：审查页看得见这一期走的是哪条，才知道"开头讲的"和"结尾回到的"是不是同一件事。 #}
+      <div><span class="k">叙事线</span>{{ episode_plan.story_line.label or episode_plan.story_line.id }}（开头与结尾同源）</div>
+      {% endif %}
       <div><span class="k">底牌素材</span>{{ episode_plan.story.reveal_material_id or "—" }}</div>
       {% set nb_used = episode_plan.number_budget.used or {} %}
       {% set nb_cap = episode_plan.number_budget.cap or {} %}
