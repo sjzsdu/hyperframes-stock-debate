@@ -257,6 +257,51 @@ class NewChartTests(unittest.TestCase):
         self.assertEqual(name, "timeline")
         self.assertIn("◆ 待验证：下一份报告里的归母净利润", body)
 
+    def test_portfolio_never_draws_a_row_the_plan_did_not_bind(self) -> None:
+        """计划绑了哪几块业务，卡组上就只许有那几块。
+
+        容错的判据是"这一章没绑到东西"（计划丢了），不是"F10 的行比计划多"。
+        用数量比较的话，B3 按这期只讲两块业务去裁 `metric_ids` 时，没绑定的
+        业务会自己爬回卡组——画面和口播对不上，而且看起来很"正常"。
+        """
+        import copy
+        data = copy.deepcopy(FULL)
+        data["f10"]["profile"]["主营构成"]["明细"].extend([
+            {"项目": "冰淇淋(产品)", "收入占比(%)": "2.00", "毛利率(%)": "40.00"},
+            {"项目": "红酒(产品)", "收入占比(%)": "1.00", "毛利率(%)": "35.00"},
+        ])
+        plan = EpisodePlanner().plan(data)
+        r1 = next(r for r in plan["rounds"] if r["id"] == "r1_hook")
+        binding = r1["visual"]["data_binding"]
+        # 只留第一块业务的两条指标（收入占比 + 产品线毛利率），等于"这期只讲一块"。
+        binding["metric_ids"] = [mid for mid in binding["metric_ids"]
+                                 if mid.startswith("m.product.0.")][:2]
+        body, name = self._builder("horizontal")._turn_chart(
+            "business", self._ctx(plan, data), "", "vis.r1_hook")
+        self.assertNotIn("冰淇淋", body)
+        self.assertNotIn("红酒", body)
+        # 只剩一块业务就不叫"卡组"，按该章 fallback 序列退到收入构成。
+        self.assertEqual(name, "composition")
+
+    def test_channel_flow_never_draws_rows_the_plan_did_not_bind(self) -> None:
+        """同一把尺子量渠道链路：绑定里没有渠道行，就不许从 F10 把渠道行捞回来。
+
+        R2 同时绑了产品线与渠道/地区两类素材；计划一旦只留产品线（这期不讲
+        渠道），画面不该自己补一条"厂商→渠道→客户"，那等于把统筹又交回渲染层。
+        """
+        plan = EpisodePlanner().plan(FULL)
+        r2 = next(r for r in plan["rounds"] if r["id"] == "r2_mechanism")
+        binding = r2["visual"]["data_binding"]
+        # 计划这章不改讲渠道：素材层就不绑 mat.channel.0（不是只留指标）。
+        binding["material_ids"] = [mid for mid in binding["material_ids"]
+                                   if mid != "mat.channel.0"]
+        body, name = self._builder("horizontal")._turn_chart(
+            "business", self._ctx(plan, FULL), "", "vis.r2_mechanism")
+        # 渠道行全被计划排除 → 这张图画不出 → 按该章 fallback 退到业务拆解；
+        # 关键是不许"从 F10 把渠道行捞回来"重新拼一条渠道链路。
+        self.assertEqual(name, "mindmap")
+        self.assertNotIn("渠道链路", body)
+
 
 def _xs(svg: str) -> list[float]:
     """SVG 里每个 rect 的右边界（x + width），用来查卡片有没有越出图表区。"""

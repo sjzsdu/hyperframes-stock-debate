@@ -2328,7 +2328,10 @@ class HyperFramesBuilder:
             if share is None:
                 continue
             f10_cards.append((name, share, margin))
-        if len(f10_cards) > len(cards):
+        # 计划丢了才退 F10 原文：判据是"这一章没绑到任何指标"，不是"F10 的行更多"。
+        # 用数量比较会让计划被静默绕过——B3 一旦按素材裁剪绑定（这期只讲两块业务），
+        # 没绑定的业务就会自己爬回卡组上。
+        if not metrics:
             cards, period = f10_cards, f10_period
         cards = [card for card in cards if card[1] is not None]
         cards.sort(key=lambda card: card[1] or 0.0, reverse=True)
@@ -2381,7 +2384,9 @@ class HyperFramesBuilder:
                 f10_channels.append((name[:-len("(销售模式)")], share))
             elif name.endswith("(地区)"):
                 f10_regions.append((name[:-len("(地区)")], share))
-        if len(f10_channels) + len(f10_regions) > len(channels) + len(regions):
+        # 同上：只有这一章没绑到任何指标时才退 F10 原文。绑定存在却比 F10 窄，
+        # 正是计划主动裁掉的结果，画面必须跟着计划走。
+        if not metrics:
             channels, regions, period = f10_channels, f10_regions, f10_period
         for side in (channels, regions):
             side.sort(key=lambda item: item[1] or 0.0, reverse=True)
