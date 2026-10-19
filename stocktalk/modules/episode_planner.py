@@ -8,9 +8,12 @@
 1. 素材的每一个 ``fact``/``metric`` 都必须带 ``source_refs``；没有可靠结构化
    来源的关系（控股子公司、具名品牌、具名竞品）一律 ``availability="missing"``
    并进 ``rejected_materials``，不许从经营评述里抽一句就认定关系。
-2. 阶段 A 的 ``visual.template`` 必须解析到**现有渲染器**上（见
-   ``hyperframes_builder._render_chart``）；阶段 B 那六张新 SVG 启用前，这里
-   不许出现它们——否则整片会静默掉成来源卡。
+2. ``visual.template`` 必须解析到**现有渲染器**上（见
+   ``hyperframes_builder._chart_renderers``）。阶段 B2 起这三张新 SVG
+   （``product_portfolio`` / ``channel_flow`` / ``ledger_pair``）已在渲染器里，
+   所以它们可以出现在 ``template`` 上；**没注册的名字不许进 fallback**——
+   悬空的名字会和"缺数据"一样静默掉到来源卡（阶段 B1 踩过：阶段 B 的名字
+   在阶段 A 时五章全掉 ``source_card``）。
 """
 from __future__ import annotations
 
@@ -29,34 +32,61 @@ ROUND_DEFS: tuple[tuple[str, str, str, str], ...] = (
     ("r5_open_verdict", "留下可验证结局", "bull", "news_event"),
 )
 
-# 章 → 中央图。阶段 A 只能用现有渲染器；这一张是"这章最该看到什么"，
-# 不是装饰性轮换。
+# 章 → 中央图。这一张是"这章最该看到什么"，不是装饰性轮换。
+# 阶段 B2：r1/r2/r4 换到三张新 SVG 上（产品卡组 / 渠道链路 / 两数对照）；
+# r3 的行业位置与 r5 的事件线没有对应的新图，留在现有渲染器上——为了换图
+# 而换图等于把"图和这章讲的事对得上"这条又丢掉。
 ROUND_TEMPLATES: dict[str, str] = {
-    "r1_hook": "composition",          # 收入构成：哪块业务撑起收入
-    "r2_mechanism": "mindmap",         # 业务拆解：产品/渠道与毛利率
-    "r3_moat_pressure": "ranking",     # 行业地位：同行家数与真实排名
-    "r4_ledger_test": "profit_trend",  # 多年净利走势：账有没有配合故事
-    "r5_open_verdict": "timeline",     # 资讯时间线：下期要核对什么
+    "r1_hook": "product_portfolio",     # 产品卡组：名称 + 占比 + 毛利
+    "r2_mechanism": "channel_flow",     # 厂商 → 渠道 → 客户：生意怎么转
+    "r3_moat_pressure": "ranking",      # 行业地位：同行家数与真实排名
+    "r4_ledger_test": "ledger_pair",    # 两数对照：账有没有配合故事
+    "r5_open_verdict": "timeline",      # 资讯时间线：下期要核对什么
 }
 
-# 章 → 指定图缺数据时的后退序列。末级一律 source_card：宁可出一张中性的
-# 来源卡，也不退回"从台词关键词猜一张图"、更不退回万能 K 线。
+# 章 → 指定图缺数据时的后退序列。两条纪律：
+# 1. 末级一律 source_card：宁可出一张中性的来源卡，也不退回"从台词关键词猜
+#    一张图"、更不退回万能 K 线；
+# 2. 序列里的每个名字都必须真在渲染器里（阶段 B1 踩过：写了阶段 B 的名字，
+#    阶段 A 时五章全掉 source_card）。新图换上来时，它替掉的那张旧图进
+#    序列第一位——新图缺数据时退到"同一件事的另一种画法"，不是退到无关图。
 ROUND_FALLBACKS: dict[str, tuple[str, ...]] = {
-    "r1_hook": ("mindmap", "source_card"),
-    "r2_mechanism": ("composition", "source_card"),
+    "r1_hook": ("composition", "mindmap", "source_card"),
+    "r2_mechanism": ("mindmap", "composition", "source_card"),
     "r3_moat_pressure": ("composition", "mindmap", "source_card"),
-    "r4_ledger_test": ("cashflow_statement", "balance_sheet", "working_capital", "source_card"),
+    "r4_ledger_test": ("profit_trend", "cashflow_statement", "balance_sheet",
+                       "working_capital", "source_card"),
     "r5_open_verdict": ("composition", "source_card"),
 }
 
 # 章 → 素材类别对应的 material id。素材没抽到时该章退化到第一个可用素材，
 # 章节本身不消失（五章是叙事结构，不是数据的函数）。
+# 这一张表是**口播数字**的取材（R2 取产品线毛利率由它决定，阶段 A/B1 定过，
+# 不要动）；画面要用的素材见 ROUND_VISUAL_BINDINGS。
 ROUND_MATERIALS: dict[str, str] = {
     "product": "mat.product.0",
+    "channel_region": "mat.channel.0",
     "competition": "mat.competition.0",
     "financial_proof": "mat.financial.0",
     "news_event": "mat.event.0",
 }
+
+# 章 → 图板上要绑哪些素材（mat 契约的 ``data_binding.material_ids``）。
+# 与 ROUND_MATERIALS 分开是故意的：R2 口播仍取产品线毛利率（B1 定死），但
+# 它这一章的画面要看到"厂商→渠道→客户"，所以额外绑渠道/地区素材；该素材
+# 抽不到时 channel_flow 返回 None，按上面的序列退回 mindmap。
+ROUND_VISUAL_BINDINGS: dict[str, tuple[str, ...]] = {
+    "r1_hook": ("product",),
+    "r2_mechanism": ("product", "channel_region"),
+    "r3_moat_pressure": ("competition",),
+    "r4_ledger_test": ("financial_proof",),
+    "r5_open_verdict": ("news_event",),
+}
+
+# 主营构成里「渠道/地区」那几行：F10 把产品行、销售模式行、地区行混在同一张
+# 明细表里，只能靠行名后缀区分（``直销(销售模式)`` / ``华东(地区)``）。
+# 这是阶段 B2 唯一新接的源，和产品线同一套 source_refs 纪律。
+CHANNEL_ROW_SUFFIXES: tuple[str, ...] = ("(销售模式)", "(地区)")
 
 # 章 → 本章优先念哪一级数字（按顺序取，取到就停；取不到就退下一级）。
 # R1 只露半张底牌，要的是原值；R2「生意怎么转」要讲的是哪块最赚钱，所以先拿
@@ -140,6 +170,28 @@ def _number(value: Any) -> float | None:
         return None
 
 
+def _verification_target(by_id: Mapping[str, Any]) -> str:
+    """末章「待验证什么」：下一份报告里该盯的那条指标。
+
+    只从**已抽到**的素材里挑（财务证据优先，其次是产品线），挑不出就只说
+    「下一份报告」——宁可空着一个字也不编一条待验证项：编一个待验证项和编
+    一个数字是同一条红线，而且它比数字更难被发现。
+    """
+    for material_id in ("mat.financial.0", "mat.product.0"):
+        material = by_id.get(material_id)
+        if not isinstance(material, Mapping):
+            continue
+        for metric in material.get("metrics") or []:
+            if not isinstance(metric, Mapping):
+                continue
+            if metric.get("spoken_policy") not in ("anchor", "analogy"):
+                continue
+            label = str(metric.get("label") or "").strip()
+            if label:
+                return f"下一份报告里的{label}"
+    return "下一份报告"
+
+
 class MaterialExtractor:
     """把 tongstock 的 payload 变成带 ``source_refs`` 的素材对象。"""
 
@@ -153,35 +205,74 @@ class MaterialExtractor:
         composition = profile.get("主营构成") if isinstance(profile.get("主营构成"), Mapping) else {}
         rows = composition.get("明细") if isinstance(composition.get("明细"), list) else []
         as_of = str(composition.get("报告期") or date.today().isoformat())
-        items: list[dict[str, Any]] = []
+        product_rows: list[tuple[int, str, Mapping[str, Any]]] = []
+        channel_rows: list[tuple[int, str, Mapping[str, Any]]] = []
         for index, row in enumerate(rows):
             if not isinstance(row, Mapping):
                 continue
             name = str(row.get("项目") or row.get("名称") or row.get("业务") or "").strip()
             if not name:
                 continue
-            metrics: list[dict[str, Any]] = []
+            # 渠道/地区行（`(销售模式)` / `(地区)`）单独成一类素材：它们是"货怎么
+            # 到客户手上"的那一层，和产品行不是同一件事，混在一起会让产品卡组上
+            # 出现「直销」这种假产品线。
+            if name.endswith(CHANNEL_ROW_SUFFIXES):
+                channel_rows.append((index, name, row))
+            else:
+                product_rows.append((index, name, row))
+
+        def _row_metrics(prefix: str, slot: int, source_index: int, row: Mapping[str, Any],
+                         margin_label: str) -> list[dict[str, Any]]:
+            """一条明细行的指标。``slot`` 是它在这类素材里的序号（``entities``
+            与指标 id 共用，图上靠它把名称和数字对上），``source_index`` 是它在
+            F10 明细表里的原始下标（``source_refs`` 用它指回那一行）——两者在有
+            渠道行夹在产品行中间时并不相等，各归各的。
+            """
+            built: list[dict[str, Any]] = []
             # 口径与画面上的收入构成图一致：`收入占比(%)`/`毛利率(%)` 是 F10 原文字段。
             # 毛利率走 analogy：它是"每 100 元收入有 X 元是毛利"这种确定换算，
             # 只上屏不口播的话，R2「生意怎么转」就讲不出哪块最赚钱。
             # 标签必须和财务素材的公司级口径**字面就要分得开**：两条都叫「毛利率」时，
             # 模型会顺手把公司级的那条（visual_only）念出来。
             for key, label, unit, policy in (("收入占比(%)", "收入占比", "%", "anchor"),
-                                             ("毛利率(%)", "产品线毛利率", "%", "analogy")):
+                                             ("毛利率(%)", margin_label, "%", "analogy")):
                 value = _number(row.get(key))
                 if value is None:
                     continue
-                metrics.append({"id": f"m.product.{index}.{label}", "label": label, "value": value,
-                                "unit": unit, "period": as_of, "spoken_policy": policy,
-                                "source_refs": _ref(f"f10.profile.主营构成.明细[{index}].{key}", as_of)})
-            items.append({"name": name, "metrics": metrics})
+                built.append({"id": f"m.{prefix}.{slot}.{label}", "label": label, "value": value,
+                              "unit": unit, "period": as_of, "spoken_policy": policy,
+                              "source_refs": _ref(f"f10.profile.主营构成.明细[{source_index}].{key}", as_of)})
+            return built
+
+        items = [{"name": name,
+                  "metrics": _row_metrics("product", slot, index, row, "产品线毛利率")}
+                 for slot, (index, name, row) in enumerate(product_rows)]
         if items:
             materials.append({"id": "mat.product.0", "category": "product", "title": "主力产品线",
                               "fact": "、".join(x["name"] for x in items),
                               "entities": [{"name": x["name"], "role": "product"} for x in items],
                               "metrics": [m for x in items for m in x["metrics"]],
                               "source_refs": _ref("f10.profile.主营构成.明细", as_of),
-                              "visual_candidates": ["composition", "mindmap"], "availability": "ready"})
+                              "visual_candidates": ["product_portfolio", "composition", "mindmap"],
+                              "availability": "ready"})
+
+        # 1b. 渠道/地区：同一张明细表里的 `(销售模式)` / `(地区)` 行。
+        # 与产品线同一套 source_refs 纪律——逐字段带来源，缺字段就是不抽这条指标，
+        # 绝不用经营评述里的一句话补一条"渠道关系"。
+        channel_items = [
+            {"name": name, "role": "region" if name.endswith("(地区)") else "channel",
+             "metrics": _row_metrics("channel", slot, index, row, "渠道毛利率")}
+            for slot, (index, name, row) in enumerate(channel_rows)]
+        if channel_items:
+            materials.append({"id": "mat.channel.0", "category": "channel_region",
+                              "title": "渠道与地区",
+                              "fact": "、".join(x["name"] for x in channel_items),
+                              "entities": [{"name": x["name"], "role": x["role"]}
+                                           for x in channel_items],
+                              "metrics": [m for x in channel_items for m in x["metrics"]],
+                              "source_refs": _ref("f10.profile.主营构成.明细", as_of),
+                              "visual_candidates": ["channel_flow", "composition"],
+                              "availability": "ready"})
 
         # 2. 行业位置：同行家数与研究行业（真实名次亦在这块，阶段 A 只用家数）。
         industry = profile.get("行业地位") if isinstance(profile.get("行业地位"), Mapping) else {}
@@ -310,6 +401,15 @@ class EpisodePlanner:
                 # 分两种：素材压根没有可念的指标，还是可念的指标被前面的章节取完了——
                 # 前者要补素材，后者要调章节分配，处理办法不一样。
                 warnings.append(f"{rid}:{'spoken_metrics_exhausted' if speakable else 'no_spoken_metric_source'}")
+            # 图板上要用的素材：这一章的画面讲哪件事，就绑那件事的素材。
+            # 口播素材（mids）和画面素材分开——R2 念的是产品线毛利率，画面画的
+            # 是厂商→渠道→客户，两者不是同一份数据。
+            bound_ids = [ROUND_MATERIALS[name] for name in ROUND_VISUAL_BINDINGS.get(rid, (category,))
+                         if ROUND_MATERIALS.get(name) in by_id]
+            bound_metric_ids = [str(m["id"])
+                                for bound in bound_ids
+                                for m in (by_id[bound].get("metrics") or [])
+                                if isinstance(m, Mapping) and m.get("id")]
             seeds = ROUND_SENTENCE_SEEDS.get(rid, ())
             seed_index = _rotate_seed(seeds, code, as_of, rid)
             rounds.append({"id": rid, "purpose": purpose, "turn_budget": [2, 4], "lead": lead,
@@ -325,8 +425,17 @@ class EpisodePlanner:
                            "analogy_metric_ids": take_analogies,
                            "visual": {"id": f"vis.{rid}",
                                       "template": ROUND_TEMPLATES[rid],
-                                      "data_binding": {"material_ids": mids},
-                                      "fallback": list(ROUND_FALLBACKS[rid])},
+                                      # mat/metric 契约：图只认这里绑好的素材与指标，
+                                      # 画不出就整个退回 fallback（不许渲染器自己
+                                      # 去 f10 里另找一张表——那等于绕开统筹）。
+                                      "data_binding": {"material_ids": bound_ids,
+                                                       "metric_ids": bound_metric_ids},
+                                      "fallback": list(ROUND_FALLBACKS[rid]),
+                                      # 末章「待验证什么」：留给下一份报告的那个数。
+                                      # 只从已抽到的素材里挑，挑不出就空着——编一个
+                                      # 待验证项和编一个数字是同一条红线。
+                                      "verify": (_verification_target(by_id)
+                                                 if rid == "r5_open_verdict" else "")},
                            # 本章这一期要用的那条开法种子（每章一条，不把 15 条全塞给模型）。
                            "sentence_modes": ([{"id": f"{rid}.seed{seed_index + 1}",
                                                 "speaker": seeds[seed_index][0],

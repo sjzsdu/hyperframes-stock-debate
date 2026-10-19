@@ -1585,21 +1585,29 @@ class HyperFramesBuilder:
     # picked whatever the video hadn't shown yet).  Selection order now:
     # (1) the argument's own candidates, most specific first, skipping the
     # chart that is already on screen when an equally-valid alternative
-    # exists; (2) the neutral business fallbacks; (3) the real K-line.
+    # exists; (2) the neutral business fallbacks; (3) the neutral evidence
+    # card (2026-10-19 定稿：末级不再退回 K 线——K 线只回答"价格怎么走")。
     # Every chart renders strictly from fetched data; a chart whose data is
     # missing returns None and the next candidate takes over — nothing is
     # ever invented to fill a slot.  A repeat of the RIGHT chart beats a
     # fresh but irrelevant one, so there is no cross-argument borrowing.
     # ------------------------------------------------------------------
 
-    def _render_chart(self, name: str, ctx: Mapping[str, Any]) -> str | None:
-        """Render one named chart; None when its data does not exist."""
-        renderers = {
+    def _chart_renderers(self, ctx: Mapping[str, Any]) -> dict[str, Callable[[], str | None]]:
+        """图名 → 渲染器。这是"有没有这张图"的**唯一**登记处。
+
+        计划里的 ``template`` / ``fallback`` 只能取这里的键：写了一个没登记的名字，
+        它和"有这张图但缺数据"长得一模一样（都返回 None），整章会静默掉到来源卡
+        ——阶段 B1 就是这么踩的。所以登记处只此一处，测试直接拿它比对计划里的
+        每一个名字。
+        """
+        return {
             "kline": lambda: self._mini_chart_body(ctx["bars"], ctx.get("argument", "technical"), ctx["quote"], ctx.get("keywords")),
             "mindmap": lambda: self._business_mindmap_body(ctx["quote"], ctx["f10"]),
             "composition": lambda: self._composition_bars_body(ctx["f10"]),
             "waterfall": lambda: self._profit_waterfall_body(ctx["financials"]),
-            "timeline": lambda: self._news_timeline_body(ctx["news"]),
+            "timeline": lambda: self._news_timeline_body(
+                ctx["news"], str((ctx.get("visual") or {}).get("verify") or "")),
             "working_capital": lambda: self._working_capital_body(ctx["financials"]),
             "ranking": lambda: self._industry_rank_body(ctx["f10"]),
             # 多年财务（F10 财务分析块）：数据不到三期就返回 None，交给下一张图。
@@ -1613,8 +1621,16 @@ class HyperFramesBuilder:
             # 末级兜底：任何候选都出不了图时，出一张只写"已核验素材"的中性卡，
             # 而不是拿一张与这轮无关的图（过去的 K 线兜底就是这么来的）。
             "source_card": lambda: self._source_card_body(ctx.get("argument", ""), ctx.get("keywords") or []),
+            # ---- 阶段 B2 三张新图：都按计划的 data_binding（mat/metric 契约）
+            # 取数，缺数据返回 None，由该章自己的 fallback 序列接手。----
+            "product_portfolio": lambda: self._product_portfolio_body(ctx),
+            "channel_flow": lambda: self._channel_flow_body(ctx),
+            "ledger_pair": lambda: self._ledger_pair_body(ctx),
         }
-        renderer = renderers.get(name)
+
+    def _render_chart(self, name: str, ctx: Mapping[str, Any]) -> str | None:
+        """Render one named chart; None when its data does not exist."""
+        renderer = self._chart_renderers(ctx).get(name)
         return renderer() if renderer else None
 
     def _turn_chart(self, argument: str, ctx: Mapping[str, Any], last_chart: str = "", visual_id: str = "") -> tuple[str, str]:
@@ -1636,6 +1652,10 @@ class HyperFramesBuilder:
         plan = ctx.get("episode_plan") if isinstance(ctx.get("episode_plan"), Mapping) else None
         planned = self._planned_visual(plan, visual_id)
         if isinstance(planned, Mapping):
+            # 这一章的图板定义下发到渲染器：新图按它的 data_binding 取数，
+            # timeline 的「待验证什么」标签也挂在它上面。渲染器只认 ctx，
+            # 不再自己去猜"这轮讲的是什么"。
+            ctx = {**ctx, "visual": planned}
             template = str(planned.get("template") or "")
             fallbacks = [str(name) for name in (planned.get("fallback") or []) if str(name)]
             # 计划的 fallback 末级必须能兜住；没写就补一张来源卡，避免空板。
@@ -2146,15 +2166,24 @@ class HyperFramesBuilder:
             out.append(f'<text x="{track_right}" y="{y + 46}" text-anchor="end" fill="#91a8bf" font-size="18">第 {peers} 名</text>')
         return ''.join(out)
 
-    def _news_timeline_body(self, news: Mapping[str, Any]) -> str:
-        """新闻时间线：竖轴 + 日期节点，比旧列表更像「事情在发生」。"""
+    def _news_timeline_body(self, news: Mapping[str, Any], verify: str = "") -> str:
+        """新闻时间线：竖轴 + 日期节点，比旧列表更像「事情在发生」。
+
+        ``verify`` 是这一章「待验证什么」的标签（来自计划里末章的
+        ``visual.verify``）：末章的落点不是结论，是"下一份报告该盯哪个数"，
+        画面上得看得见它。空就不画——编一条待验证项和编一个数字是同一条红线。
+        """
         items = [x for x in (news.get("items") if isinstance(news.get("items"), list) else [])
                  if isinstance(x, Mapping) and str(x.get("title") or "").strip()][:4]
         zone_left, zone_right = self._chart_zone()
         if not items:
             cx = (zone_left + zone_right) / 2
-            return (f'<text x="{cx:g}" y="250" text-anchor="middle" class="snap-label" style="font-size:22px">'
-                    '近期没有相关资讯，保持跟踪</text>')
+            out = [f'<text x="{cx:g}" y="250" text-anchor="middle" class="snap-label" style="font-size:22px">'
+                   '近期没有相关资讯，保持跟踪</text>']
+            if verify:
+                out.append(f'<text x="{cx:g}" y="330" text-anchor="middle" fill="#ffd166" font-size="22">'
+                           f'◆ 待验证：{html.escape(verify)}</text>')
+            return ''.join(out)
         out = [self._svg_header("最近发生的事")]
         axis_x, y0, step = zone_left + 28, 124, 92
         title_cap = 22 if zone_right < 1500 else 44
@@ -2168,6 +2197,10 @@ class HyperFramesBuilder:
             if date_label:
                 out.append(f'<text x="{axis_x + 26}" y="{y - 10}" fill="#91a8bf" font-size="19">{html.escape(date_label)} · {html.escape(kind)}</text>')
             out.append(f'<text x="{axis_x + 26}" y="{y + 24}" fill="#dbe7f5" font-size="25" font-weight="600">{html.escape(str(item.get("title"))[:title_cap])}</text>')
+        if verify:
+            y = y0 + (len(items) - 1) * step + 66
+            out.append(f'<text x="{axis_x + 26}" y="{y}" fill="#ffd166" font-size="22">'
+                       f'◆ 待验证：{html.escape(verify)}</text>')
         return ''.join(out)
 
     def _turn_news_body(self, news: Mapping[str, Any]) -> str:
@@ -2192,6 +2225,323 @@ class HyperFramesBuilder:
         if not rows:
             rows.append('<text x="784" y="250" text-anchor="middle" class="snap-label" style="font-size:22px">暂无相关资讯</text>')
         return ''.join(rows)
+
+    # ------------------------------------------------------------------
+    # 阶段 B2 三张新图：产品卡组 / 渠道链路 / 两数对照
+    #
+    # 共同的两条规矩：
+    # 1. 数据只认 ``visual.data_binding`` 里绑好的素材与指标（mat/metric 契约）。
+    #    没有计划时（旧脚本/单测）才退回 F10 原文——那是"图还在，计划丢了"的
+    #    容错，不是给渲染器另开一条自己挑数据的路。
+    # 2. 画不出就返回 None。缺数据**不是**画一张空框或一个猜的数字的理由。
+    #
+    # 横竖两版共用这一套渲染器：所有横向坐标都从 ``_chart_zone()`` 推出来，
+    # 竖版图表区 1082px、横版 1480px，卡片宽度跟着走。
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _bound_materials(ctx: Mapping[str, Any]) -> tuple[list[Mapping[str, Any]], list[Mapping[str, Any]]]:
+        """按 ``visual.data_binding`` 取出这一章绑好的素材与指标。"""
+        plan = ctx.get("episode_plan")
+        visual = ctx.get("visual")
+        if not isinstance(plan, Mapping) or not isinstance(visual, Mapping):
+            return [], []
+        binding = visual.get("data_binding")
+        binding = binding if isinstance(binding, Mapping) else {}
+        wanted_materials = {str(x) for x in (binding.get("material_ids") or []) if str(x)}
+        wanted_metrics = {str(x) for x in (binding.get("metric_ids") or []) if str(x)}
+        materials: list[Mapping[str, Any]] = []
+        metrics: list[Mapping[str, Any]] = []
+        for material in plan.get("materials") or []:
+            if not isinstance(material, Mapping) or str(material.get("id") or "") not in wanted_materials:
+                continue
+            materials.append(material)
+            for metric in material.get("metrics") or []:
+                if not isinstance(metric, Mapping):
+                    continue
+                if wanted_metrics and str(metric.get("id") or "") not in wanted_metrics:
+                    continue
+                metrics.append(metric)
+        return materials, metrics
+
+    @staticmethod
+    def _metric_number(metric: Mapping[str, Any]) -> float | None:
+        value = metric.get("value")
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return None
+        return float(value)
+
+    @staticmethod
+    def _ellipsis(text: str, limit: int) -> str:
+        limit = max(1, int(limit))
+        return text if len(text) <= limit else text[:limit - 1] + "…"
+
+    def _composition_rows(self, ctx: Mapping[str, Any]) -> tuple[list[dict[str, Any]], str]:
+        """F10 主营构成的原始行与报告期（计划缺失时的兜底数据源）。"""
+        f10 = ctx.get("f10") if isinstance(ctx.get("f10"), Mapping) else {}
+        composition = self._f10_profile(f10).get("主营构成")
+        composition = composition if isinstance(composition, Mapping) else {}
+        rows = [dict(row) for row in (composition.get("明细") or []) if isinstance(row, Mapping)]
+        return rows, str(composition.get("报告期") or "")
+
+    def _portfolio_cards(self, ctx: Mapping[str, Any]) -> tuple[list[tuple[str, float | None, float | None]], str]:
+        """产品卡组的数据：(名称, 收入占比, 毛利率) + 报告期。"""
+        materials, metrics = self._bound_materials(ctx)
+        cards: list[tuple[str, float | None, float | None]] = []
+        period = ""
+        names: dict[str, str] = {}
+        slots: dict[str, dict[str, float]] = {}
+        for material in materials:
+            for index, entity in enumerate(material.get("entities") or []):
+                if isinstance(entity, Mapping) and str(entity.get("role") or "") == "product":
+                    names[f"m.product.{index}"] = str(entity.get("name") or "")
+        for metric in metrics:
+            mid = str(metric.get("id") or "")
+            if not mid.startswith("m.product."):
+                continue
+            value = self._metric_number(metric)
+            if value is None:
+                continue
+            item, _, label = mid[len("m.product."):].partition(".")
+            slot = slots.setdefault(f"m.product.{item}", {})
+            if label == "收入占比":
+                slot["share"] = value
+            elif "毛利率" in label:
+                slot["margin"] = value
+            period = period or str(metric.get("period") or "")
+        cards = [(names.get(item, ""), slot.get("share"), slot.get("margin"))
+                 for item, slot in slots.items()]
+        # 计划丢了但 F10 还在：图照出（图在、计划不在是可恢复的），数据源降级到原文。
+        rows, f10_period = self._composition_rows(ctx)
+        f10_cards: list[tuple[str, float | None, float | None]] = []
+        for row in rows:
+            name = str(row.get("项目") or row.get("名称") or row.get("业务") or "").strip()
+            if not name or name.endswith(("(销售模式)", "(地区)")):
+                continue
+            try:
+                share = float(str(row.get("收入占比(%)") or "").replace("%", ""))
+            except ValueError:
+                share = None  # type: ignore[assignment]
+            try:
+                margin = float(str(row.get("毛利率(%)") or "").replace("%", ""))
+            except ValueError:
+                margin = None
+            if share is None:
+                continue
+            f10_cards.append((name, share, margin))
+        if len(f10_cards) > len(cards):
+            cards, period = f10_cards, f10_period
+        cards = [card for card in cards if card[1] is not None]
+        cards.sort(key=lambda card: card[1] or 0.0, reverse=True)
+        return cards, period
+
+    def _channel_sides(self, ctx: Mapping[str, Any]) -> tuple[list[tuple[str, float | None]], list[tuple[str, float | None]], str]:
+        """渠道链路的两侧：(销售模式行, 地区行, 报告期)。"""
+        materials, metrics = self._bound_materials(ctx)
+        channels: list[tuple[str, float | None]] = []
+        regions: list[tuple[str, float | None]] = []
+        period = ""
+        roles: dict[str, tuple[str, str]] = {}
+        shares: dict[str, float] = {}
+        for material in materials:
+            for index, entity in enumerate(material.get("entities") or []):
+                if not isinstance(entity, Mapping):
+                    continue
+                role = str(entity.get("role") or "")
+                # 只认渠道/地区的实体：产品线素材绑在这一章时（R2 同时绑两类），
+                # 把产品行当成"地区"画上去，卡片上就会出现「茅台酒」这种假渠道。
+                if role in ("channel", "region"):
+                    roles[f"m.channel.{index}"] = (str(entity.get("name") or ""), role)
+        for metric in metrics:
+            mid = str(metric.get("id") or "")
+            if not mid.startswith("m.channel."):
+                continue
+            value = self._metric_number(metric)
+            if value is None:
+                continue
+            item, _, label = mid[len("m.channel."):].partition(".")
+            if label == "收入占比":
+                shares[f"m.channel.{item}"] = value
+                period = period or str(metric.get("period") or "")
+        for key, (name, role) in roles.items():
+            if not name:
+                continue
+            (channels if role == "channel" else regions).append((name, shares.get(key)))
+        rows, f10_period = self._composition_rows(ctx)
+        f10_channels: list[tuple[str, float | None]] = []
+        f10_regions: list[tuple[str, float | None]] = []
+        for row in rows:
+            name = str(row.get("项目") or row.get("名称") or row.get("业务") or "").strip()
+            if not name:
+                continue
+            try:
+                share = float(str(row.get("收入占比(%)") or "").replace("%", ""))
+            except ValueError:
+                share = None  # type: ignore[assignment]
+            if name.endswith("(销售模式)"):
+                f10_channels.append((name[:-len("(销售模式)")], share))
+            elif name.endswith("(地区)"):
+                f10_regions.append((name[:-len("(地区)")], share))
+        if len(f10_channels) + len(f10_regions) > len(channels) + len(regions):
+            channels, regions, period = f10_channels, f10_regions, f10_period
+        for side in (channels, regions):
+            side.sort(key=lambda item: item[1] or 0.0, reverse=True)
+        return channels, regions, period
+
+    def _ledger_pair(self, ctx: Mapping[str, Any]) -> tuple[str, str, list[tuple[str, float]]] | None:
+        """两数对照要用的那一对：(指标名, 单位, [(报告期, 值), (报告期, 值)])。
+
+        同一条指标的两期才算"对照"：把两个不同指标并排放是两张互不相干的数，
+        观众会自己脑补它们之间的关系——那正是"念数字"的观感来源。
+        """
+        _, metrics = self._bound_materials(ctx)
+        groups: dict[str, list[Mapping[str, Any]]] = {}
+        for metric in metrics:
+            label = str(metric.get("label") or "").strip()
+            if not label or self._metric_number(metric) is None:
+                continue
+            groups.setdefault(label, []).append(metric)
+        pairs = [(label, sorted(items, key=lambda m: str(m.get("period") or ""))[-2:])
+                 for label, items in groups.items() if len(items) >= 2]
+        # anchor 优先：visual_only 的公司级毛利率是"只上屏"的，不该当对照的主角
+        pairs.sort(key=lambda pair: 0 if any(str(m.get("spoken_policy")) == "anchor"
+                                             for m in pair[1]) else 1)
+        if pairs:
+            label, items = pairs[0]
+            return (label, str(items[0].get("unit") or ""),
+                    [(str(m.get("period") or ""), self._metric_number(m) or 0.0) for m in items])
+        # 计划丢了：退回 F10 年度序列的归母净利润
+        f10 = ctx.get("f10") if isinstance(ctx.get("f10"), Mapping) else {}
+        points = self._annual_points(f10, "归母净利润(亿元)")
+        return ("归母净利润", "亿元", points[-2:]) if len(points) >= 2 else None
+
+    def _product_portfolio_body(self, ctx: Mapping[str, Any]) -> str | None:
+        """产品卡组：一张卡一个产品，卡上是名称 + 收入占比 + 毛利率条。
+
+        两张卡以下就不叫"卡组"——只讲得出一块业务时，观众要的是那块业务的
+        结构，交给收入构成图（fallback 的第一位）。
+        """
+        cards, period = self._portfolio_cards(ctx)
+        cards = [card for card in cards if card[1] is not None][:4]
+        if len(cards) < 2:
+            return None
+        zone_left, zone_right = self._chart_zone()
+        gap = 18.0
+        card_w = (zone_right - zone_left - gap * (len(cards) - 1)) / len(cards)
+        top, height = 108.0, 286.0
+        out = [self._svg_header("卖的是什么 · 产品卡组", f"报告期 {period}")]
+        tones = ("#ffd166", "#6ab7ff", "#8fd3ff", "#5ee0a7")
+        for index, (name, share, margin) in enumerate(cards):
+            x = zone_left + index * (card_w + gap)
+            tone = tones[index % len(tones)]
+            out.append(f'<rect x="{x:.1f}" y="{top}" width="{card_w:.1f}" height="{height}" rx="20" '
+                       f'fill="rgba(12,30,52,.92)" stroke="{tone}" stroke-width="1.6"/>')
+            out.append(f'<text x="{x + 18:.1f}" y="{top + 46}" fill="#dbe7f5" font-size="24">'
+                       f'{html.escape(self._ellipsis(short_business_label(name), (card_w - 36) / 24))}</text>')
+            out.append(f'<text x="{x + 18:.1f}" y="{top + 128}" fill="{tone}" font-size="52" '
+                       f'font-weight="700">{share:.1f}%</text>')
+            out.append(f'<text x="{x + 18:.1f}" y="{top + 166}" fill="#91a8bf" font-size="19">收入占比</text>')
+            if margin is None:
+                out.append(f'<text x="{x + 18:.1f}" y="{top + 224}" fill="#91a8bf" font-size="20">毛利率未披露</text>')
+                continue
+            out.append(f'<text x="{x + 18:.1f}" y="{top + 222}" fill="#dbe7f5" font-size="25">毛利 {margin:.1f}%</text>')
+            # 毛利条：同一张卡里和占比同尺度，一眼看出这块"卖得多但赚得少"
+            track_w = max(40.0, card_w - 36.0)
+            out.append(f'<rect x="{x + 18:.1f}" y="{top + 238}" width="{track_w:.1f}" height="10" rx="5" fill="rgba(101,151,196,.25)"/>')
+            out.append(f'<rect x="{x + 18:.1f}" y="{top + 238}" width="{max(4.0, min(1.0, margin / 100.0) * track_w):.1f}" '
+                       f'height="10" rx="5" fill="{tone}" opacity=".85"/>')
+        return ''.join(out)
+
+    def _channel_flow_body(self, ctx: Mapping[str, Any]) -> str | None:
+        """渠道链路：厂商 → 渠道 → 客户（按地区）。
+
+        缺一侧就画半条链：那一格画成虚线「未披露」，箭头也改成虚线——明确告诉
+        观众"这一段没数"，而不是把两头直接连起来假装中间不存在。两侧都没数
+        就返回 None（那该由业务拆解图来讲，不是这张图）。
+        """
+        channels, regions, period = self._channel_sides(ctx)
+        if not channels and not regions:
+            return None
+        zone_left, zone_right = self._chart_zone()
+        col_w = (zone_right - zone_left) / 3.0
+        box_w = max(150.0, col_w - 44.0)
+        box_h, box_gap, top = 64.0, 14.0, 150.0
+        tone = "#6ab7ff"
+        out = [self._svg_header("货怎么到客户手上 · 渠道链路", f"主营构成 · {period}")]
+
+        def column(index: int, title: str, items: list[tuple[str, float | None]]) -> None:
+            cx = zone_left + col_w * (index + 0.5)
+            out.append(f'<text x="{cx:.1f}" y="126" text-anchor="middle" fill="#91a8bf" font-size="22">'
+                       f'{html.escape(title)}</text>')
+            if not items:
+                y = top
+                out.append(f'<rect x="{cx - box_w / 2:.1f}" y="{y}" width="{box_w:.1f}" height="{box_h}" rx="16" '
+                           f'fill="rgba(12,30,52,.55)" stroke="rgba(101,151,196,.55)" stroke-width="1.6" stroke-dasharray="7 6"/>')
+                out.append(f'<text x="{cx:.1f}" y="{y + 40}" text-anchor="middle" fill="#91a8bf" font-size="21">未披露</text>')
+                return
+            for row, (name, share) in enumerate(items[:3]):
+                y = top + row * (box_h + box_gap)
+                out.append(f'<rect x="{cx - box_w / 2:.1f}" y="{y:.1f}" width="{box_w:.1f}" height="{box_h}" rx="16" '
+                           f'fill="rgba(12,30,52,.92)" stroke="{tone}" stroke-width="1.6"/>')
+                chars = max(4, int((box_w - 90) / 22))
+                out.append(f'<text x="{cx - box_w / 2 + 16:.1f}" y="{y + 40:.1f}" fill="#dbe7f5" font-size="23">'
+                           f'{html.escape(self._ellipsis(short_business_label(name), chars))}</text>')
+                if share is not None:
+                    out.append(f'<text x="{cx + box_w / 2 - 16:.1f}" y="{y + 40:.1f}" text-anchor="end" fill="{tone}" '
+                               f'font-size="23" font-weight="700">{share:.0f}%</text>')
+
+        def link(from_index: int, to_index: int, broken: bool) -> None:
+            x1 = zone_left + col_w * (from_index + 1) - 16.0
+            x2 = zone_left + col_w * to_index + 16.0
+            y = top + box_h / 2
+            dash = ' stroke-dasharray="7 6"' if broken else ''
+            out.append(f'<line x1="{x1:.1f}" y1="{y}" x2="{x2:.1f}" y2="{y}" stroke="rgba(101,151,196,.5)" '
+                       f'stroke-width="2"{dash}/>')
+            if not broken:
+                out.append(f'<polygon points="{x2:.1f},{y:.1f} {x2 - 13:.1f},{y - 7:.1f} {x2 - 13:.1f},{y + 7:.1f}" '
+                           f'fill="rgba(101,151,196,.7)"/>')
+
+        vendor = str((ctx.get("quote") or {}).get("name") or "该公司")
+        column(0, "厂商", [(vendor, None)])
+        column(1, "渠道 · 销售模式", channels)
+        column(2, "客户 · 地区", regions)
+        link(0, 1, not channels)
+        link(1, 2, not regions)
+        return ''.join(out)
+
+    def _ledger_pair_body(self, ctx: Mapping[str, Any]) -> str | None:
+        """两数对照：同一条指标的两期并排，中间给出真实差额。
+
+        R4 的"账有没有配合故事"要的就是这两期的差——一条曲线讲的是趋势，
+        两个数字并排讲的是"变了没有、变了多少"。
+        """
+        pair = self._ledger_pair(ctx)
+        if not pair:
+            return None
+        label, unit, points = pair
+        zone_left, zone_right = self._chart_zone()
+        gap = 40.0
+        width = (zone_right - zone_left - gap) / 2
+        top, height = 132.0, 236.0
+        out = [self._svg_header("账有没有配合 · 两数对照", f"{label}（{unit}）".rstrip("（）"))]
+        for index, (period, value) in enumerate(points):
+            x = zone_left + index * (width + gap)
+            tone = "#6ab7ff" if index == 0 else "#ffd166"
+            out.append(f'<rect x="{x:.1f}" y="{top}" width="{width:.1f}" height="{height}" rx="20" '
+                       f'fill="rgba(12,30,52,.92)" stroke="{tone}" stroke-width="1.6"/>')
+            out.append(f'<text x="{x + 26:.1f}" y="{top + 50}" fill="#91a8bf" font-size="21">'
+                       f'{html.escape(str(period) or "报告期缺失")}</text>')
+            out.append(f'<text x="{x + 26:.1f}" y="{top + 138}" fill="{tone}" font-size="58" font-weight="700">'
+                       f'{value:,.2f}</text>')
+            out.append(f'<text x="{x + 26:.1f}" y="{top + 186}" fill="#91a8bf" font-size="21">'
+                       f'{html.escape(unit or "—")}</text>')
+        first, last = points[0][1], points[1][1]
+        delta = last - first
+        pct = (delta / abs(first) * 100) if first else 0.0
+        tone = "#ff7188" if delta < 0 else "#5ee0a7"
+        out.append(f'<text x="{zone_left:g}" y="{top + height + 52}" fill="{tone}" font-size="24">'
+                   f'◆ {html.escape(label)} {delta:+,.2f}{html.escape(unit)}'
+                   f'（{pct:+.1f}%）{html.escape(str(points[0][0]))} → {html.escape(str(points[1][0]))}</text>')
+        return ''.join(out)
 
     def _visuals(self, quote: Mapping[str, Any], financials: Mapping[str, Any], bars: list[Any], f10: Mapping[str, Any], technical: Mapping[str, Any], news: Mapping[str, Any] | None = None) -> dict[str, str]:
         """SVG topic visuals for every discussion topic, derived from fetched data only.

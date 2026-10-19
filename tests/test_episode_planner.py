@@ -22,12 +22,12 @@ from stocktalk.modules.episode_planner import (ROUND_DEFS, ROUND_SENTENCE_SEEDS,
                                                _rotate_seed)
 from stocktalk.modules.hyperframes_builder import HyperFramesBuilder
 
-# 所有可能出现在计划里的模板名（现有 12 类渲染器 + 中性来源卡 + 阶段 B 的六张新图）。
+# 所有可能出现在计划里的模板名（现有 12 类渲染器 + 中性来源卡 + 阶段 B2 的三张新图）。
+# 六张图那一版（value_chain / competition_map / event_impact）已作废，不在这里。
 _CANDIDATE_RENDERERS: tuple[str, ...] = (
     "kline", "mindmap", "composition", "waterfall", "timeline", "working_capital",
     "ranking", "profit_trend", "margin_trend", "roe_trend", "cashflow_statement",
-    "balance_sheet", "source_card", "product_portfolio", "channel_flow",
-    "value_chain", "competition_map", "event_impact", "ledger_pair",
+    "balance_sheet", "source_card", "product_portfolio", "channel_flow", "ledger_pair",
 )
 
 STOCK_DATA: dict[str, Any] = {
@@ -40,6 +40,11 @@ STOCK_DATA: dict[str, Any] = {
         "主营构成": {"报告期": "2026-06-30", "明细": [
             {"项目": "印刷线路板(产品)", "收入": "6.54亿", "收入占比(%)": "84.62", "毛利率(%)": "11.98"},
             {"项目": "其他业务(产品)", "收入": "1.19亿", "收入占比(%)": "15.38", "毛利率(%)": "94.58"},
+            # 渠道/地区行和产品行混在同一张表里（F10 原样），靠后缀区分
+            {"项目": "直销(销售模式)", "收入": "4.10亿", "收入占比(%)": "53.00", "毛利率(%)": "12.50"},
+            {"项目": "经销(销售模式)", "收入": "3.63亿", "收入占比(%)": "47.00", "毛利率(%)": "11.20"},
+            {"项目": "华东(地区)", "收入": "3.20亿", "收入占比(%)": "41.40", "毛利率(%)": "12.10"},
+            {"项目": "华南(地区)", "收入": "2.10亿", "收入占比(%)": "27.20", "毛利率(%)": "11.60"},
         ]},
         "行业地位": {"研究行业": "元器件", "同行家数": 66,
                    "市场表现": {"排名": 1}, "公司规模": {"排名": 52}},
@@ -503,22 +508,23 @@ class PlanDrivesChartTests(unittest.TestCase):
     def test_visual_id_selects_the_planned_chart_not_the_keyword_chart(self) -> None:
         builder = self._builder(tempfile.mkdtemp())
         plan = EpisodePlanner().plan(STOCK_DATA)
-        # 台词被判成"同业竞争"（旧路由会出 ranking）；计划里 r1 是收入构成。
+        # 台词被判成"同业竞争"（旧路由会出 ranking）；计划里 r1 是产品卡组。
         ctx = self._ctx(builder, plan)
         ctx["argument"] = "peers"
         _, name = builder._turn_chart("peers", ctx, "", "vis.r1_hook")
-        self.assertEqual(name, "composition")
+        self.assertEqual(name, "product_portfolio")
 
     def test_planned_chart_falls_back_only_inside_its_own_chain(self) -> None:
         builder = self._builder(tempfile.mkdtemp())
-        plan = EpisodePlanner().plan(STOCK_DATA)
-        # 数据全空：计划里的 composition 出不了 → 退到该章自己的 fallback。
+        # 计划本身也是空的（一只什么都没查到的票）：三张新图都画不出 → 末级来源卡。
+        plan = EpisodePlanner().plan({"code": "000000", "quote": {"code": "000000"}})
         ctx = {"bars": [], "quote": {}, "keywords": [], "argument": "business",
                "f10": {}, "financials": {}, "news": {}, "episode_plan": plan}
-        body, name = builder._turn_chart("business", ctx, "", "vis.r1_hook")
-        self.assertEqual(name, "source_card")
-        self.assertNotIn("真实日K", body)   # 绝不退回 K 线
-        self.assertIn("仅展示已核验素材", body)
+        for visual_id in ("vis.r1_hook", "vis.r2_mechanism", "vis.r4_ledger_test"):
+            body, name = builder._turn_chart("business", ctx, "", visual_id)
+            self.assertEqual(name, "source_card", visual_id)
+            self.assertNotIn("真实日K", body)   # 绝不退回 K 线
+            self.assertIn("仅展示已核验素材", body)
 
     def test_plan_reaches_the_rendered_composition(self) -> None:
         """端到端：script 里的 episode_plan 真正驱动了每一块图板。"""
@@ -536,10 +542,12 @@ class PlanDrivesChartTests(unittest.TestCase):
                       "episode_plan": plan}
             project = self._builder(temp).build_project(STOCK_DATA, script, {})
             content = project.composition_path.read_text(encoding="utf-8")
-            # 计划里 r1=收入构成、r2=业务拆解、r3=行业排名、r4=净利走势、r5=资讯时间线
-            self.assertIn("钱从哪来 · 收入构成", content)
-            self.assertIn("澳弘电子业务拆解", content)
+            # 计划里 r1=产品卡组、r2=渠道链路、r3=行业排名、r4=两数对照、r5=资讯时间线
+            self.assertIn("卖的是什么 · 产品卡组", content)
+            self.assertIn("货怎么到客户手上 · 渠道链路", content)
             self.assertIn("行业里站哪 · 排名", content)
-            self.assertIn("业绩走势 · 归母净利润", content)
+            self.assertIn("账有没有配合 · 两数对照", content)
             self.assertIn("最近发生的事", content)
+            # 末章那条「待验证什么」必须真的上屏
+            self.assertIn("◆ 待验证：下一份报告里的归母净利润", content)
             self.assertNotIn("暂无K线数据", content)
