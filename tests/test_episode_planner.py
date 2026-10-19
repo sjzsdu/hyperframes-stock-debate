@@ -12,7 +12,9 @@ import tempfile
 import unittest
 from datetime import date, timedelta
 from typing import Any
+from unittest import mock
 
+from stocktalk.modules import episode_planner
 from stocktalk.modules.dialogue_generator import (SENTENCE_BLACKLIST,
                                                   DialogueGenerator)
 from stocktalk.modules.episode_planner import (ROUND_DEFS, ROUND_SENTENCE_SEEDS,
@@ -220,6 +222,20 @@ class TurnMetadataTests(unittest.TestCase):
         self.assertEqual(meta["visual_id"], "vis.r3_moat_pressure")
 
 
+class FrozenDate(date):
+    """把 ``date.today()`` 钉在 ``FIXED`` 上——``plan()`` 里 ``as_of`` 的唯一来源。
+
+    用它 patch 掉 ``episode_planner.date``，就不必改 ``plan()`` 签名也能验接线：
+    日期变了种子组必须跟着变。
+    """
+
+    FIXED = date(2026, 10, 1)
+
+    @classmethod
+    def today(cls) -> "FrozenDate":
+        return cls(cls.FIXED.year, cls.FIXED.month, cls.FIXED.day)
+
+
 class SentenceModeTests(unittest.TestCase):
     """每章这一期的开法种子：每章一条、按 (code, date) 稳定轮换。"""
 
@@ -253,6 +269,30 @@ class SentenceModeTests(unittest.TestCase):
         # 两周里三条种子都要轮到：否则第三条就是死内容
         used_indices = {index for combo in by_day.values() for index in combo}
         self.assertEqual(used_indices, {0, 1, 2}, by_day)
+
+    def test_plan_feeds_today_into_the_seed_rotation(self) -> None:
+        """``plan()`` 必须把今天（``as_of``）接进轮换：同一天同组，换一天换组。
+
+        上一条是直接调 ``_rotate_seed`` 传显式日期，验的是 ``_rotate_seed`` 的性质
+        不是 ``plan()`` 的接线——``as_of`` 改成常量它照样绿。这条走 ``plan()``，
+        把 ``episode_planner.py`` 里 ``as_of`` 那行改成常量，这条必须红。
+        """
+
+        def plan_on(day: date) -> dict[str, Any]:
+            FrozenDate.FIXED = day
+            return EpisodePlanner().plan(STOCK_DATA)
+
+        day_one, day_two = date(2026, 10, 1), date(2026, 10, 2)
+        with mock.patch.object(episode_planner, "date", FrozenDate):
+            first, again, moved = plan_on(day_one), plan_on(day_one), plan_on(day_two)
+            # as_of 必须是冻结的今天：它同时是种子轮换的输入
+            self.assertEqual(first["as_of"], day_one.isoformat())
+            self.assertEqual(again["as_of"], day_one.isoformat())
+            self.assertEqual(moved["as_of"], day_two.isoformat())
+        groups = [[chapter["sentence_modes"][0]["id"] for chapter in plan["rounds"]]
+                  for plan in (first, again, moved)]
+        self.assertEqual(groups[0], groups[1], groups[0])          # 同一天可复现
+        self.assertNotEqual(groups[0], groups[2], (groups[0], groups[2]))
 
 
 class EmptyPoolWarningTests(unittest.TestCase):
