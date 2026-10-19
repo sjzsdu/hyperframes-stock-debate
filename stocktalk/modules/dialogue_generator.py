@@ -147,7 +147,7 @@ class DialogueGenerator:
             return self._active
         return self.select_arc(payload if isinstance(payload, Mapping) else {})
 
-    def generate(self, stock_data: Mapping[str, Any]) -> dict[str, Any]:
+    def generate(self, stock_data: Mapping[str, Any], episode_plan: Mapping[str, Any] | None = None) -> dict[str, Any]:
         if not isinstance(stock_data, Mapping):
             raise TypeError("stock_data must be a mapping")
         payload = self._compact_data(stock_data)
@@ -156,6 +156,8 @@ class DialogueGenerator:
         stories = spot_stories(stock_data)
         if stories:
             payload["本期重点"] = stories
+        if episode_plan:
+            payload["episode_plan"] = episode_plan
         choice = self.select_arc(payload)
         try:
             raw = self._llm.chat(self._system_prompt(choice.arc),
@@ -165,7 +167,7 @@ class DialogueGenerator:
                                  timeout=self.config.timeout_seconds)
         except ProviderError as exc:
             raise DialogueGenerationError(str(exc)) from exc
-        return self._normalize_script(self._decode_response(raw), payload, choice)
+        return self._normalize_script(self._decode_response(raw), payload, choice, episode_plan)
 
     def _system_prompt(self, arc: Arc | None = None) -> str:
         choice = self._choice_for(arc)
@@ -222,6 +224,7 @@ class DialogueGenerator:
             "9. 数字必须写完整读法，禁止缩略：写「四亿五千一百万」不要写「四亿五一」，"
             "写「百分之八十二点七」不要写「八成二七」，写「十八点二九」不要写「十八二九」；"
             "缩略数字配音会念错，观众也听不懂。\n"
+            "10. 数字分三级执行：anchor 原值口播且绑定所以呢；analogy 只说确定换算后的白话并记录原指标；visual_only 只上屏不口播。全片最多6个核心数字、单轮最多2个，缺少 source_refs 的事实不得提及。\n"
             + "\n" + self._arc_section(choice) + "\n"
             "\n反套话（重要）：每一期的开场都必须是新的。禁止把这些当开场套式——"
             "“咱们先看……”整个句式（不管宾语换成什么，2026-09-27 实锤：“咱们先看谁在给XX掏钱”只换了宾语、骨架照旧）、"
@@ -344,7 +347,8 @@ class DialogueGenerator:
                                         f"说不下就拆成两轮说；短回应可以只有 2-8 字",
              "beat": f"骨架节拍，只能取：{'/'.join(beat_keys)}",
              "emotion": "平述（只能取：反驳/质疑/惊叹/顿悟/坚守/平述，见系统提示 8b）",
-             "visual": ["line 中提到的关键词1", "关键词2"]}],
+             "visual": ["line 中提到的关键词1", "关键词2"],
+             "round_id": "本轮所属叙事章节 id，只能取下面五章之一（可省略）"}],
             "sides": {"bull": "看多一方的一句话立场（只讲生意层面的分歧）",
                       "bear": "看空一方的一句话立场"},
             "hook": "下一期要盯的一个可验证的具体变量",
@@ -412,12 +416,39 @@ class DialogueGenerator:
             # --message 的注入点：选材与侧重参考，紧挨 JSON 结构说明之前——
             # 数据 JSON 仍留在提示最尾部，模型的"最后读到的是数据"不变。
             + self._message_section()
+            + self._episode_section(payload)
             + "输出结构必须匹配：\n"
             + f"{json.dumps(schema, ensure_ascii=False)}\n股票数据：\n{json.dumps(payload, ensure_ascii=False, separators=(',', ':'))}"
         )
 
+    def _episode_section(self, payload: Mapping[str, Any]) -> str:
+        """把本期叙事统筹（episode_plan）写成给模型的五章地图。
+
+        计划是**确定性**产出的（素材与数字额度都带 source_refs，不需要模型
+        去挑），模型要做的只是照着它把故事讲出来：哪一章讲哪条素材、哪些数字
+        能开口播、哪些只许上屏。这里不重复列素材明细——它们已经在数据 JSON
+        里；只给章节顺序与数字纪律，免得模型把五章讲成一条财务播报。
+        """
+        plan = payload.get("episode_plan")
+        if not isinstance(plan, Mapping):
+            return ""
+        rounds = [r for r in (plan.get("rounds") or []) if isinstance(r, Mapping)]
+        if not rounds:
+            return ""
+        lines = ["本期叙事统筹（按这个顺序讲，不要中途换题）："]
+        for index, chapter in enumerate(rounds, 1):
+            budget = chapter.get("number_budget") or {}
+            lines.append(f"{index}. {chapter.get('id')}（{chapter.get('purpose') or ''}）："
+                         f"围绕 {chapter.get('must_cover') or ['本期素材']} 展开；"
+                         f"该章最多口播 {budget.get('spoken', 2)} 个数字。")
+        lines.append("anchor 数字按原值口播并讲清'所以呢'；analogy 只讲换算后的白话；"
+                     "visual_only 只上屏、不要念出来。没有 source_refs 的事实一律不讲。")
+        lines.append("每轮可用 round_id 标出它属于哪一章（只能取上面的 id）；不标则由程序按轮次顺序分配。")
+        return "\n" + "\n".join(lines) + "\n"
+
     def _normalize_script(self, response: Any, stock_data: Mapping[str, Any],
-                          choice: ArcChoice | None = None) -> dict[str, Any]:
+                          choice: ArcChoice | None = None,
+                          episode_plan: Mapping[str, Any] | None = None) -> dict[str, Any]:
         if not isinstance(response, Mapping):
             raise DialogueGenerationError("Bailian response does not contain a JSON object")
         raw_turns = response.get("turns", response.get("dialogue"))
@@ -427,8 +458,12 @@ class DialogueGenerator:
         beats = list(choice.beats) if choice else []
         beat_keys = beats_by_key(beats)
         turns: list[dict[str, Any]] = []
+        # 每轮最终台词对应的模型原始条目：章节分配在拆分之后统一做，那时还要按它
+        # 读模型自己给的 round_id/visual_id。
+        entries: list[Mapping[str, Any]] = []
         notes: list[str] = []
         cursor = 0
+        append_risk = bool(self.config.risk_exchange) and bool(raw_turns)
         for index, entry in enumerate(raw_turns, 1):
             if not isinstance(entry, Mapping):
                 raise DialogueGenerationError(f"turn {index} is not an object")
@@ -477,6 +512,13 @@ class DialogueGenerator:
                               # 续轮继承同一情绪：它们是同一句话的拆分，语气不该变
                               "emotion": emotion,
                               "character_name": self._character(speaker, speaker, "")["name"]})
+                entries.append(entry)
+        # 章节分配的轮数基准必须是「最终成片有几轮」：超长台词会被 _split_line 拆成
+        # 续轮，拿模型给的轮数当基准时，片尾两轮的 index 会溢出 total，末章判定的
+        # {total, total-1} 匹配不上——收尾两句会落进 R4 章，R5 全片 0 轮，规划好的
+        # timeline 图一次都不出现。片尾风险提示交换轮是程序追加的，同样要算进来，
+        # 算漏了末章也会被正文的倒数第二轮顶掉。
+        total_turns = len(turns) + (2 if append_risk else 0)
         # 片尾风险提示交换轮（2026-10-08 第二版）：一人一句的接力——「股市有风险」
         # 由一位角色说出口，「投资需谨慎」由对方接住，像对话的最后一次交锋而不是
         # 贴在片尾的免责声明。措辞按个股特征（行业/主营/股名）从模板池挑：有数据
@@ -499,11 +541,17 @@ class DialogueGenerator:
                               "beat": "closing", "short": True, "visual": [],
                               "emotion": "平述",
                               "character_name": self._character(speaker, speaker, "")["name"]})
+        # 章节标记统一在这里打：此时轮数已经定死（超长台词的续轮、片尾两轮都在里面），
+        # index 与 total 用的是同一个基准，末章判定在 0～N 次拆行下都成立。
+        for position, turn in enumerate(turns, 1):
+            entry = entries[position - 1] if position <= len(entries) else {}
+            turn.update(self._turn_metadata(entry, position, episode_plan, total=total_turns))
         quote = stock_data.get("quote") if isinstance(stock_data.get("quote"), Mapping) else {}
         code, name = str(stock_data.get("code") or quote.get("code") or ""), str(quote.get("name") or stock_data.get("code") or "股票")
         char_count = sum(len(turn["line"]) for turn in turns)
         script = {"stock_code": code, "stock_name": name, "title": self._clean_title(response.get("title"), name, code),
                 "turns": turns,
+                **({"episode_plan": episode_plan} if episode_plan else {}),
                 # 本期用了哪条骨架、哪些节拍因为没数据被剪掉、模型哪里没照着走。
                 # 结构"是否真的变了"要可核对，不能只看 prompt 写了什么。
                 "arc": choice.report() if choice else None,
@@ -527,6 +575,57 @@ class DialogueGenerator:
             # 旁边的 JSON / 审查页里看到原话，否则提示词是一条断掉的回溯链。
             script["message"] = self.config.message
         return script
+
+    @staticmethod
+    def _chapter_index(index: int, total: int, chapters: int = 5) -> int:
+        """把 turn 流按在总长中的位置切成 chapters 段，返回 0-based 段号。
+
+        必须满足三条：段号随 index 单调不回退、每一段都可能被分到、段与段之间
+        只由「turn 在整段对话里的相对位置」决定（与 turn 总数无关地稳定）。
+        早先的 ``((index - 1) * 5) // (1 + rounds * 2)`` 是一条随手写的直线：
+        turn 数一变就把章节切歪（12 轮时后两章空、24 轮时前两章吃掉一半）。
+        """
+        count = max(1, int(total or 0))
+        chapters = max(1, int(chapters))
+        position = min(max(1, int(index)), count)
+        # ceil(position * chapters / count) - 1：第 1 轮必在第 0 段，最后一轮必在末段。
+        return min(chapters - 1, max(0, -(-position * chapters // count) - 1))
+
+    @classmethod
+    def _turn_metadata(cls, entry: Mapping[str, Any], index: int,
+                       plan: Mapping[str, Any] | None, total: int = 0) -> dict[str, Any]:
+        """给一轮台词打上「属于哪一章、讲哪条素材、配哪块图板」的标记。
+
+        模型显式给了 round_id/visual_id 就以模型为准（它看得见自己写了什么）；
+        没给就按 turn 在整段对话中的位置落到对应章节——章节由图板计划持有，
+        所以这一处决定了画面按 ``visual_id`` 取图，而不是反过来从台词猜。
+        """
+        if not isinstance(plan, Mapping):
+            return {"round_id": str(entry.get("round_id") or ""), "material_ids": list(entry.get("material_ids") or []),
+                    "metric_ids": list(entry.get("metric_ids") or []), "visual_id": str(entry.get("visual_id") or "")}
+        rounds = [r for r in (plan.get("rounds") or []) if isinstance(r, Mapping)]
+        if not rounds:
+            return {"round_id": "", "material_ids": [], "metric_ids": [], "visual_id": ""}
+        rid = str(entry.get("round_id") or "")
+        selected = next((r for r in rounds if str(r.get("id")) == rid), None)
+        if selected is None:
+            # 末章只给片尾两轮（风险提示交换轮），不按剩余 turn 均分。
+            body = [r for r in rounds if str(r.get("id")) != "r5_open_verdict"] or rounds
+            tail = next((r for r in rounds if str(r.get("id")) == "r5_open_verdict"), None)
+            if total > len(rounds) and tail is not None:
+                last_chapter_turns = {total, total - 1}
+                if int(index) in last_chapter_turns:
+                    selected = tail
+            if selected is None:
+                selected = body[min(len(body) - 1, cls._chapter_index(index, total, len(body)))]
+        visual = selected.get("visual") if isinstance(selected.get("visual"), Mapping) else {}
+        # 这一轮上场的口播数字 = 本章的 anchor + analogy（R2 讲的是毛利率那条 analogy，
+        # 只看 anchor 会让它的指标追溯为空）。
+        spoken_metrics = [*list(selected.get("anchor_metric_ids") or []),
+                          *list(selected.get("analogy_metric_ids") or [])]
+        return {"round_id": str(selected.get("id") or ""), "material_ids": list(entry.get("material_ids") or selected.get("material_ids") or []),
+                "metric_ids": list(entry.get("metric_ids") or spoken_metrics),
+                "visual_id": str(entry.get("visual_id") or visual.get("id") or "")}
 
     @staticmethod
     def _style_audit(turns: Sequence[Mapping[str, Any]]) -> dict[str, Any]:

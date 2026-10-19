@@ -159,8 +159,10 @@ ARGUMENT_CHARTS: dict[str, tuple[str, ...]] = {
     "industry": ("mindmap", "composition"),
 }
 
-# 论点候选全缺数据时的后退序列：业务总览 → 收入构成 → 真实K线，绝不空板。
-ARGUMENT_FALLBACK_CHARTS: tuple[str, ...] = ("mindmap", "composition", "kline")
+# 论点候选全缺数据时的后退序列：业务总览 → 收入构成 → 资讯时间线 → 中性来源卡。
+# 这里**没有** K 线：K 线只回答"价格怎么走"，把它当万能兜底会让讲存货、讲渠道
+# 的轮次配一张行情图——看起来有图，实际答非所问（2026-10-19 定稿）。
+ARGUMENT_FALLBACK_CHARTS: tuple[str, ...] = ("mindmap", "composition", "source_card")
 
 # Board membership is derived from the symbol prefix, which is the only
 # classification available without an F10 feed (that endpoint is not installed
@@ -348,6 +350,10 @@ class HyperFramesBuilder:
         self.safe_top, self.safe_bottom = self._safe_area(self.video_config.get("safe_area"))
         self.safe_side_left, self.safe_side_right = self._safe_sides(self.video_config.get("safe_area"))
         self._runner = runner or self._run_subprocess
+        # 本期叙事统筹（episode_plan）：由 pipeline 随脚本一起交给构建器，
+        # 画面按 turn 上的 visual_id 在它里面取图。没有计划（旧脚本、单测）
+        # 时按论点关键词选图的旧路由仍然可用，但不再是主路径。
+        self._episode_plan: Mapping[str, Any] = {}
 
     def _safe_sides(self, raw: Any) -> tuple[int, int]:
         """Resolve the left/right insets kept clear of the platform UI.
@@ -425,14 +431,19 @@ class HyperFramesBuilder:
 
     def build_project(self, stock_data: Mapping[str, Any], script: Mapping[str, Any] | None, tts_timeline: Mapping[str, Any] | None) -> HyperFramesProject:
         directory = Path(self.video_config.get("project_dir", self._output_dir / "hyperframes")); directory.mkdir(parents=True, exist_ok=True)
-        segments = self._segments(script or {}, tts_timeline or {})
+        script = script if isinstance(script, Mapping) else {}
+        # 计划随脚本一起到（pipeline 写进 script["episode_plan"]），横竖两版共用
+        # 同一份——否则两个画幅会各自重排，同一句话配出两张不同的图。
+        plan = script.get("episode_plan")
+        self._episode_plan = plan if isinstance(plan, Mapping) else {}
+        segments = self._segments(script, tts_timeline or {})
         for seg in segments:
             ap = seg.get("audio_path")
             if ap:
                 seg["audio_path"] = self._project_audio_path(Path(ap), directory)
         duration = self._duration(segments, tts_timeline or {})
         self._copy_assets(directory)
-        composition = directory / "index.html"; composition.write_text(self._html(stock_data, segments, duration, script or {}), encoding="utf-8")
+        composition = directory / "index.html"; composition.write_text(self._html(stock_data, segments, duration, script), encoding="utf-8")
         (directory / "index.motion.json").write_text(json.dumps({"duration": duration, "assertions": [
             {"kind": "appearsBy", "selector": "#headline", "bySec": 2.6},
             {"kind": "staysInFrame", "selector": "#visual-frame"},
@@ -547,6 +558,10 @@ class HyperFramesBuilder:
             topic_key, topic_title = self._turn_argument(line)
             return topic_key, topic_title, keywords
 
+        def visual_for(line: str) -> tuple[str, str]:
+            turn = turns_by_line.get(line) or {}
+            return str(turn.get("visual_id") or ""), str(turn.get("round_id") or "")
+
         def short_for(line: str) -> bool:
             """这一段是不是"短回应"（"嗯""有道理"），决定要不要换图板。
 
@@ -568,7 +583,8 @@ class HyperFramesBuilder:
                 if line and duration > 0:
                     character = str(item.get("character", "bull"))
                     topic, topic_title, keywords = meta_for(line, character)
-                    segments.append({"line": line, "character": character, "start": max(0.0, start), "duration": duration, "audio_path": item.get("audio_path"), "topic": topic, "topic_title": topic_title, "keywords": keywords, "short": short_for(line)})
+                    visual_id, round_id = visual_for(line)
+                    segments.append({"line": line, "character": character, "start": max(0.0, start), "duration": duration, "audio_path": item.get("audio_path"), "topic": topic, "topic_title": topic_title, "keywords": keywords, "short": short_for(line), "visual_id": visual_id, "round_id": round_id})
         if segments:
             segments = sorted(segments, key=lambda item: item["start"])
             return self._decorate_segments(segments)
@@ -579,7 +595,7 @@ class HyperFramesBuilder:
             if character in {"bull", "bear"} and line:
                 topic, topic_title, keywords = meta_for(line, character)
                 duration = max(2.5, min(30.0, len(line) * 0.23))
-                segments.append({"line": line, "character": character, "start": cursor, "duration": duration, "audio_path": None, "topic": topic, "topic_title": topic_title, "keywords": keywords, "short": bool(turn.get("short"))})
+                segments.append({"line": line, "character": character, "start": cursor, "duration": duration, "audio_path": None, "topic": topic, "topic_title": topic_title, "keywords": keywords, "short": bool(turn.get("short")), "visual_id": str(turn.get("visual_id") or ""), "round_id": str(turn.get("round_id") or "")})
                 cursor += duration + 0.25
         return self._decorate_segments(segments)
 
@@ -1350,9 +1366,13 @@ class HyperFramesBuilder:
                "argument": topic,
                "f10": f10 if isinstance(f10, Mapping) else {},
                "financials": financials if isinstance(financials, Mapping) else {},
-               "news": news if isinstance(news, Mapping) else {}}
+               "news": news if isinstance(news, Mapping) else {},
+               # 本期叙事统筹：按 visual_id 在这一份计划里找到这一轮该出的图。
+               # 它是画面选图的**主路由**（缺数据时只在该 visual 自带的 fallback
+               # 里后退），不能再退回"从台词关键词猜一张图"。
+               "episode_plan": self._episode_plan if isinstance(self._episode_plan, Mapping) else {}}
         last_chart = (chart_state or [""])[0]
-        chart, shown_chart = self._turn_chart(topic, ctx, last_chart)
+        chart, shown_chart = self._turn_chart(topic, ctx, last_chart, str(segment.get("visual_id") or ""))
         if chart_state is not None:
             chart_state[0] = shown_chart
         # Speech-tied focus caption: guarantees each turn's card is distinct and
@@ -1590,30 +1610,88 @@ class HyperFramesBuilder:
                 ctx["f10"], "净资产收益率(%)", "股东回报", "近几年净资产收益率", "#8fd3ff"),
             "cashflow_statement": lambda: self._cashflow_statement_body(ctx["f10"]),
             "balance_sheet": lambda: self._balance_sheet_body(ctx["f10"]),
+            # 末级兜底：任何候选都出不了图时，出一张只写"已核验素材"的中性卡，
+            # 而不是拿一张与这轮无关的图（过去的 K 线兜底就是这么来的）。
+            "source_card": lambda: self._source_card_body(ctx.get("argument", ""), ctx.get("keywords") or []),
         }
         renderer = renderers.get(name)
         return renderer() if renderer else None
 
-    def _turn_chart(self, argument: str, ctx: Mapping[str, Any], last_chart: str = "") -> tuple[str, str]:
-        """Render the chart bound to this turn's argument; returns (svg, chart名).
+    def _turn_chart(self, argument: str, ctx: Mapping[str, Any], last_chart: str = "", visual_id: str = "") -> tuple[str, str]:
+        """按这一轮的计划出图；返回 (svg, 图名)。
+
+        两条路由：
+        * **有 episode_plan 且 visual_id 命中某一章**——只在该章声明的
+          ``template`` 与其 ``fallback`` 序列里后退，末级 ``source_card``。
+          绝不从台词关键词猜图、也绝不退回万能 K 线：画面该服从"这期讲什么"
+          的统筹结果，而不是反过来。
+        * **没有计划**（旧脚本、单测、未接入 pipeline 的调用）——退回按论点
+          关键词选图的旧逻辑，末级同样是 ``source_card``。
 
         ``last_chart`` 是上一块图板用的图：同一论点连续出现时优先换成语义
         等价的另一张（margin 的 composition↔mindmap 都逐业务标注毛利率），
         避免同图连播；候选只有一张时（存货→营运占用图）就坦然重复——
         重复一张对的图，好过一张错的新图。
         """
+        plan = ctx.get("episode_plan") if isinstance(ctx.get("episode_plan"), Mapping) else None
+        planned = self._planned_visual(plan, visual_id)
+        if isinstance(planned, Mapping):
+            template = str(planned.get("template") or "")
+            fallbacks = [str(name) for name in (planned.get("fallback") or []) if str(name)]
+            # 计划的 fallback 末级必须能兜住；没写就补一张来源卡，避免空板。
+            if "source_card" not in fallbacks:
+                fallbacks.append("source_card")
+            for name in self._ordered(template, last_chart) + self._ordered(fallbacks, last_chart):
+                body = self._render_chart(name, ctx)
+                if body:
+                    return body, name
+            # 兜底序列本身也出不了图（理论上不会，source_card 恒成立）时，
+            # 仍然出来源卡而不是行情图。
+            return self._render_chart("source_card", ctx) or "", "source_card"
+
         candidates = list(ARGUMENT_CHARTS.get(argument) or ("mindmap", "composition"))
-        order = [name for name in candidates if name != last_chart] + \
-                [name for name in candidates if name == last_chart]
-        for name in order:
+        for name in self._ordered(candidates, last_chart) + self._ordered(ARGUMENT_FALLBACK_CHARTS, last_chart):
             body = self._render_chart(name, ctx)
             if body:
                 return body, name
-        for name in ARGUMENT_FALLBACK_CHARTS:
-            body = self._render_chart(name, ctx)
-            if body:
-                return body, name
-        return self._mini_chart_body(ctx["bars"], argument, ctx["quote"], ctx.get("keywords")), "kline"
+        return self._render_chart("source_card", ctx) or "", "source_card"
+
+    @staticmethod
+    def _planned_visual(plan: Mapping[str, Any] | None, visual_id: str) -> Mapping[str, Any] | None:
+        """在 episode_plan 里按 visual_id 找到这一章的图板定义。"""
+        if not isinstance(plan, Mapping) or not visual_id:
+            return None
+        for chapter in plan.get("rounds") or []:
+            if not isinstance(chapter, Mapping):
+                continue
+            visual = chapter.get("visual")
+            if isinstance(visual, Mapping) and str(visual.get("id") or "") == visual_id:
+                return visual
+        return None
+
+    @staticmethod
+    def _ordered(names: str | Sequence[str], last_chart: str) -> list[str]:
+        """把候选排成"先试试没用过的那张"，避免同图连播又不至于无图可出。"""
+        items = [str(name) for name in ([names] if isinstance(names, str) else names) if str(name)]
+        return [name for name in items if name != last_chart] + [name for name in items if name == last_chart]
+
+    def _source_card_body(self, argument: str, keywords: list[Any]) -> str:
+        """Neutral evidence card used when a planned visual has no source-backed renderer.
+
+        它只陈述"这轮讲到哪儿"，不补任何数字：拿一张无关的图填槽比空板更糟，
+        而编一个数字上屏则是红线。宽度跟着图表区走（横版与竖版图表区不同宽）。
+        """
+        zone_left, zone_right = self._chart_zone()
+        width = max(320.0, zone_right - zone_left - 20.0)
+        x = zone_left + 10.0
+        title = html.escape(str(argument or "公开资料"))
+        detail = html.escape(" · ".join(str(k) for k in keywords[:3]) or "暂无可用结构化视觉")
+        return (f'<g class="source-card">'
+                f'<rect x="{x:g}" y="90" width="{width:g}" height="300" rx="24" fill="#142235" stroke="#5d7894"/>'
+                f'<text x="{x + 40:g}" y="170" fill="#ffd166" font-size="34">来源卡 · {title}</text>'
+                f'<text x="{x + 40:g}" y="240" fill="#dbe7f5" font-size="28">{detail}</text>'
+                f'<text x="{x + 40:g}" y="330" fill="#91a8bf" font-size="22">仅展示已核验素材，缺少结构化来源时不补猜</text>'
+                f'</g>')
 
     def _chart_zone(self) -> tuple[float, float]:
         """X extent of the chart area inside the turn-board viewBox.

@@ -254,10 +254,12 @@ class HyperFramesBuilderTests(unittest.TestCase):
             content = project.composition_path.read_text(encoding="utf-8")
             self.assertIn("公司与行业", content)
             # Every turn after the opening market panel gets its own real-data
-            # board; with no quote/kline it degrades to a clean "暂无K线数据"
-            # panel instead of fabricating data.
+            # board; with no quote/kline/F10 it degrades to the neutral source
+            # card — 2026-10-19 定稿：K 线退出万能兜底（讲存货却配行情图比空板更糟），
+            # 来源卡只陈述"这轮讲到哪儿"，绝不补数字。
             self.assertIn("公司与行业·真实数据", content)
-            self.assertIn("暂无K线数据", content)
+            self.assertIn('class="source-card"', content)
+            self.assertIn("仅展示已核验素材", content)
             self.assertNotIn('aria-label="公司概览"', content)
 
     def test_close_line_used_when_no_real_ohlc(self):
@@ -588,9 +590,18 @@ class ChartLibraryTests(unittest.TestCase):
         ctx = {"bars": [{"close": 10.0 + i} for i in range(40)], "quote": {"name": "某股"},
                "argument": "margin", "keywords": [], "f10": {}, "financials": {}, "news": {"items": []}}
         body, name = builder._turn_chart("margin", ctx)
-        # mindmap/composition 全没数据 → 只剩真实 K 线兜底
-        self.assertEqual(name, "kline")
-        self.assertIn("真实日K", body)
+        # mindmap/composition 全没数据 → 末级落到中性来源卡；K 线不再当万能兜底
+        # （2026-10-19 定稿：讲毛利却配行情图，看着有图，实际答非所问）。
+        self.assertEqual(name, "source_card")
+        self.assertIn("仅展示已核验素材", body)
+
+    def test_no_plan_never_returns_the_kline_fallback(self) -> None:
+        """没有 episode_plan 的旧路径也不许退回 K 线兜底（定稿口径）。"""
+        builder = self._builder()
+        ctx = {"bars": [{"close": 10.0 + i} for i in range(40)], "quote": {"name": "某股"},
+               "argument": "inventory", "keywords": [], "f10": {}, "financials": {}, "news": {"items": []}}
+        _, name = builder._turn_chart("inventory", ctx)
+        self.assertNotEqual(name, "kline")
 
     def test_mindmap_shows_real_composition_and_margins(self) -> None:
         body = self._builder()._business_mindmap_body({"name": "澳弘电子"}, self._f10())
@@ -654,8 +665,10 @@ class ChartLibraryTests(unittest.TestCase):
         ctx = {"bars": [{"close": 10.0 + i} for i in range(40)], "quote": {"name": "某股"},
                "argument": "inventory", "keywords": [], "f10": {}, "financials": {}, "news": {"items": []}}
         body, name = builder._turn_chart("inventory", ctx)
-        # working_capital 缺数据 → 退到业务兜底（脑图/K线），绝不借排名或瀑布
-        self.assertIn(name, ("mindmap", "composition", "kline"))
+        # working_capital 缺数据 → 退到业务兜底（脑图/收入构成）→ 末级来源卡；
+        # 绝不借排名或瀑布，也不退回 K 线。
+        self.assertIn(name, ("mindmap", "composition", "source_card"))
+        self.assertNotEqual(name, "kline")
 
     def test_money_argument_keeps_the_real_kline(self) -> None:
         builder = self._builder()
