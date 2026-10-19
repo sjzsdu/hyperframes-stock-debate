@@ -8,7 +8,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from stocktalk.modules.review import cover_usage, video_inventory, write_review_page
+from stocktalk.modules.review import (cover_usage, render_review_html,
+                                      video_inventory, write_review_page)
 
 SCRIPT = {
     "title": "冰轮环境（000811）：从卖设备到温控方案的生意跃迁",
@@ -91,7 +92,9 @@ def test_review_page_shows_the_episode_plan(tmp_path: Path) -> None:
                     "visual": {"id": "vis.r4_ledger_test", "template": "profit_trend",
                                "fallback": ["source_card"]}}],
         "rejected_materials": [{"id": "mat.subsidiary.missing", "reason": "缺少可靠结构化来源"}],
-        "warnings": ["subsidiary:missing_source"],
+        "warnings": ["subsidiary:missing_source",
+                     "r3_moat_pressure:no_spoken_metric_source",
+                     "r4_ledger_test:spoken_metrics_exhausted"],
     }
     path = write_review_page(
         tmp_path, "z", stock_name="冰轮环境", stock_code="000811",
@@ -112,6 +115,49 @@ def test_review_page_shows_the_episode_plan(tmp_path: Path) -> None:
     # 缺来源的素材要显式列出——跳过了什么，审查的人一眼看得到
     assert "mat.subsidiary.missing" in html
     assert "subsidiary:missing_source" in html
+
+
+def _warning_line(html: str, label: str) -> str:
+    """取出审查页上某一行告警标签后面的那句话。
+
+    用来验证「缺来源」那一行的确只包含缺来源——两种告警混在一行就是说错话。
+    """
+    start = html.index(label) + len(label)
+    return html[start:html.index("</div>", start)]
+
+
+def test_review_page_keeps_the_two_warning_kinds_apart(tmp_path: Path) -> None:
+    """warnings 混了两种语义，审查页不能把「取不到数字」说成「缺来源（已跳过）」。
+
+    告警文案决定别人是去补素材还是去调章节分配，顶着错误的标签说出去等于误导。
+    """
+    plan = {
+        "version": 1, "stock_code": "000811", "as_of": "2026-10-19",
+        "story": {"angle": "a", "reveal_material_id": None},
+        "number_budget": {"used": {"anchor": 0, "analogy": 0},
+                          "cap": {"anchor": 4, "analogy": 4}},
+        "rounds": [{"id": "r3_moat_pressure", "purpose": "x", "lead": "bear",
+                    "material_ids": [], "no_spoken_metric": True,
+                    "number_budget": {"spoken": 2, "anchor": 0, "analogy": 0},
+                    "visual": {"id": "vis.r3_moat_pressure", "template": "ranking",
+                               "fallback": ["source_card"]}}],
+        "warnings": ["subsidiary:missing_source",
+                     "r3_moat_pressure:no_spoken_metric_source",
+                     "r4_ledger_test:spoken_metrics_exhausted"],
+    }
+    html = render_review_html(
+        tag="z", stock_name="冰轮环境", stock_code="000811", created_at="now",
+        turns=0, duration=0.0, videos=[], covers=[], canvas_rows=[],
+        title="t", description="d", tags="", issues=[], disclaimers="",
+        episode_plan=plan,
+    )
+
+    missing = _warning_line(html, '<span class="k">缺来源</span>')
+    assert "subsidiary:missing_source" in missing
+    assert "no_spoken_metric_source" not in missing and "spoken_metrics_exhausted" not in missing
+    # 两种数字告警各自分述，原因不同：一个要去补素材，一个要调章节分配
+    assert "素材没给可念的指标" in html and "r3_moat_pressure" in html
+    assert "被前面的章节取完了" in html and "r4_ledger_test" in html
 
 
 def test_review_page_renders_without_covers_or_metadata(tmp_path: Path) -> None:

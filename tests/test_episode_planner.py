@@ -266,16 +266,26 @@ class EmptyPoolWarningTests(unittest.TestCase):
     }
 
     def test_chapter_without_spoken_metric_is_recorded(self) -> None:
-        """薄样本：产品素材只有一条指标，R1 取走后后面几章就只能干讲。"""
+        """薄样本（连 mat.event.0 都没有）：非末章全都要照报，末章豁免不覆盖它们。
+
+        豁免只写在 ROUND_NUMBER_POLICY 为空的末章上；前面的章再薄也得报。
+        """
         plan = EpisodePlanner().plan(self.THIN_DATA)
+        self.assertNotIn("mat.event.0", plan["selected_material_ids"])
         self.assertIn("r3_moat_pressure:spoken_metrics_exhausted", plan["warnings"])
         self.assertIn("r4_ledger_test:spoken_metrics_exhausted", plan["warnings"])
         # 末章本来就没有口播额度的预期，不该把它也算成"退化"
         self.assertNotIn("r5_open_verdict:spoken_metrics_exhausted", plan["warnings"])
+        self.assertNotIn("r5_open_verdict:no_spoken_metric_source", plan["warnings"])
+        reported = {w.split(":")[0] for w in plan["warnings"]}
         for chapter in plan["rounds"]:
             expected = bool((chapter["anchor_metric_ids"] or chapter["analogy_metric_ids"])
                             or chapter["id"] == "r5_open_verdict")
             self.assertIs(chapter["no_spoken_metric"], not expected, chapter["id"])
+            # 非末章取不到就一定在告警里——豁免不能往前扩
+            if chapter["no_spoken_metric"]:
+                self.assertNotEqual(chapter["id"], "r5_open_verdict")
+                self.assertIn(chapter["id"], reported)
 
     def test_full_data_plans_without_emptiness_warnings(self) -> None:
         """数据齐的时候不该出现告警——否则它就是噪音，没人会看。"""
@@ -289,6 +299,24 @@ class EmptyPoolWarningTests(unittest.TestCase):
                      "f10": {"profile": {"行业地位": {"研究行业": "元器件"}}}}
         plan = EpisodePlanner().plan(no_metric)
         self.assertIn("r1_hook:no_spoken_metric_source", plan["warnings"])
+
+    def test_visual_only_metrics_do_not_count_as_speakable(self) -> None:
+        """素材里只有 visual_only 指标时必须报"没得讲"，不能报"被取完了"。
+
+        告警文案决定别人是去补素材还是去调章节分配，指反了这条告警就白记了。
+        """
+        ledger_only_margin = {
+            "code": "000002", "quote": {"code": "000002", "name": "只有上屏毛利率"},
+            "f10": {"profile": {"财务历史": {"年度": {"报告期": ["2025-12-31"],
+                                                     "指标": {"销售毛利率(%)": [91.93]}}}}},
+        }
+        plan = EpisodePlanner().plan(ledger_only_margin)
+        # 财务素材有指标、但没有一条能念：这是"素材没给"，不是"被取完"
+        self.assertIn("r4_ledger_test:no_spoken_metric_source", plan["warnings"])
+        self.assertNotIn("r4_ledger_test:spoken_metrics_exhausted", plan["warnings"])
+        ledger = next(m for m in plan["materials"] if m["id"] == "mat.financial.0")
+        policies = {str(x["spoken_policy"]) for x in ledger["metrics"]}
+        self.assertEqual(policies, {"visual_only"}, policies)
 
 
 class EpisodePromptTests(unittest.TestCase):
@@ -327,6 +355,18 @@ class EpisodePromptTests(unittest.TestCase):
         for chapter in plan["rounds"]:
             self.assertNotIn("must_cover", chapter)
             self.assertEqual(section.count(chapter["purpose"]), 1, chapter["id"])
+
+    def test_seed_replacement_constraint_is_in_the_rendered_prompt(self) -> None:
+        """示范句必须换成这只票自己的东西——这条约束要靠测试锁，不能只在描述里写着。
+
+        15 条种子是拿 600519 写的（实体与数字都是那一期的），是否留存 JSON 里没关系，
+        模型读的是 prompt：替换要求一旦被删掉，别的票就会念出茅台的句子。
+        删掉 `_episode_section` 里那四行，这条必须红。
+        """
+        section, _ = self._section()
+        self.assertIn("换成这只票自己的素材与 source_refs 里的数", section)
+        self.assertIn("修辞动作", section)
+        self.assertIn("不要硬套", section)
 
     def test_number_discipline_follows_the_agreed_units(self) -> None:
         section, _ = self._section()

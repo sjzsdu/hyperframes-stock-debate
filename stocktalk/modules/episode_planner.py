@@ -295,14 +295,21 @@ class EpisodePlanner:
                 break
             anchor_used += len(take_anchors)
             analogy_used += len(take_analogies)
-            # 这一章一条能念的指标都没捞到，审查页上要看得出来：静默退化长得跟
-            # "这章本来就没数字"一模一样，等于悄悄少讲一层，事后查不出来。
-            # 末章本来就不要求新数字（ROUND_NUMBER_POLICY 为空），不算退化。
+            # 这一章一条能念的指标都没捞到时，审查页上必须看得出来：静默退化长得
+            # 跟"这章本来就没数字"一模一样，等于悄悄少讲一层，事后查不出来。
+            # 判空只能拿**能念的**指标算：素材里躺着一堆 visual_only 不等于有数字
+            # 可讲（财务素材常常只有一条 visual_only 的毛利率）。判错了就把告警
+            # 指向反的方向——该去补素材的人跑去调章节分配。
+            speakable = [m for m in metrics if m.get("spoken_policy") in ("anchor", "analogy")]
+            # 末章豁免：ROUND_NUMBER_POLICY 里 r5_open_verdict 是空的，它本来就不要求
+            # 新数字这一层。只豁免"末章无新数字"这一种退化，**不覆盖前面的章**——
+            # 同一份薄样本里 R3/R4 必须照报（见
+            # EmptyPoolWarningTests.test_chapter_without_spoken_metric_is_recorded）。
             empty_pool = not (take_anchors or take_analogies) and bool(ROUND_NUMBER_POLICY.get(rid))
             if empty_pool:
-                # 分两种：素材压根没有可念的指标，还是指标被前面的章节取完了——
+                # 分两种：素材压根没有可念的指标，还是可念的指标被前面的章节取完了——
                 # 前者要补素材，后者要调章节分配，处理办法不一样。
-                warnings.append(f"{rid}:{'spoken_metrics_exhausted' if metrics else 'no_spoken_metric_source'}")
+                warnings.append(f"{rid}:{'spoken_metrics_exhausted' if speakable else 'no_spoken_metric_source'}")
             seeds = ROUND_SENTENCE_SEEDS.get(rid, ())
             seed_index = _rotate_seed(seeds, code, as_of, rid)
             rounds.append({"id": rid, "purpose": purpose, "turn_budget": [2, 4], "lead": lead,

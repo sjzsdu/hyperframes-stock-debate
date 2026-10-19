@@ -601,6 +601,11 @@ class DialogueGenerator:
                               "character_name": self._character(speaker, speaker, "")["name"]})
         # 章节标记统一在这里打：此时轮数已经定死（超长台词的续轮、片尾两轮都在里面），
         # index 与 total 用的是同一个基准，末章判定在 0～N 次拆行下都成立。
+        # 按"成片实际有几句"分章、不按"模型逻辑上有几轮"，所以**同一句被拆成两段时
+        # 前后半段会落进相邻两章**——这是刻意的：观众听到的是句子，换图就是转场。
+        # 别把它"修"回跟随父轮，那条语义由
+        # SplitAwareChapterTests.test_a_split_line_may_land_in_two_adjacent_chapters_and_that_is_intended
+        # 守着：测试名写在这里，是让人删到它时先看到它在护什么。
         for position, turn in enumerate(turns, 1):
             entry = entries[position - 1] if position <= len(entries) else {}
             turn.update(self._turn_metadata(entry, position, episode_plan, total=total_turns))
