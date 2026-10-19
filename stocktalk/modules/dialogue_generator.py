@@ -12,6 +12,8 @@ from dataclasses import dataclass
 from datetime import date
 from typing import Any, Callable, Mapping, Sequence
 
+from stocktalk.modules.episode_planner import (NUMBER_CAP_ANALOGY,
+                                               NUMBER_CAP_ANCHOR)
 from stocktalk.modules.arcs import (Arc, ArcChoice, Beat, beats_by_key,
                                     resolve_speakers, select_arc)
 from stocktalk.modules.hyperframes_builder import short_business_label
@@ -65,6 +67,26 @@ STYLE_CLICHES = ("说白了", "总的来说", "值得注意的是", "不难发�
                  "我们先看", "接下来我们", "归根结底")
 STYLE_IDIOMS = ("一针见血", "锦上添花", "顺势而为", "乘风破浪", "稳中有进", "大有可为",
                 "水涨船高", "如火如荼", "不言而喻", "毋庸置疑")
+
+# 「照抄就变成新套话」的反例清单（2026-10-19 内容迭代）：句子 → 为什么会被念成套话、
+# 该往哪儿改。它和 episode_plan 的开法种子配成一对——种子给"照这个动作说话"，
+# 反例给"别照这个句式说话"，只讲原则模型读不出指的是什么。
+SENTENCE_BLACKLIST: tuple[tuple[str, str], ...] = (
+    ("你以为它卖 A，账上最重的其实是 B",
+     "每期同构反转，第三期就被观众预判；对单主业公司（八成四是一瓶酒）根本不成立，硬套就是假反转——只在 A≠B 确实成立时用"),
+    ("每 100 元收入里 X 元来自 A",
+     "固定成换算句式后每期出现两次就还是报数；换算只留给观众没尺度感的指标（费用率、净利率），收入占比直接说「八成四来自一瓶酒」"),
+    ("把一笔订单拆开：上游给它 A，它把 B 交付给 C",
+     "顾问腔，制造业和白酒会长得一模一样；必须出现具体的人（谁拉走、谁垫货、谁定价）和具体动作"),
+    ("这场争论不用猜，下一份 X 看 Y：如果 A…如果 B…",
+     "这是 2026-09-29 复盘点名的「看下一期」结语换了件马甲——只留变量和一句判断，不写「如果…如果…」"),
+    ("行，就拿交付量说话",
+     "它已经当过范例，模型会整期复用；范例每期必须换，且从当期分歧里长出来"),
+    ("它卡住的是 X 环节，客户换掉它要付 Y 代价",
+     "所有票都变成「卡脖子」叙事；消费品的真壁垒是场合和心智，套上去就假——护城河先分类型（成本/切换成本/心智/牌照），句式随类型换"),
+    ("故事讲得通，账上却有一笔不配合",
+     "它会变成 R4 的固定开场，第二期就是模板——R4 直接从数字对撞开口，不预告「我要查账」"),
+)
 
 # 成片时长目标 2-5 分钟（2026-09-20 用户反馈"内容太短、得不到有效启示"）。
 # 2026-09-22 用户反馈：轮次多一点、每人一次讲短一点——短交锋才有辩论的节奏，
@@ -224,7 +246,13 @@ class DialogueGenerator:
             "9. 数字必须写完整读法，禁止缩略：写「四亿五千一百万」不要写「四亿五一」，"
             "写「百分之八十二点七」不要写「八成二七」，写「十八点二九」不要写「十八二九」；"
             "缩略数字配音会念错，观众也听不懂。\n"
-            "10. 数字分三级执行：anchor 原值口播且绑定所以呢；analogy 只说确定换算后的白话并记录原指标；visual_only 只上屏不口播。全片最多6个核心数字、单轮最多2个，缺少 source_refs 的事实不得提及。\n"
+            "10. 数字分三级、按**解释单元**计数：一组同口径的对比（「毛利九成二、净利五成」）算 1 个，不是 2 个。"
+            "anchor 原值口播且必须绑定「所以呢」——念到数字就要讲清它意味着什么生意变化，"
+            "光报数字不给生意含义等于没讲；analogy 只说确定换算后的白话并记录原指标；"
+            "visual_only 只上屏、不要念出来。"
+            f"额度：全片 anchor ≤{NUMBER_CAP_ANCHOR} 个、analogy ≤{NUMBER_CAP_ANALOGY} 个、visual_only 不限；"
+            "**任意连续两轮不得都出现新数字**——一轮报数、下一轮讲它的生意含义。"
+            "缺少 source_refs 的事实不得提及。\n"
             + "\n" + self._arc_section(choice) + "\n"
             "\n反套话（重要）：每一期的开场都必须是新的。禁止把这些当开场套式——"
             "“咱们先看……”整个句式（不管宾语换成什么，2026-09-27 实锤：“咱们先看谁在给XX掏钱”只换了宾语、骨架照旧）、"
@@ -425,9 +453,9 @@ class DialogueGenerator:
         """把本期叙事统筹（episode_plan）写成给模型的五章地图。
 
         计划是**确定性**产出的（素材与数字额度都带 source_refs，不需要模型
-        去挑），模型要做的只是照着它把故事讲出来：哪一章讲哪条素材、哪些数字
-        能开口播、哪些只许上屏。这里不重复列素材明细——它们已经在数据 JSON
-        里；只给章节顺序与数字纪律，免得模型把五章讲成一条财务播报。
+        去挑），模型要做的只是照着它把故事讲出来：哪一章讲哪条素材、由谁领、
+        这一期用哪条开法、哪些数字能开口播、哪些只许上屏。这里不重复列素材明细——
+        它们已经在数据 JSON 里。
         """
         plan = payload.get("episode_plan")
         if not isinstance(plan, Mapping):
@@ -435,16 +463,46 @@ class DialogueGenerator:
         rounds = [r for r in (plan.get("rounds") or []) if isinstance(r, Mapping)]
         if not rounds:
             return ""
+        cap = ((plan.get("number_budget") or {}).get("cap") or {})
         lines = ["本期叙事统筹（按这个顺序讲，不要中途换题）："]
         for index, chapter in enumerate(rounds, 1):
-            budget = chapter.get("number_budget") or {}
-            lines.append(f"{index}. {chapter.get('id')}（{chapter.get('purpose') or ''}）："
-                         f"围绕 {chapter.get('must_cover') or ['本期素材']} 展开；"
-                         f"该章最多口播 {budget.get('spoken', 2)} 个数字。")
-        lines.append("anchor 数字按原值口播并讲清'所以呢'；analogy 只讲换算后的白话；"
-                     "visual_only 只上屏、不要念出来。没有 source_refs 的事实一律不讲。")
+            lead = str(chapter.get("lead") or "")
+            who = f"由{self._character(lead, lead, '')['name']}领讲" if lead else "谁说都行"
+            spoken = (chapter.get("number_budget") or {}).get("spoken", 2)
+            # 这里不再重复 must_cover：它恒等于 purpose，写两遍等于告诉模型这句要读两次。
+            lines.append(f"{index}. {chapter.get('id')}（{chapter.get('purpose') or ''}）：{who}；"
+                         f"本章最多口播 {spoken} 个解释单元。")
+            for seed in [s for s in (chapter.get("sentence_modes") or []) if isinstance(s, Mapping)]:
+                side = str(seed.get("speaker") or "")
+                opener = f"，建议由{self._character(side, side, '')['name']}起头" if side else ""
+                lines.append(f"   这一期的开法【{seed.get('mode') or ''}】{opener}：{seed.get('text') or ''}")
+        # 示范句里的公司名、产品名、数字都属于它诞生的那一期，不是可以照抄的内容。
+        lines.append("开法示范只借用它的**修辞动作**（反问/设问/场景代入/算账…），"
+                     "里面的公司名、产品名、数字一律换成这只票自己的素材与 source_refs 里的数；"
+                     "示范依赖的事实在这只票上不成立时（只有一块业务的公司就没有第二支柱），"
+                     "就换一个同类型的修辞动作，不要硬套。")
+        lines.append(f"数字纪律：按**解释单元**计数（一组同口径对比算 1 个，如「毛利九成二、净利五成」是 1 个）；"
+                     f"全片 anchor ≤{cap.get('anchor', 4)} 个、analogy ≤{cap.get('analogy', 4)} 个、"
+                     "visual_only 不限；**任意连续两轮不得都出现新数字**——一轮报数、下一轮讲它的生意含义。"
+                     "anchor 原值口播且必须绑定「所以呢」（念到数字就要讲清它意味什么生意变化）；"
+                     "analogy 只讲确定换算后的白话；visual_only 只上屏、不要念出来。"
+                     "没有 source_refs 的事实一律不讲。")
+        lines.append(self._blacklist_section())
         lines.append("每轮可用 round_id 标出它属于哪一章（只能取上面的 id）；不标则由程序按轮次顺序分配。")
         return "\n" + "\n".join(lines) + "\n"
+
+    def _blacklist_section(self) -> str:
+        """把「照抄就变成新套话」的句子写成反例段。
+
+        给原则（"不要播报腔"）没用，模型读不出它指的是什么；给反面样例才有约束力。
+        """
+        lines = ["下面这些句子是被上一轮内容迭代判死的，遇到同一处境也**不许照抄**，"
+                 "只看它为什么被判死："]
+        for sentence, reason in SENTENCE_BLACKLIST:
+            lines.append(f"· 「{sentence}」——{reason}")
+        lines.append("类比必须按**行业**生成：同一句「每 100 元收入有 X 元压在货上」讲制造业是资产效率，"
+                     "讲白酒就是错的（基酒越放越值钱，那是资产不是积压）。")
+        return "\n".join(lines)
 
     def _normalize_script(self, response: Any, stock_data: Mapping[str, Any],
                           choice: ArcChoice | None = None,

@@ -76,10 +76,20 @@ def test_review_page_shows_the_episode_plan(tmp_path: Path) -> None:
     plan = {
         "version": 1, "stock_code": "000811", "as_of": "2026-10-19",
         "story": {"angle": "温控方案收入占比抬升", "reveal_material_id": "mat.financial.0"},
-        "number_budget": {"used": 3},
-        "rounds": [{"id": "r1_hook", "purpose": "反差开门", "material_ids": ["mat.product.0"],
+        "number_budget": {"used": {"anchor": 2, "analogy": 1},
+                          "cap": {"anchor": 4, "analogy": 4}},
+        "rounds": [{"id": "r1_hook", "purpose": "反差开门", "lead": "bull",
+                    "material_ids": ["mat.product.0"],
+                    "number_budget": {"spoken": 1, "anchor": 1, "analogy": 0},
                     "visual": {"id": "vis.r1_hook", "template": "composition",
-                               "fallback": ["mindmap", "source_card"]}}],
+                               "fallback": ["mindmap", "source_card"]}},
+                   {"id": "r4_ledger_test", "purpose": "用账验证故事", "lead": "bear",
+                    "material_ids": ["mat.financial.0"],
+                    # 这一章一条也没取到：审查页必须把它标出来，而不是显示成 0
+                    "number_budget": {"spoken": 3, "anchor": 0, "analogy": 0},
+                    "no_spoken_metric": True,
+                    "visual": {"id": "vis.r4_ledger_test", "template": "profit_trend",
+                               "fallback": ["source_card"]}}],
         "rejected_materials": [{"id": "mat.subsidiary.missing", "reason": "缺少可靠结构化来源"}],
         "warnings": ["subsidiary:missing_source"],
     }
@@ -91,7 +101,11 @@ def test_review_page_shows_the_episode_plan(tmp_path: Path) -> None:
 
     assert "本期叙事统筹" in html
     assert "温控方案收入占比抬升" in html
-    assert "3 个（本期上场的口播数字）" in html
+    # 数字额度按 anchor/analogy 分级显示，不再是那个不生效的 total
+    assert "anchor 2 / 4" in html and "analogy 1 / 4" in html
+    # 领讲与每章的口播额度都在表上；取不到数字的那一章要被点名，不能长得跟正常一样
+    assert "bull" in html and "1 / 1" in html
+    assert "无数字可讲" in html and 'class="warn"' in html
     assert "mat.product.0" in html
     assert "composition" in html and "vis.r1_hook" in html
     assert "mindmap → source_card" in html
