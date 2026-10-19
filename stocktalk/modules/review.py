@@ -130,7 +130,9 @@ def render_review_html(*, tag: str, stock_name: str, stock_code: str, created_at
                        rewrites: Sequence[Mapping[str, str]] = (),
                        cta: Mapping[str, Any] | None = None,
                        arc_notes: Sequence[str] = (),
-                       message: str = "") -> str:
+                       message: str = "",
+                       episode_plan: Mapping[str, Any] | None = None) -> str:
+    """渲染审查页。``episode_plan`` 是"为什么讲这件事、为什么配这张图"的依据。"""
     return _environment().get_template("review.html.j2").render(
         tag=tag, video_tag=tag, stock_name=stock_name, stock_code=stock_code, created_at=created_at,
         turns=turns, duration=f"{duration:.0f}" if duration else "—",
@@ -139,6 +141,7 @@ def render_review_html(*, tag: str, stock_name: str, stock_code: str, created_at
         issues=list(issues), disclaimers=disclaimers,
         arc=dict(arc or {}), rewrites=list(rewrites), cta=dict(cta or {}),
         arc_notes=list(arc_notes), message=str(message or ""),
+        episode_plan=dict(episode_plan or {}),
     )
 
 
@@ -176,6 +179,9 @@ def write_review_page(output_dir: str | Path, tag: str, *, stock_name: str, stoc
         rewrites=[r for r in (script.get("compliance_rewrites") or ()) if isinstance(r, Mapping)],
         cta=cta,
         arc_notes=[str(note) for note in script.get("arc_notes", ()) or ()],
+        # 本期叙事统筹：五章各讲了什么、配哪张图、数字额度用了多少——「为什么
+        # 讲这件事、为什么配这张图」要能在成片旁边逐条核对，而不只是代码里的事。
+        episode_plan=script.get("episode_plan") if isinstance(script.get("episode_plan"), Mapping) else {},
         # 本期提示词（--message / dialogue.message）来自脚本本身，所以三条发布路径
         # （--publish-only / --republish 从 sidecar 读回剧本）都能照原样显示。
         message=str(script.get("message") or ""),

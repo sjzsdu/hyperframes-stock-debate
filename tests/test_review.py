@@ -71,6 +71,35 @@ def test_review_page_gathers_video_covers_copy_and_compliance(tmp_path: Path) ->
     assert "不构成投资建议" in html
 
 
+def test_review_page_shows_the_episode_plan(tmp_path: Path) -> None:
+    """「为什么讲这件事、为什么配这张图」必须能在审查页上逐条核对。"""
+    plan = {
+        "version": 1, "stock_code": "000811", "as_of": "2026-10-19",
+        "story": {"angle": "温控方案收入占比抬升", "reveal_material_id": "mat.financial.0"},
+        "number_budget": {"total": 6, "used": 3},
+        "rounds": [{"id": "r1_hook", "purpose": "反差开门", "material_ids": ["mat.product.0"],
+                    "visual": {"id": "vis.r1_hook", "template": "composition",
+                               "fallback": ["mindmap", "source_card"]}}],
+        "rejected_materials": [{"id": "mat.subsidiary.missing", "reason": "缺少可靠结构化来源"}],
+        "warnings": ["subsidiary:missing_source"],
+    }
+    path = write_review_page(
+        tmp_path, "z", stock_name="冰轮环境", stock_code="000811",
+        script={**SCRIPT, "episode_plan": plan}, video_path=tmp_path / "z.mp4",
+    )
+    html = path.read_text(encoding="utf-8")
+
+    assert "本期叙事统筹" in html
+    assert "温控方案收入占比抬升" in html
+    assert "3 / 6" in html
+    assert "mat.product.0" in html
+    assert "composition" in html and "vis.r1_hook" in html
+    assert "mindmap → source_card" in html
+    # 缺来源的素材要显式列出——跳过了什么，审查的人一眼看得到
+    assert "mat.subsidiary.missing" in html
+    assert "subsidiary:missing_source" in html
+
+
 def test_review_page_renders_without_covers_or_metadata(tmp_path: Path) -> None:
     """封面渲染失败（无 Chrome）时审查页仍要出——成片是主角。"""
     path = write_review_page(

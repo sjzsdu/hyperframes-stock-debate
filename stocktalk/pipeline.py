@@ -19,6 +19,7 @@ from rich.progress import BarColumn, Progress, SpinnerColumn, TextColumn, TimeEl
 from stocktalk.modules.compliance import ComplianceAgent
 from stocktalk.modules.cover import CoverGenerator
 from stocktalk.modules.dialogue_generator import DialogueGenerator
+from stocktalk.modules.episode_planner import EpisodePlanner
 from stocktalk.modules.hyperframes_builder import HyperFramesBuilder
 from stocktalk.modules.publisher import PLATFORM_LABELS, SauPublisher, cover_sizes_for
 from stocktalk.modules.review import write_review_page
@@ -68,6 +69,7 @@ class Pipeline:
             require_company_data=bool(self.config.get("stock_data", {}).get("require_company_data", True)),
         ))
         self.dialogue_gen = DialogueGenerator(self.config)
+        self.episode_planner = EpisodePlanner()
         self.compliance = ComplianceAgent(self.config)
         self.tts = TTSAgent(self.config)
         self.builder = HyperFramesBuilder(self.config)
@@ -291,7 +293,9 @@ class Pipeline:
             progress.advance(task)
 
             progress.update(task, description="Generating debate script (may take ~1 min)")
-            script = self._retry("Dialogue generation", lambda: self.dialogue_gen.generate(stock_data))
+            episode_plan = self.episode_planner.plan(stock_data)
+            script = self._retry("Dialogue generation", lambda: self.dialogue_gen.generate(stock_data, episode_plan))
+            script["episode_plan"] = episode_plan
             self._warn_if_over_budget(script)
             progress.advance(task)
 
@@ -357,6 +361,7 @@ class Pipeline:
 
             result = {"stock_code": stock_code, "stock_name": stock_data.get("quote", {}).get("name", stock_name or ""),
                       "tag": tag, "script": script, "approved_script": approved, "audio": audio,
+                      "episode_plan": episode_plan,
                       "srt": audio.get("srt_path"), "project_dir": str(project_dir),
                       "video_path": str(video_path) if video_path else None, "rendered": bool(video_path),
                       "platform_videos": platform_videos, "covers": cover_files,

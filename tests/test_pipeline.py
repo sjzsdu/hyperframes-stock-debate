@@ -121,6 +121,36 @@ def test_pipeline_stores_result_json(tmp_path: Path) -> None:
     assert data["srt"] == FAKE_AUDIO["srt_path"]
 
 
+def test_pipeline_passes_episode_plan_into_script_and_result(tmp_path: Path) -> None:
+    """统筹在取数之后、生成之前执行；计划要进脚本（渲染据此选图）与结果 JSON。"""
+    config = {"output": {"dir": str(tmp_path / "out3")}}
+    pipeline = Pipeline(config)
+    plan = {"version": 1, "rounds": [{"id": "r1_hook",
+                                      "visual": {"id": "vis.r1_hook", "template": "composition",
+                                                 "fallback": ["source_card"]}}]}
+    seen: dict[str, Any] = {}
+
+    def fake_generate(stock_data: Mapping[str, Any], episode_plan: Mapping[str, Any] | None = None) -> dict[str, Any]:
+        seen["plan"] = episode_plan
+        return {**FAKE_SCRIPT, "episode_plan": episode_plan}
+
+    pipeline.stock_client.get_stock_data = MagicMock(return_value=FAKE_STOCK_DATA)
+    pipeline.episode_planner.plan = MagicMock(return_value=plan)
+    pipeline.dialogue_gen.generate = MagicMock(side_effect=fake_generate)
+    pipeline.compliance.review = MagicMock(side_effect=lambda script: script)
+    pipeline.tts.synthesize = MagicMock(return_value=FAKE_AUDIO)
+    pipeline.builder.build = MagicMock(return_value={})
+
+    result = pipeline.run("000001", render=False)
+
+    pipeline.episode_planner.plan.assert_called_once_with(FAKE_STOCK_DATA)
+    assert seen["plan"] == plan
+    assert result["episode_plan"] == plan
+    assert result["script"]["episode_plan"] == plan
+    data = json.loads(next((tmp_path / "out3").glob("*.json")).read_text(encoding="utf-8"))
+    assert data["episode_plan"]["rounds"][0]["visual"]["template"] == "composition"
+
+
 def test_pipeline_tts_failure_falls_back_to_silent_subtitles(tmp_path: Path) -> None:
     # 2026-10-06 起，静音兜底必须显式 opt-in（tts.allow_silent_fallback: true）；
     # 兜底时错误会记进 audio.tts_error。

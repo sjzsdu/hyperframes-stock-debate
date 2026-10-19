@@ -96,6 +96,39 @@
   </div>
   {% endif %}
 
+  {% if episode_plan and episode_plan.rounds %}
+  <h2>本期叙事统筹（讲了什么、配了哪张图）</h2>
+  <div class="row">
+    <div class="panel" style="flex: 2 1 0;">
+      <h3>选题与数字额度</h3>
+      <div><span class="k">主线</span>{{ episode_plan.story.angle or "—" }}</div>
+      <div><span class="k">底牌素材</span>{{ episode_plan.story.reveal_material_id or "—" }}</div>
+      <div><span class="k">数字额度</span>{{ episode_plan.number_budget.used or 0 }} / {{ episode_plan.number_budget.total or 0 }}（口播的核心数字）</div>
+      {% if episode_plan.warnings %}
+      <div><span class="k">缺来源</span>{{ episode_plan.warnings|join('、') }}（已跳过，未补猜）</div>
+      {% endif %}
+      {% if episode_plan.rejected_materials %}
+      <div><span class="k">已拒绝</span>{% for item in episode_plan.rejected_materials %}{{ item.id }}（{{ item.reason }}）{% if not loop.last %}、{% endif %}{% endfor %}</div>
+      {% endif %}
+    </div>
+    <div class="panel" style="flex: 3 1 0;">
+      <h3>五章与图板</h3>
+      <table>
+        <tr><th>章节</th><th>目的</th><th>素材</th><th>图板</th><th>后退</th></tr>
+        {% for chapter in episode_plan.rounds %}
+        <tr>
+          <td>{{ chapter.id }}</td>
+          <td>{{ chapter.purpose }}</td>
+          <td>{{ chapter.material_ids|join('、') or "—" }}</td>
+          <td class="ratio">{{ chapter.visual.template }}{% if chapter.visual.id %}<br><span class="tagline">{{ chapter.visual.id }}</span>{% endif %}</td>
+          <td>{{ chapter.visual.fallback|join(' → ') }}</td>
+        </tr>
+        {% endfor %}
+      </table>
+    </div>
+  </div>
+  {% endif %}
+
   {% if arc or cta.hook or cta.question or cta.bull or cta.bear or arc_notes or message %}
   <h2>本期结构与互动</h2>
   <div class="row">
