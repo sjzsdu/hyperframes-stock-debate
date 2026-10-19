@@ -10,11 +10,16 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+from datetime import date, timedelta
 from typing import Any
+from unittest import mock
 
-from stocktalk.modules.dialogue_generator import DialogueGenerator
-from stocktalk.modules.episode_planner import (ROUND_DEFS, EpisodePlanner,
-                                               MaterialExtractor)
+from stocktalk.modules import episode_planner
+from stocktalk.modules.dialogue_generator import (SENTENCE_BLACKLIST,
+                                                  DialogueGenerator)
+from stocktalk.modules.episode_planner import (ROUND_DEFS, ROUND_SENTENCE_SEEDS,
+                                               EpisodePlanner, MaterialExtractor,
+                                               _rotate_seed)
 from stocktalk.modules.hyperframes_builder import HyperFramesBuilder
 
 # 所有可能出现在计划里的模板名（现有 12 类渲染器 + 中性来源卡 + 阶段 B 的六张新图）。
@@ -83,15 +88,26 @@ class EpisodePlannerTests(unittest.TestCase):
             self.assertEqual(visual["fallback"][-1], "source_card")
             self.assertNotIn("kline", visual["fallback"])
 
-    def test_number_budget_counts_real_spoken_metrics(self) -> None:
-        """used 是实际上场的 anchor+analogy 数，不是写死的 0。"""
+    def test_number_budget_counts_real_spoken_metrics_against_the_caps(self) -> None:
+        """used 按 anchor/analogy 分级计数，cap 是新口径的分级上限（不再有 total）。"""
         plan = EpisodePlanner().plan(STOCK_DATA)
-        expected = sum(len(r["anchor_metric_ids"]) + len(r["analogy_metric_ids"])
-                       for r in plan["rounds"])
-        self.assertGreater(expected, 0)
-        self.assertEqual(plan["number_budget"]["used"], expected)
-        # 全片上限只在 prompt 的数字纪律里：计划里再躺一个不生效的 total 会让人误判
+        expected_anchor = sum(len(r["anchor_metric_ids"]) for r in plan["rounds"])
+        expected_analogy = sum(len(r["analogy_metric_ids"]) for r in plan["rounds"])
+        self.assertGreater(expected_anchor + expected_analogy, 0)
+        self.assertEqual(plan["number_budget"]["used"]["anchor"], expected_anchor)
+        self.assertEqual(plan["number_budget"]["used"]["analogy"], expected_analogy)
+        self.assertEqual(plan["number_budget"]["cap"], {"anchor": 4, "analogy": 4})
         self.assertNotIn("total", plan["number_budget"])
+        self.assertLessEqual(plan["number_budget"]["used"]["anchor"], 4)
+        self.assertLessEqual(plan["number_budget"]["used"]["analogy"], 4)
+
+    def test_spoken_budget_allows_three_units_in_the_ledger_chapter(self) -> None:
+        """R4 是全片揭底，允许 3 个解释单元；其余章节 1-2 个。"""
+        spoken = {r["id"]: r["number_budget"]["spoken"]
+                  for r in EpisodePlanner().plan(STOCK_DATA)["rounds"]}
+        self.assertEqual(spoken["r4_ledger_test"], 3)
+        self.assertEqual(spoken, {"r1_hook": 1, "r2_mechanism": 1, "r3_moat_pressure": 2,
+                                  "r4_ledger_test": 3, "r5_open_verdict": 1})
 
     def test_spoken_metric_is_never_shared_between_chapters(self) -> None:
         """同一条指标不许在两章各念一遍、额度计两次。
@@ -115,7 +131,28 @@ class EpisodePlannerTests(unittest.TestCase):
                         if m["id"] == "mat.product.0")
         policies = {m["label"]: m["spoken_policy"] for m in material["metrics"]}
         self.assertEqual(policies["收入占比"], "anchor")
-        self.assertEqual(policies["毛利率"], "analogy")
+        self.assertEqual(policies["产品线毛利率"], "analogy")
+        self.assertNotIn("毛利率", policies)
+
+    def test_the_two_gross_margin_policies_stay_distinct(self) -> None:
+        """产品线毛利率可念（analogy），公司级销售毛利率只上屏（visual_only）。
+
+        两条口径同片共存（600519 实测 92.28% vs 91.93%），标签必须字面就分得开，
+        否则模型会顺手把公司级那条念出来。
+        """
+        materials = MaterialExtractor().extract(STOCK_DATA)
+        labeled = {(str(m["id"]), str(x["label"])): x["spoken_policy"]
+                   for m in materials for x in (m.get("metrics") or [])}
+        product = [(key, policy) for key, policy in labeled.items()
+                   if key[0] == "mat.product.0" and "毛利率" in key[1]]
+        ledger = [(key, policy) for key, policy in labeled.items()
+                  if key[0] == "mat.financial.0" and "毛利率" in key[1]]
+        self.assertTrue(product and ledger, labeled)
+        # 没有一条同名的指标：标签各不相同，模型不会认错口径
+        labels = [key[1] for key, _ in product + ledger]
+        self.assertEqual(len(set(labels)), len(labels), labels)
+        self.assertEqual({policy for _, policy in product}, {"analogy"})
+        self.assertEqual({policy for _, policy in ledger}, {"visual_only"})
 
     def test_material_metrics_are_source_backed_and_missing_stays_rejected(self) -> None:
         materials = MaterialExtractor().extract(STOCK_DATA)
@@ -185,6 +222,211 @@ class TurnMetadataTests(unittest.TestCase):
         self.assertEqual(meta["visual_id"], "vis.r3_moat_pressure")
 
 
+class FrozenDate(date):
+    """把 ``date.today()`` 钉在 ``FIXED`` 上——``plan()`` 里 ``as_of`` 的唯一来源。
+
+    用它 patch 掉 ``episode_planner.date``，就不必改 ``plan()`` 签名也能验接线：
+    日期变了种子组必须跟着变。
+    """
+
+    FIXED = date(2026, 10, 1)
+
+    @classmethod
+    def today(cls) -> "FrozenDate":
+        return cls(cls.FIXED.year, cls.FIXED.month, cls.FIXED.day)
+
+
+class SentenceModeTests(unittest.TestCase):
+    """每章这一期的开法种子：每章一条、按 (code, date) 稳定轮换。"""
+
+    def test_plan_ships_exactly_one_seed_per_chapter(self) -> None:
+        """15 条一次全塞给模型等于没结构化：每章只见自己那一章的这一条。"""
+        plan = EpisodePlanner().plan(STOCK_DATA)
+        shipped = [c["sentence_modes"] for c in plan["rounds"]]
+        self.assertEqual([len(s) for s in shipped], [1] * 5, shipped)
+        for modes in shipped:
+            seed = modes[0]
+            self.assertIn(seed["speaker"], ("bull", "bear"))
+            self.assertTrue(seed["mode"] and seed["text"])
+
+    def test_rotation_is_deterministic_and_moves_with_the_date(self) -> None:
+        """同一 (code, date) 两次规划同组；换一天要换组，不然每期开法都一样。"""
+        first = [c["sentence_modes"][0]["id"]
+                 for c in EpisodePlanner().plan(STOCK_DATA)["rounds"]]
+        again = [c["sentence_modes"][0]["id"]
+                 for c in EpisodePlanner().plan(STOCK_DATA)["rounds"]]
+        self.assertEqual(first, again)
+        by_day = {}
+        for offset in range(1, 15):
+            day = (date(2026, 10, 1) + timedelta(days=offset)).isoformat()
+            by_day[day] = tuple(_rotate_seed(ROUND_SENTENCE_SEEDS[rid], "600519", day, rid)
+                                for rid, *_ in ROUND_DEFS)
+        # 两周里至少出现两组不同组合；同一天同一票必然复现同一组
+        self.assertGreater(len(set(by_day.values())), 1, by_day)
+        self.assertEqual(by_day["2026-10-02"],
+                         tuple(_rotate_seed(ROUND_SENTENCE_SEEDS[rid], "600519", "2026-10-02", rid)
+                               for rid, *_ in ROUND_DEFS))
+        # 两周里三条种子都要轮到：否则第三条就是死内容
+        used_indices = {index for combo in by_day.values() for index in combo}
+        self.assertEqual(used_indices, {0, 1, 2}, by_day)
+
+    def test_plan_feeds_today_into_the_seed_rotation(self) -> None:
+        """``plan()`` 必须把今天（``as_of``）接进轮换：同一天同组，换一天换组。
+
+        上一条是直接调 ``_rotate_seed`` 传显式日期，验的是 ``_rotate_seed`` 的性质
+        不是 ``plan()`` 的接线——``as_of`` 改成常量它照样绿。这条走 ``plan()``，
+        把 ``episode_planner.py`` 里 ``as_of`` 那行改成常量，这条必须红。
+        """
+
+        def plan_on(day: date) -> dict[str, Any]:
+            FrozenDate.FIXED = day
+            return EpisodePlanner().plan(STOCK_DATA)
+
+        day_one, day_two = date(2026, 10, 1), date(2026, 10, 2)
+        with mock.patch.object(episode_planner, "date", FrozenDate):
+            first, again, moved = plan_on(day_one), plan_on(day_one), plan_on(day_two)
+            # as_of 必须是冻结的今天：它同时是种子轮换的输入
+            self.assertEqual(first["as_of"], day_one.isoformat())
+            self.assertEqual(again["as_of"], day_one.isoformat())
+            self.assertEqual(moved["as_of"], day_two.isoformat())
+        groups = [[chapter["sentence_modes"][0]["id"] for chapter in plan["rounds"]]
+                  for plan in (first, again, moved)]
+        self.assertEqual(groups[0], groups[1], groups[0])          # 同一天可复现
+        self.assertNotEqual(groups[0], groups[2], (groups[0], groups[2]))
+
+
+class EmptyPoolWarningTests(unittest.TestCase):
+    """某章 anchor 和 analogy 都取不到时必须留下痕迹，不能静默退化。"""
+
+    THIN_DATA: dict[str, Any] = {
+        "code": "000000",
+        "quote": {"code": "000000", "name": "薄数据"},
+        "f10": {"profile": {"主营构成": {"报告期": "2026-06-30", "明细": [
+            {"项目": "只有一块业务", "收入占比(%)": "100.00"}]}}},
+    }
+
+    def test_chapter_without_spoken_metric_is_recorded(self) -> None:
+        """薄样本（连 mat.event.0 都没有）：非末章全都要照报，末章豁免不覆盖它们。
+
+        豁免只写在 ROUND_NUMBER_POLICY 为空的末章上；前面的章再薄也得报。
+        """
+        plan = EpisodePlanner().plan(self.THIN_DATA)
+        self.assertNotIn("mat.event.0", plan["selected_material_ids"])
+        self.assertIn("r3_moat_pressure:spoken_metrics_exhausted", plan["warnings"])
+        self.assertIn("r4_ledger_test:spoken_metrics_exhausted", plan["warnings"])
+        # 末章本来就没有口播额度的预期，不该把它也算成"退化"
+        self.assertNotIn("r5_open_verdict:spoken_metrics_exhausted", plan["warnings"])
+        self.assertNotIn("r5_open_verdict:no_spoken_metric_source", plan["warnings"])
+        reported = {w.split(":")[0] for w in plan["warnings"]}
+        for chapter in plan["rounds"]:
+            expected = bool((chapter["anchor_metric_ids"] or chapter["analogy_metric_ids"])
+                            or chapter["id"] == "r5_open_verdict")
+            self.assertIs(chapter["no_spoken_metric"], not expected, chapter["id"])
+            # 非末章取不到就一定在告警里——豁免不能往前扩
+            if chapter["no_spoken_metric"]:
+                self.assertNotEqual(chapter["id"], "r5_open_verdict")
+                self.assertIn(chapter["id"], reported)
+
+    def test_full_data_plans_without_emptiness_warnings(self) -> None:
+        """数据齐的时候不该出现告警——否则它就是噪音，没人会看。"""
+        plan = EpisodePlanner().plan(STOCK_DATA)
+        self.assertNotIn("r3_moat_pressure:spoken_metrics_exhausted", plan["warnings"])
+        self.assertNotIn("r4_ledger_test:spoken_metrics_exhausted", plan["warnings"])
+
+    def test_no_spoken_metric_source_is_distinguished_from_exhausted(self) -> None:
+        """素材本身没有可念的指标 vs 被前面的章节取完：两种告警原因不同。"""
+        no_metric = {"code": "000001", "quote": {"code": "000001"},
+                     "f10": {"profile": {"行业地位": {"研究行业": "元器件"}}}}
+        plan = EpisodePlanner().plan(no_metric)
+        self.assertIn("r1_hook:no_spoken_metric_source", plan["warnings"])
+
+    def test_visual_only_metrics_do_not_count_as_speakable(self) -> None:
+        """素材里只有 visual_only 指标时必须报"没得讲"，不能报"被取完了"。
+
+        告警文案决定别人是去补素材还是去调章节分配，指反了这条告警就白记了。
+        """
+        ledger_only_margin = {
+            "code": "000002", "quote": {"code": "000002", "name": "只有上屏毛利率"},
+            "f10": {"profile": {"财务历史": {"年度": {"报告期": ["2025-12-31"],
+                                                     "指标": {"销售毛利率(%)": [91.93]}}}}},
+        }
+        plan = EpisodePlanner().plan(ledger_only_margin)
+        # 财务素材有指标、但没有一条能念：这是"素材没给"，不是"被取完"
+        self.assertIn("r4_ledger_test:no_spoken_metric_source", plan["warnings"])
+        self.assertNotIn("r4_ledger_test:spoken_metrics_exhausted", plan["warnings"])
+        ledger = next(m for m in plan["materials"] if m["id"] == "mat.financial.0")
+        policies = {str(x["spoken_policy"]) for x in ledger["metrics"]}
+        self.assertEqual(policies, {"visual_only"}, policies)
+
+
+class EpisodePromptTests(unittest.TestCase):
+    """计划下发到 prompt 的那一层：who 领讲、开法种子、数字纪律、反例都要看得见。"""
+
+    def _section(self, stock_data: dict[str, Any] | None = None) -> tuple[str, dict[str, Any]]:
+        gen = DialogueGenerator({"characters": {"bull": {"name": "新手"}, "bear": {"name": "老手"}}},
+                                llm=object())
+        plan = EpisodePlanner().plan(stock_data or STOCK_DATA)
+        return gen._episode_section({"episode_plan": plan}), plan
+
+    def test_lead_reaches_the_prompt(self) -> None:
+        section, _ = self._section()
+        # 章对象的 lead 存在 JSON 里还不够——模型看不到 json 就必须猜谁先说
+        self.assertIn("由新手领讲", section)     # r1/r2 lead=bull
+        self.assertIn("由老手领讲", section)     # r3/r4 lead=bear
+        self.assertIn("领讲", section)
+
+    def test_sentence_modes_seed_reaches_the_prompt(self) -> None:
+        section, plan = self._section()
+        shipped = {c["sentence_modes"][0]["text"] for c in plan["rounds"]}
+        for chapter in plan["rounds"]:
+            seed = chapter["sentence_modes"][0]
+            self.assertIn(seed["mode"], section)
+            self.assertIn(seed["text"], section)
+        # 其余 10 条不许跟着一起下去：每章只见自己那一章的这一条
+        all_texts = {text for rid in ROUND_SENTENCE_SEEDS
+                     for _side, _mode, text in ROUND_SENTENCE_SEEDS[rid]}
+        self.assertEqual(len(all_texts), 15)
+        for text in all_texts - shipped:
+            self.assertNotIn(text, section)
+
+    def test_purpose_is_not_repeated_as_must_cover(self) -> None:
+        section, plan = self._section()
+        # must_cover 恒等于 purpose，写两遍等于让同一句话在章节行里出现两次
+        for chapter in plan["rounds"]:
+            self.assertNotIn("must_cover", chapter)
+            self.assertEqual(section.count(chapter["purpose"]), 1, chapter["id"])
+
+    def test_seed_replacement_constraint_is_in_the_rendered_prompt(self) -> None:
+        """示范句必须换成这只票自己的东西——这条约束要靠测试锁，不能只在描述里写着。
+
+        15 条种子是拿 600519 写的（实体与数字都是那一期的），是否留存 JSON 里没关系，
+        模型读的是 prompt：替换要求一旦被删掉，别的票就会念出茅台的句子。
+        删掉 `_episode_section` 里那四行，这条必须红。
+        """
+        section, _ = self._section()
+        self.assertIn("换成这只票自己的素材与 source_refs 里的数", section)
+        self.assertIn("修辞动作", section)
+        self.assertIn("不要硬套", section)
+
+    def test_number_discipline_follows_the_agreed_units(self) -> None:
+        section, _ = self._section()
+        self.assertIn("解释单元", section)
+        self.assertIn("anchor ≤4", section)
+        self.assertIn("analogy ≤4", section)
+        self.assertIn("visual_only 不限", section)
+        self.assertIn("任意连续两轮不得都出现新数字", section)
+        # 作废的旧口径不许还在
+        self.assertNotIn("全片最多6个核心数字", section)
+
+    def test_blacklist_ships_as_counter_examples_with_reasons(self) -> None:
+        section, _ = self._section()
+        for sentence, reason in SENTENCE_BLACKLIST:
+            self.assertIn(sentence, section)
+            self.assertIn(reason, section)
+        # 行业性错误那条也要跟着一起下去：类比必须按行业生成
+        self.assertIn("基酒", section)
+
+
 class SplitAwareChapterTests(unittest.TestCase):
     """章节分配必须走 ``_normalize_script`` 的真实拆行路径。
 
@@ -223,6 +465,23 @@ class SplitAwareChapterTests(unittest.TestCase):
                                                                  "r4_ledger_test"].index(rid)),
                              (long_count, order))
             self.assertEqual(set(order), {rid for rid, *_ in ROUND_DEFS}, (long_count, order))
+
+    def test_a_split_line_may_land_in_two_adjacent_chapters_and_that_is_intended(self) -> None:
+        """同一句被拆成两段、前后半段分到相邻两章是**期望行为**，不是 bug。
+
+        分章按"成片实际有几句"，不按"模型逻辑上有几轮"——观众听到的是句子。
+        这句被钉在这里，是因为它看起来像错，下一轮很容易被顺手"修"回跟随父轮。
+        """
+        turns = self._turns(5)
+        order = [turn["round_id"] for turn in turns[:-2]]
+        rounds = [rid for rid, *_ in ROUND_DEFS]
+        # 相邻一定是相邻章节（不跳章），且次序不回退
+        for previous, current in zip(order, order[1:]):
+            self.assertLessEqual(rounds.index(previous), rounds.index(current), order)
+            self.assertLessEqual(rounds.index(current) - rounds.index(previous), 1, order)
+        # 五句长句时至少有一次真的跨到了下一章（把上面的语义落到具体数据上）
+        self.assertTrue(any(rounds.index(current) - rounds.index(previous) == 1
+                            for previous, current in zip(order, order[1:])), order)
 
 
 class PlanDrivesChartTests(unittest.TestCase):

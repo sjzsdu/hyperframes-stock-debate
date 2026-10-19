@@ -14,8 +14,9 @@
 """
 from __future__ import annotations
 
+import hashlib
 from datetime import date
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 
 from stocktalk.modules.story_spotter import spot_stories
 
@@ -68,6 +69,56 @@ ROUND_NUMBER_POLICY: dict[str, tuple[str, ...]] = {
     "r5_open_verdict": (),
 }
 
+# 章 → 本章最多口播几个「解释单元」（一组同口径的对比算 1 个）。
+# 口径取自 product 05:57 那版：条数不是病因，"连续两句报数"和"数字后面没有生意
+# 含义"才是。R4 是全片的揭底，允许 3 个；其余章节只给 1-2 个。
+ROUND_SPOKEN_BUDGET: dict[str, int] = {
+    "r1_hook": 1,
+    "r2_mechanism": 1,
+    "r3_moat_pressure": 2,
+    "r4_ledger_test": 3,
+    "r5_open_verdict": 1,
+}
+
+# 全片分级额度上限：anchor/analogy 各 ≤4，visual_only 不限（上屏表格可以密，
+# 观众自己看得懂）。这两个常量同时是计划里 cap 与 prompt 第 10 条的**唯一来源**
+# ——两处各写一遍等于给下一次口径漂移留口子（A 批的 NUMBER_BUDGET_TOTAL 就是教训）。
+NUMBER_CAP_ANCHOR = 4
+NUMBER_CAP_ANALOGY = 4
+
+# 章 → 台词开法种子（多方/空方、修辞动作、示范句）。每条示范句里的公司名、产品名
+# 与数字都是**那一期**的说法，只借用它的修辞动作，不是可以照抄的内容——下发时
+# prompt 里会明说这一点。
+ROUND_SENTENCE_SEEDS: dict[str, tuple[tuple[str, str, str], ...]] = {
+    "r1_hook": (("bull", "事实反差", "一千四百多亿的营收，八成四来自同一瓶酒。"),
+                ("bear", "反向设问", "如果明天这桌饭不喝它了，这家公司还剩下什么？"),
+                ("bull", "场景代入", "先想一个画面：一桌饭，主位旁边那个红盒子——它为什么总在那儿？")),
+    "r2_mechanism": (("bull", "链路拆解", "一瓶酒出厂以后要过三道手：经销商、批价、终端。每过一道，价格和风险就换个人扛。"),
+                     ("bear", "追问", "四成三自己卖，那经销商还剩下什么用？"),
+                     ("bull", "算账", "同一瓶酒，自己卖和给经销商卖，差的不是价格，是谁替它垫钱、谁替它压货。")),
+    "r3_moat_pressure": (("bear", "替代场景", "能替掉它的不是别的酒，是“这顿饭不喝了”。"),
+                         ("bull", "反向守", "请客不会消失，只会换地方：商务少了，宴席还在。"),
+                         ("bear", "压力测试", "假设批价跌两成，经销商还会不会替它囤货？")),
+    "r4_ledger_test": (("bear", "数字对撞", "毛利九成二，净利五成——中间那四成，谁拿走了？"),
+                       ("bull", "反向解释", "被税拿走的那部分，是它替所有想进场的人先交的门票。"),
+                       ("bear", "一句话钉", "毛利率是过去的价格权，净利率才是今天的成本权。")),
+    "r5_open_verdict": (("bull", "只给变量", "下一份年报只盯一个数：直销占比。"),
+                        ("bear", "给阈值", "四成三是条线。掉下去，说明它自己卖不动了。"),
+                        ("bull", "短收", "行，等这个数。")),
+}
+
+
+def _rotate_seed(seeds: Sequence[tuple[str, str, str]], code: str, day: str, rid: str) -> int:
+    """按 ``(code, day, rid)`` 稳定选出本章这一期的种子下标。
+
+    同一只票同一天两次规划必须拿到同一组（可复现），换一天要换一组（不撞选题节奏），
+    且每章**只发一条**——15 条一次全塞给模型等于没给，模型只会抄最近的几条。
+    """
+    if not seeds:
+        return -1
+    digest = hashlib.sha256(f"{code}|{day}|{rid}".encode("utf-8")).hexdigest()
+    return int(digest, 16) % len(seeds)
+
 
 def _ref(path: str, as_of: str | None = None) -> list[dict[str, str]]:
     """一条来源引用。``as_of`` 缺省今天——F10 报告期缺失时宁可标今天也不空着。"""
@@ -113,8 +164,10 @@ class MaterialExtractor:
             # 口径与画面上的收入构成图一致：`收入占比(%)`/`毛利率(%)` 是 F10 原文字段。
             # 毛利率走 analogy：它是"每 100 元收入有 X 元是毛利"这种确定换算，
             # 只上屏不口播的话，R2「生意怎么转」就讲不出哪块最赚钱。
+            # 标签必须和财务素材的公司级口径**字面就要分得开**：两条都叫「毛利率」时，
+            # 模型会顺手把公司级的那条（visual_only）念出来。
             for key, label, unit, policy in (("收入占比(%)", "收入占比", "%", "anchor"),
-                                             ("毛利率(%)", "毛利率", "%", "analogy")):
+                                             ("毛利率(%)", "产品线毛利率", "%", "analogy")):
                 value = _number(row.get(key))
                 if value is None:
                     continue
@@ -149,9 +202,12 @@ class MaterialExtractor:
         annual = history.get("年度") if isinstance(history.get("年度"), Mapping) else {}
         metric_map = annual.get("指标") if isinstance(annual.get("指标"), Mapping) else {}
         periods = [str(p) for p in (annual.get("报告期") or []) if str(p)]
+        # 财务证据里的 `销售毛利率(%)` 是**公司级**口径，与产品线的「产品线毛利率」
+        # 属于两件事，且它是 visual_only——只上屏、不许口播（它就是最容易被顺手
+        # 念出来的那类数字）。
         wanted = (("归母净利润(亿元)", "归母净利润", "亿元", "anchor"),
                   ("经营活动现金流量净额(亿元)", "经营现金流", "亿元", "anchor"),
-                  ("销售毛利率(%)", "毛利率", "%", "visual_only"))
+                  ("销售毛利率(%)", "公司销售毛利率", "%", "visual_only"))
         metrics = []
         for key, label, unit, policy in wanted:
             values = metric_map.get(key)
@@ -207,10 +263,13 @@ class EpisodePlanner:
         by_id = {str(m["id"]): m for m in available}
 
         rounds: list[dict[str, Any]] = []
-        used = 0
+        warnings: list[str] = []
         # 同一条指标全片只上场一次：章节之间各取 anchors[:1] 会取到同一条，
         # 同一个数字念两遍、额度计两次（R1/R2 共用产品素材的「收入占比」就是这么撞的）。
         claimed: set[str] = set()
+        anchor_used = analogy_used = 0
+        code = str(stock_data.get("code") or (stock_data.get("quote") or {}).get("code") or "")
+        as_of = date.today().isoformat()
         for rid, purpose, lead, category in ROUND_DEFS:
             material_id = ROUND_MATERIALS.get(category)
             if material_id not in by_id:
@@ -234,38 +293,68 @@ class EpisodePlanner:
                 (take_anchors if policy == "anchor" else take_analogies).extend(picked)
                 claimed.update(picked)
                 break
-            used += len(take_anchors) + len(take_analogies)
+            anchor_used += len(take_anchors)
+            analogy_used += len(take_analogies)
+            # 这一章一条能念的指标都没捞到时，审查页上必须看得出来：静默退化长得
+            # 跟"这章本来就没数字"一模一样，等于悄悄少讲一层，事后查不出来。
+            # 判空只能拿**能念的**指标算：素材里躺着一堆 visual_only 不等于有数字
+            # 可讲（财务素材常常只有一条 visual_only 的毛利率）。判错了就把告警
+            # 指向反的方向——该去补素材的人跑去调章节分配。
+            speakable = [m for m in metrics if m.get("spoken_policy") in ("anchor", "analogy")]
+            # 末章豁免：ROUND_NUMBER_POLICY 里 r5_open_verdict 是空的，它本来就不要求
+            # 新数字这一层。只豁免"末章无新数字"这一种退化，**不覆盖前面的章**——
+            # 同一份薄样本里 R3/R4 必须照报（见
+            # EmptyPoolWarningTests.test_chapter_without_spoken_metric_is_recorded）。
+            empty_pool = not (take_anchors or take_analogies) and bool(ROUND_NUMBER_POLICY.get(rid))
+            if empty_pool:
+                # 分两种：素材压根没有可念的指标，还是可念的指标被前面的章节取完了——
+                # 前者要补素材，后者要调章节分配，处理办法不一样。
+                warnings.append(f"{rid}:{'spoken_metrics_exhausted' if speakable else 'no_spoken_metric_source'}")
+            seeds = ROUND_SENTENCE_SEEDS.get(rid, ())
+            seed_index = _rotate_seed(seeds, code, as_of, rid)
             rounds.append({"id": rid, "purpose": purpose, "turn_budget": [2, 4], "lead": lead,
                            "material_ids": mids,
-                           "must_cover": [purpose],
-                           # 单章口播额度（设计定稿：单章 ≤2 个核心数字）。
-                           "number_budget": {"spoken": 2, "anchor": len(take_anchors),
+                           # 单章口播额度：按「解释单元」计（一组同口径对比算 1 个），
+                           # R4 是全片揭底，允许 3 个。
+                           "number_budget": {"spoken": ROUND_SPOKEN_BUDGET.get(rid, 2),
+                                             "anchor": len(take_anchors),
                                              "analogy": len(take_analogies)},
+                           # 这章该讲数字但一条都没取到（审查页据此标红）
+                           "no_spoken_metric": empty_pool,
                            "anchor_metric_ids": take_anchors,
                            "analogy_metric_ids": take_analogies,
                            "visual": {"id": f"vis.{rid}",
                                       "template": ROUND_TEMPLATES[rid],
                                       "data_binding": {"material_ids": mids},
                                       "fallback": list(ROUND_FALLBACKS[rid])},
-                           "sentence_modes": [], "transition": ""})
+                           # 本章这一期要用的那条开法种子（每章一条，不把 15 条全塞给模型）。
+                           "sentence_modes": ([{"id": f"{rid}.seed{seed_index + 1}",
+                                                "speaker": seeds[seed_index][0],
+                                                "mode": seeds[seed_index][1],
+                                                "text": seeds[seed_index][2]}]
+                                              if seed_index >= 0 else []),
+                           "transition": ""})
 
         missing = [m for m in materials if m.get("availability") == "missing"]
+        quote = stock_data.get("quote") if isinstance(stock_data.get("quote"), Mapping) else {}
         return {
             "version": 1,
-            "stock_code": str(stock_data.get("code") or (stock_data.get("quote") or {}).get("code") or ""),
-            "as_of": date.today().isoformat(),
+            "stock_code": str(stock_data.get("code") or quote.get("code") or ""),
+            "as_of": as_of,
             "materials": materials,
             "story_candidates": stories,
             "story": {"angle": stories[0]["headline"] if stories else "公开资料中的业务结构",
                       "thesis": "看多一方要证明业务链条成立",
                       "counter_thesis": "看空一方要验证压力是否会反噬",
                       "reveal_material_id": "mat.financial.0" if "mat.financial.0" in selected else None},
-            # used 是实际上场的 anchor+analogy 数，不是写死的 0：数字纪律要能核对。
-            # 这里没有全片上限——上限只由 prompt 的数字纪律给出，计划里再放一个
-            # 对不上的 total 反而让人误判它是生效的口径。
-            "number_budget": {"used": used},
+            # used 是实际上场的 anchor/analogy 数，不是写死的 0：数字纪律要能核对。
+            # cap 与 prompt 第 10 条同源（NUMBER_CAP_*），两处不会再各说一套。
+            "number_budget": {"used": {"anchor": anchor_used, "analogy": analogy_used},
+                              "cap": {"anchor": NUMBER_CAP_ANCHOR, "analogy": NUMBER_CAP_ANALOGY}},
             "selected_material_ids": selected,
             "rounds": rounds,
             "rejected_materials": [{"id": str(m["id"]), "reason": "缺少可靠结构化来源"} for m in missing],
-            "warnings": [f"{m['category']}:missing_source" for m in missing],
+            # 缺来源的素材 + 取不到口播数字的章节：两条都得看得见，"没数字可讲"
+            # 不能长得跟"正常讲完了"一样。
+            "warnings": [f"{m['category']}:missing_source" for m in missing] + warnings,
         }

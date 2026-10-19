@@ -53,6 +53,8 @@
   .panel li { margin: 2px 0; }
   table { border-collapse: collapse; font-size: 13px; width: 100%; }
   th, td { border: 1px solid var(--line); padding: 6px 14px; text-align: left; }
+  /* 这一章一条口播数字都没取到：不该长得跟正常的一样 */
+  tr.warn td { background: rgba(255, 176, 66, .10); }
   th { color: var(--muted); font-weight: 500; }
   td.ratio { color: var(--accent); }
 </style>
@@ -103,9 +105,33 @@
       <h3>选题与数字额度</h3>
       <div><span class="k">主线</span>{{ episode_plan.story.angle or "—" }}</div>
       <div><span class="k">底牌素材</span>{{ episode_plan.story.reveal_material_id or "—" }}</div>
-      <div><span class="k">数字额度</span>{{ episode_plan.number_budget.used or 0 }} 个（本期上场的口播数字）</div>
+      {% set nb_used = episode_plan.number_budget.used or {} %}
+      {% set nb_cap = episode_plan.number_budget.cap or {} %}
+      <div><span class="k">口播数字</span>anchor {{ nb_used.anchor or 0 }} / {{ nb_cap.anchor or 0 }} · analogy {{ nb_used.analogy or 0 }} / {{ nb_cap.analogy or 0 }}（按解释单元计，visual_only 不限）</div>
       {% if episode_plan.warnings %}
-      <div><span class="k">缺来源</span>{{ episode_plan.warnings|join('、') }}（已跳过，未补猜）</div>
+      {# warnings 混了两种语义：缺来源归缺来源，取不到口播数字归无数字可讲——
+         顶着「缺来源…（已跳过，未补猜）」说另一种事等于在审查页上说错话。 #}
+      {% set buckets = namespace(missing=[], exhausted=[], nosource=[]) %}
+      {% for item in episode_plan.warnings %}
+        {% if item.endswith(':missing_source') %}
+          {% set buckets.missing = buckets.missing + [item] %}
+        {% elif item.endswith('spoken_metrics_exhausted') %}
+          {% set buckets.exhausted = buckets.exhausted + [item.split(':')[0]] %}
+        {% elif item.endswith('no_spoken_metric_source') %}
+          {% set buckets.nosource = buckets.nosource + [item.split(':')[0]] %}
+        {% else %}
+          {% set buckets.missing = buckets.missing + [item] %}
+        {% endif %}
+      {% endfor %}
+      {% if buckets.missing %}
+      <div><span class="k">缺来源</span>{{ buckets.missing|join('、') }}（已跳过，未补猜）</div>
+      {% endif %}
+      {% if buckets.nosource %}
+      <div><span class="k">无数字可讲</span>{{ buckets.nosource|join('、') }}（素材没给可念的指标，要去补素材）</div>
+      {% endif %}
+      {% if buckets.exhausted %}
+      <div><span class="k">无数字可讲</span>{{ buckets.exhausted|join('、') }}（可念的指标被前面的章节取完了，要调章节分配）</div>
+      {% endif %}
       {% endif %}
       {% if episode_plan.rejected_materials %}
       <div><span class="k">已拒绝</span>{% for item in episode_plan.rejected_materials %}{{ item.id }}（{{ item.reason }}）{% if not loop.last %}、{% endif %}{% endfor %}</div>
@@ -114,12 +140,16 @@
     <div class="panel" style="flex: 3 1 0;">
       <h3>五章与图板</h3>
       <table>
-        <tr><th>章节</th><th>目的</th><th>素材</th><th>图板</th><th>后退</th></tr>
+        <tr><th>章节</th><th>目的</th><th>领讲</th><th>素材</th><th>口播数字</th><th>图板</th><th>后退</th></tr>
         {% for chapter in episode_plan.rounds %}
-        <tr>
+        {% set nb = chapter.get('number_budget') %}
+        {% set flagged = chapter.get('no_spoken_metric') %}
+        <tr{% if flagged %} class="warn"{% endif %}>
           <td>{{ chapter.id }}</td>
           <td>{{ chapter.purpose }}</td>
+          <td>{{ chapter.lead or "—" }}</td>
           <td>{{ chapter.material_ids|join('、') or "—" }}</td>
+          <td>{% if flagged %}<b>无数字可讲</b>{% elif nb %}{{ (nb.anchor or 0) + (nb.analogy or 0) }} / {{ nb.spoken or 0 }}{% else %}—{% endif %}</td>
           <td class="ratio">{{ chapter.visual.template }}{% if chapter.visual.id %}<br><span class="tagline">{{ chapter.visual.id }}</span>{% endif %}</td>
           <td>{{ chapter.visual.fallback|join(' → ') }}</td>
         </tr>
