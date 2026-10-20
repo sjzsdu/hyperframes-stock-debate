@@ -14,6 +14,7 @@ from typing import Any, Callable, Mapping, Sequence
 
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 
+from stocktalk.modules.business_rows import NON_PRODUCT_ROW_SUFFIXES
 from stocktalk.modules.numbers import to_display, unbreakable_spans
 
 
@@ -1742,7 +1743,12 @@ class HyperFramesBuilder:
         """
         profile = self._f10_profile(f10)
         composition = profile.get("主营构成") if isinstance(profile.get("主营构成"), Mapping) else {}
-        rows = [dict(row) for row in composition.get("明细", []) if isinstance(row, Mapping)][:4]
+        # 只画真正的产品行：F10 把 `(销售模式)` / `(地区)` / `(行业)` 行和产品行挤在
+        # 同一张表里，不滤掉的话脑图上会出现「直销」「华东」「汽车零部件」这种
+        # 假业务分支（B2 只在产品卡组和渠道链路里排掉了它们，这里是兜底渲染器）。
+        rows = [dict(row) for row in composition.get("明细", [])
+                if isinstance(row, Mapping)
+                and not str(row.get("项目") or "").endswith(NON_PRODUCT_ROW_SUFFIXES)][:4]
         from_composition = len(rows) >= 2
         if not from_composition:
             concepts = [str(c) for c in (profile.get("题材标签") or {}).get("概念", []) if str(c)][:4]
@@ -1778,7 +1784,10 @@ class HyperFramesBuilder:
         """主营构成条形图：每行一根真实占比条，右端带收入额与毛利率。"""
         composition = self._f10_profile(f10).get("主营构成")
         composition = composition if isinstance(composition, Mapping) else {}
-        rows = [row for row in composition.get("明细", []) if isinstance(row, Mapping)]
+        # 同 mindmap：收入构成图也只画产品行，渠道/地区/行业行不是"钱从哪来"的业务块。
+        rows = [row for row in composition.get("明细", [])
+                if isinstance(row, Mapping)
+                and not str(row.get("项目") or "").endswith(NON_PRODUCT_ROW_SUFFIXES)]
         parsed: list[tuple[str, float, str, str]] = []
         for row in rows:
             try:
@@ -2315,7 +2324,7 @@ class HyperFramesBuilder:
         f10_cards: list[tuple[str, float | None, float | None]] = []
         for row in rows:
             name = str(row.get("项目") or row.get("名称") or row.get("业务") or "").strip()
-            if not name or name.endswith(("(销售模式)", "(地区)")):
+            if not name or name.endswith(NON_PRODUCT_ROW_SUFFIXES):
                 continue
             try:
                 share = float(str(row.get("收入占比(%)") or "").replace("%", ""))

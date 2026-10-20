@@ -86,6 +86,10 @@ SENTENCE_BLACKLIST: tuple[tuple[str, str], ...] = (
      "所有票都变成「卡脖子」叙事；消费品的真壁垒是场合和心智，套上去就假——护城河先分类型（成本/切换成本/心智/牌照），句式随类型换"),
     ("故事讲得通，账上却有一笔不配合",
      "它会变成 R4 的固定开场，第二期就是模板——R4 直接从数字对撞开口，不预告「我要查账」"),
+    ("合同负债从八十亿骤降到三十一亿，客户不排队交钱了？",
+     "用会计科目开场、一句话报两个数——这是 2026-10-19 真机那期的原话，正是最该消失的开场；改用看得见的东西（产品/渠道/场景）起头"),
+    ("批价守住了，再看下一季预收款能不能回流",
+     "固定「等下一个信号」的收尾，每期都长成这个形状——收尾按本期叙事线的那条动作收，不预告数据"),
 )
 
 # 成片时长目标 2-5 分钟（2026-09-20 用户反馈"内容太短、得不到有效启示"）。
@@ -464,7 +468,13 @@ class DialogueGenerator:
         if not rounds:
             return ""
         cap = ((plan.get("number_budget") or {}).get("cap") or {})
+        line = plan.get("story_line") if isinstance(plan.get("story_line"), Mapping) else None
         lines = ["本期叙事统筹（按这个顺序讲，不要中途换题）："]
+        if line:
+            # 开头与结尾是**同一条线的两端**：只换句式不换线，五期之后观众照样能
+            # 预判。这条也是"结尾不固定"唯一能成立的机制。
+            lines.append(f"本期叙事线【{line.get('label') or line.get('id')}】：第 1 章和第 5 章是"
+                         f"这条线的两端——第 1 章提出的那个东西，第 5 章必须回到它，不许中途换线。")
         for index, chapter in enumerate(rounds, 1):
             lead = str(chapter.get("lead") or "")
             who = f"由{self._character(lead, lead, '')['name']}领讲" if lead else "谁说都行"
@@ -472,6 +482,16 @@ class DialogueGenerator:
             # 这里不再重复 must_cover：它恒等于 purpose，写两遍等于告诉模型这句要读两次。
             lines.append(f"{index}. {chapter.get('id')}（{chapter.get('purpose') or ''}）：{who}；"
                          f"本章最多口播 {spoken} 个解释单元。")
+            if chapter.get("id") == "r1_hook":
+                lines.append("   **开场硬约束**：前两句不许出现会计科目（合同负债／预收款／应收账款／"
+                             "存货／现金流…）、财务比率（毛利率／净利率／市盈率…）、股价、报告期。"
+                             "用产品名、渠道名、客户类型，或一句生意的具体场景开场——"
+                             "「合同负债从八十亿骤降到三十一亿」这种开场是最该消失的。")
+            if chapter.get("id") == "r5_open_verdict":
+                lines.append("   **收尾硬约束**：禁止「等下一季度／下一份报告／下次财报来验证」这类固定"
+                             "悬念收尾——它以前不是收尾方式之一，是唯一方式。按本章那条收尾动作收，"
+                             "落点可以是开头的那个东西、一个观众能自己去看的动作、一句代价判断，"
+                             "或一句处境描述；不预告下一个数据。")
             for seed in [s for s in (chapter.get("sentence_modes") or []) if isinstance(s, Mapping)]:
                 side = str(seed.get("speaker") or "")
                 opener = f"，建议由{self._character(side, side, '')['name']}起头" if side else ""

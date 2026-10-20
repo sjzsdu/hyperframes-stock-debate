@@ -145,15 +145,29 @@ class VisualBindingTests(unittest.TestCase):
             self.assertEqual(metric_ids, expected, chapter_id)
 
     def test_the_last_chapter_ships_what_to_verify(self) -> None:
+        """「待验证什么」只挂在事件线那条收尾上。
+
+        B3 之后末章收尾有五种（回扣 / 观察动作 / 代价判断 / 处境描述 / 挂到
+        一个落点），只有最后一种会输出"待验证"标签——每期都以一个待验证的数
+        收尾，本身就是被嫌弃的那个固定模式。所以这里验的是**契约**：verify
+        非空 ⟺ 末章图板是 timeline。
+        """
         plan = EpisodePlanner().plan(FULL)
         verify = {chapter["id"]: chapter["visual"].get("verify") for chapter in plan["rounds"]}
-        self.assertEqual(verify["r5_open_verdict"], "下一份报告里的归母净利润")
+        last = next(c for c in plan["rounds"] if c["id"] == "r5_open_verdict")
+        if last["visual"]["template"] == "timeline":
+            self.assertEqual(verify["r5_open_verdict"], "下一份报告里的归母净利润")
+        else:
+            self.assertEqual(verify["r5_open_verdict"], "", last["visual"]["template"])
         # 只有末章带这一条：别的章没有"留给下一份报告"这层意思
         self.assertEqual([rid for rid, text in verify.items() if text and rid != "r5_open_verdict"], [])
         # 素材全无时不许编一条待验证项
         empty = EpisodePlanner().plan({"code": "000000", "quote": {"code": "000000"}})
-        last = next(c for c in empty["rounds"] if c["id"] == "r5_open_verdict")
-        self.assertEqual(last["visual"]["verify"], "下一份报告")
+        last_empty = next(c for c in empty["rounds"] if c["id"] == "r5_open_verdict")
+        if last_empty["visual"]["template"] == "timeline":
+            self.assertEqual(last_empty["visual"]["verify"], "下一份报告")
+        else:
+            self.assertEqual(last_empty["visual"]["verify"], "")
 
 
 class NewChartTests(unittest.TestCase):
@@ -251,9 +265,20 @@ class NewChartTests(unittest.TestCase):
         self.assertNotIn("国内(地区)", body)
 
     def test_the_verification_label_reaches_the_timeline(self) -> None:
-        builder = self._builder("horizontal")
-        plan = EpisodePlanner().plan(FULL)
-        body, name = builder._turn_chart("business", self._ctx(plan, FULL), "", "vis.r5_open_verdict")
+        """走「最近发生的事」这条线时，末章才挂「待验证」标签。
+
+        其它四条线的收尾（回扣 / 观察动作 / 代价判断 / 处境描述）都不挂——
+        每期都以一个待验证的数收尾，正是被嫌弃的那个固定模式。
+        """
+        from unittest import mock
+
+        import stocktalk.modules.episode_planner as ep
+        time_index = [i for i, line in enumerate(ep.STORY_LINES)
+                      if line["r5_template"] == "timeline"][0]
+        with mock.patch.object(ep, "_rotate_line", return_value=time_index):
+            plan = EpisodePlanner().plan(FULL)
+            body, name = self._builder("horizontal")._turn_chart(
+                "business", self._ctx(plan, FULL), "", "vis.r5_open_verdict")
         self.assertEqual(name, "timeline")
         self.assertIn("◆ 待验证：下一份报告里的归母净利润", body)
 
@@ -273,15 +298,17 @@ class NewChartTests(unittest.TestCase):
         plan = EpisodePlanner().plan(data)
         r1 = next(r for r in plan["rounds"] if r["id"] == "r1_hook")
         binding = r1["visual"]["data_binding"]
-        # 只留第一块业务的两条指标（收入占比 + 产品线毛利率），等于"这期只讲一块"。
+        # 只留前两块业务的指标（收入占比 + 产品线毛利率各一条）：这期只讲这两块。
         binding["metric_ids"] = [mid for mid in binding["metric_ids"]
-                                 if mid.startswith("m.product.0.")][:2]
+                                 if mid.startswith(("m.product.0.", "m.product.1."))]
         body, name = self._builder("horizontal")._turn_chart(
             "business", self._ctx(plan, data), "", "vis.r1_hook")
+        # 卡组仍然出得来（两块业务够成"组"），但只许有绑定的那两块。
+        self.assertEqual(name, "product_portfolio")
+        self.assertIn("茅台酒", body)
+        self.assertIn("其他系列酒", body)
         self.assertNotIn("冰淇淋", body)
         self.assertNotIn("红酒", body)
-        # 只剩一块业务就不叫"卡组"，按该章 fallback 序列退到收入构成。
-        self.assertEqual(name, "composition")
 
     def test_channel_flow_never_draws_rows_the_plan_did_not_bind(self) -> None:
         """同一把尺子量渠道链路：绑定里没有渠道行，就不许从 F10 把渠道行捞回来。

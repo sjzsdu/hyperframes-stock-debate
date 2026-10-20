@@ -18,7 +18,8 @@ from stocktalk.modules import episode_planner
 from stocktalk.modules.dialogue_generator import (SENTENCE_BLACKLIST,
                                                   DialogueGenerator)
 from stocktalk.modules.episode_planner import (ROUND_DEFS, ROUND_SENTENCE_SEEDS,
-                                               EpisodePlanner, MaterialExtractor,
+                                               STORY_LINES, EpisodePlanner,
+                                               MaterialExtractor, _rotate_line,
                                                _rotate_seed)
 from stocktalk.modules.hyperframes_builder import HyperFramesBuilder
 
@@ -255,25 +256,30 @@ class SentenceModeTests(unittest.TestCase):
             self.assertTrue(seed["mode"] and seed["text"])
 
     def test_rotation_is_deterministic_and_moves_with_the_date(self) -> None:
-        """同一 (code, date) 两次规划同组；换一天要换组，不然每期开法都一样。"""
+        """同一 (code, date) 两次规划同组；换一天要换组，不然每期开法都一样。
+
+        B3 之后有两层轮换：R2-R4 按章选种子，R1/R5 由「叙事线」整体决定。
+        两层都要可复现、且两周内每条都轮得到——否则没轮到的就是死内容。
+        """
         first = [c["sentence_modes"][0]["id"]
                  for c in EpisodePlanner().plan(STOCK_DATA)["rounds"]]
         again = [c["sentence_modes"][0]["id"]
                  for c in EpisodePlanner().plan(STOCK_DATA)["rounds"]]
         self.assertEqual(first, again)
+        # 章内轮换：R2-R4 各自三条种子，两周内下标都要轮到
+        seeded = [rid for rid, *_ in ROUND_DEFS if rid in ROUND_SENTENCE_SEEDS]
+        self.assertEqual(seeded, ["r2_mechanism", "r3_moat_pressure", "r4_ledger_test"])
         by_day = {}
         for offset in range(1, 15):
             day = (date(2026, 10, 1) + timedelta(days=offset)).isoformat()
-            by_day[day] = tuple(_rotate_seed(ROUND_SENTENCE_SEEDS[rid], "600519", day, rid)
-                                for rid, *_ in ROUND_DEFS)
-        # 两周里至少出现两组不同组合；同一天同一票必然复现同一组
-        self.assertGreater(len(set(by_day.values())), 1, by_day)
-        self.assertEqual(by_day["2026-10-02"],
-                         tuple(_rotate_seed(ROUND_SENTENCE_SEEDS[rid], "600519", "2026-10-02", rid)
-                               for rid, *_ in ROUND_DEFS))
-        # 两周里三条种子都要轮到：否则第三条就是死内容
-        used_indices = {index for combo in by_day.values() for index in combo}
-        self.assertEqual(used_indices, {0, 1, 2}, by_day)
+            by_day[day] = {rid: _rotate_seed(ROUND_SENTENCE_SEEDS[rid], "600519", day, rid)
+                           for rid in seeded}
+        for rid in seeded:
+            self.assertEqual({idx[rid] for idx in by_day.values()}, {0, 1, 2}, rid)
+        # 叙事线轮换：两周内五条线都要轮到，同一天同一票必然复现同一条
+        lines = {day: _rotate_line("600519", day) for day in by_day}
+        self.assertEqual(set(lines.values()), set(range(len(STORY_LINES))), lines)
+        self.assertEqual(lines["2026-10-02"], _rotate_line("600519", "2026-10-02"))
 
     def test_plan_feeds_today_into_the_seed_rotation(self) -> None:
         """``plan()`` 必须把今天（``as_of``）接进轮换：同一天同组，换一天换组。
@@ -383,14 +389,17 @@ class EpisodePromptTests(unittest.TestCase):
     def test_sentence_modes_seed_reaches_the_prompt(self) -> None:
         section, plan = self._section()
         shipped = {c["sentence_modes"][0]["text"] for c in plan["rounds"]}
+        self.assertEqual(len(shipped), 5)
         for chapter in plan["rounds"]:
             seed = chapter["sentence_modes"][0]
             self.assertIn(seed["mode"], section)
             self.assertIn(seed["text"], section)
-        # 其余 10 条不许跟着一起下去：每章只见自己那一章的这一条
+        # 其余种子不许跟着一起下去：每章只见自己那一章的这一条。
+        # 候选池 = R2-R4 的九条章内种子 + 五条叙事线各自的开口与收尾。
         all_texts = {text for rid in ROUND_SENTENCE_SEEDS
                      for _side, _mode, text in ROUND_SENTENCE_SEEDS[rid]}
-        self.assertEqual(len(all_texts), 15)
+        all_texts |= {seed[2] for line in STORY_LINES for seed in (line["r1"], line["r5"])}
+        self.assertEqual(len(all_texts), 19)
         for text in all_texts - shipped:
             self.assertNotIn(text, section)
 
@@ -542,12 +551,22 @@ class PlanDrivesChartTests(unittest.TestCase):
                       "episode_plan": plan}
             project = self._builder(temp).build_project(STOCK_DATA, script, {})
             content = project.composition_path.read_text(encoding="utf-8")
-            # 计划里 r1=产品卡组、r2=渠道链路、r3=行业排名、r4=两数对照、r5=资讯时间线
+            # 计划里 r1=产品卡组、r2=渠道链路、r3=行业排名、r4=两数对照；
+            # 末章图板随叙事线走，所以按计划里的 template 反查它该是哪一张。
             self.assertIn("卖的是什么 · 产品卡组", content)
             self.assertIn("货怎么到客户手上 · 渠道链路", content)
             self.assertIn("行业里站哪 · 排名", content)
             self.assertIn("账有没有配合 · 两数对照", content)
-            self.assertIn("最近发生的事", content)
-            # 末章那条「待验证什么」必须真的上屏
-            self.assertIn("◆ 待验证：下一份报告里的归母净利润", content)
+            last = next(c for c in plan["rounds"] if c["id"] == "r5_open_verdict")
+            titles = {"product_portfolio": "卖的是什么 · 产品卡组",
+                      "channel_flow": "货怎么到客户手上 · 渠道链路",
+                      "ranking": "行业里站哪 · 排名",
+                      "timeline": "最近发生的事",
+                      "composition": "钱从哪来 · 收入构成"}
+            self.assertIn(titles[last["visual"]["template"]], content)
+            # 「待验证什么」只挂在事件线那条收尾上（别的收尾不复用这个固定悬念）
+            if last["visual"]["template"] == "timeline":
+                self.assertIn("◆ 待验证：下一份报告里的归母净利润", content)
+            else:
+                self.assertNotIn("◆ 待验证", content)
             self.assertNotIn("暂无K线数据", content)
