@@ -1,0 +1,7 @@
+# 独白形态验收用配置覆盖（2026-10-24）：仅切换形态，其余全部走 default.yaml。
+dialogue:
+  format: monologue
+video:
+  output_dir: ./output/monologue_acceptance
+publish:
+  platforms: []

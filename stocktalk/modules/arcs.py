@@ -56,6 +56,11 @@ class Arc:
     opener: str = ""
     # 剪枝后至少剩这么多节拍，这条骨架才还算成立
     min_beats: int = 3
+    # 内容形态（2026-10-24 独白扩展）："debate" 双人对辩 / "monologue" 单人独白。
+    # 骨架是"这期怎么讲"的节拍序列，而节拍里写死了谁来说——五条对辩骨架的
+    # closing 拍全是"由对方接一句"，拿去喂单人片必然穿帮。所以两条形态各走各的
+    # 注册表（见 ARCS / MONOLOGUE_ARCS），而不是给对辩骨架加 if。
+    format: str = "debate"
 
 
 # ---------------------------------------------------------------------------
@@ -200,6 +205,66 @@ ARCS: dict[str, Arc] = {arc.id: arc for arc in (MAINLINE, CRACK, CUSTOMER, ANNUA
 # 回退骨架：数据太薄、或配置写错时走它。
 ARC_FALLBACK: Arc = MAINLINE
 
+# ---------------------------------------------------------------------------
+# 独白骨架（2026-10-24）：一个人把一家公司讲透，2-4 分钟。
+# ---------------------------------------------------------------------------
+# 与对辩骨架的两条结构性差别，注册时就要定死，不能靠运行时补丁：
+# 1. **节拍不指派说话人**。Beat.speaker 一律留空（"谁来说都行"在单人形态下
+#    没有意义，prompt 侧也不渲染这一句），最终台词的 speaker 统一由
+#    dialogue_generator 归一成 narrator。
+# 2. **没有"由对方接一句"的 closing 拍**。对辩五条骨架的收尾全靠对方短回应
+#    立住"这是一场对话"；独白没有对方，收束要落在一个观众能自己去核对的
+#    具体变量上（对应 episode_plan 的 r5_open_verdict）。
+# 剪枝与数据依赖（needs / optional）机制完全复用——"有数据才讲，没有就不讲"
+# 对独白片比对辩更重要：讲透一家公司靠的是叙事密度，不是篇幅。
+DEEP_DIVE = Arc(
+    id="deep_dive",
+    name="深度拆解",
+    summary="这家公司做什么→钱从哪来→账怎么样→护城河与风险→带走什么",
+    format="monologue",
+    opener="第一句从一个看得见的东西起头（产品、渠道、客户类型、一个具体场景），"
+           "不要行业定性开场（「这是一家做XX的公司」）、不要报股价；"
+           "前两句里埋一个信息缺口，让人想听下去。",
+    beats=(
+        Beat("hook", "用一个看得见的具体事实或反差开场，让观众先愣一下；"
+                     "只给事实和它的反差，不给结论、不做自我介绍"),
+        Beat("business", "说清这家公司卖什么、靠什么赚钱、客户是谁，"
+                         "用主营构成里的真实占比和毛利率当骨架"),
+        Beat("money", "钱从哪来：这门生意的钱是怎么流转的——谁先掏钱、"
+                      "货怎么变成钱、直销和经销各占多少，用真实结构数据讲清运转机制",
+             needs=("f10.主营构成.明细|f10.经营评述",)),
+        Beat("ledger", "账怎么样：把营收/利润和经营现金流对着看，"
+                       "存货与应收各压着多少营收，利润是不是真金白银落袋",
+             needs=("financials.净利润(亿元)|financials.经营现金流(亿元)|financials.存货(亿元)|financials.应收账款(亿元)",)),
+        Beat("moat", "护城河与风险落在具体环节：同行家数、行业位置、"
+                     "替代者、单一客户/单一品类依赖……讲清它凭什么站稳、短板在哪",
+             needs=("f10.行业地位.同行家数|board.industry|f10.所属行业|financials.资产负债率(%)")),
+        NEWS_BEAT,
+        Beat("takeaway", "收束：把本期最值得带走的一两个可复用认知"
+                         "（行业门道/看财报的方法/这门生意好在哪脆弱在哪）钉住，"
+                         "并落在一个观众能自己去核对的具体变量上；不要戛然而止，"
+                         "也不要「等下一份财报来验证」式的空悬念"),
+    ),
+    min_beats=4,
+)
+
+MONOLOGUE_ARCS: dict[str, Arc] = {DEEP_DIVE.id: DEEP_DIVE}
+MONOLOGUE_FALLBACK: Arc = DEEP_DIVE
+
+# 独白形态唯一的说话人代号。写死它而不是"从配置里推"：脚本合同
+# （``turn["speaker"]``）要跨 TTS / 画面 / 合规 / 发布四层保持同一个 id，
+# 而 ``characters.narrator.name`` 是会被人改的展示名——id 稳定、名字可换。
+MONOLOGUE_SPEAKER = "narrator"
+
+
+def arcs_for_format(fmt: str | None = None) -> dict[str, Arc]:
+    """按内容形态取骨架注册表。未知形态一律回对辩——不猜、不抛。"""
+    return MONOLOGUE_ARCS if str(fmt or "").strip().lower() == "monologue" else ARCS
+
+
+def fallback_arc(fmt: str | None = None) -> Arc:
+    return MONOLOGUE_FALLBACK if str(fmt or "").strip().lower() == "monologue" else ARC_FALLBACK
+
 # 开箱即用的说话角色。配置里可以再加角色，但这两个始终允许——配置只覆盖其中一个
 # （比如只改 bull 的人设）时，不该把另一个角色判为非法。
 DEFAULT_SPEAKERS: tuple[str, ...] = ("bull", "bear")
@@ -309,33 +374,39 @@ def _stable_pick(candidates: Sequence[Arc], code: str, day: str) -> Arc:
 
 
 def select_arc(payload: Mapping[str, Any], *, configured: str = "auto",
-               code: str = "", day: str = "") -> ArcChoice:
+               code: str = "", day: str = "", format: str | None = None) -> ArcChoice:
     """挑一条骨架。
 
     * ``configured`` 是注册表里的 id 时强制用它（仍然按数据剪枝）；
     * ``configured == "auto"`` 时按数据选：**只有"数据全都能支撑"的骨架才够格**
       ——每个声明了依赖的节拍都必须有数据，且剪枝后还剩够多节拍。够格的有好几条时，
       按 (代码, 日期) 稳定分散，于是"每期不一样"不依赖任何跨运行状态。
-    * 没有一条够格就回退六层主线。
+    * 没有一条够格就回退六层主线（独白形态回退 deep_dive）。
+
+    ``format`` 决定从哪个注册表里挑（debate / monologue）：两条形态的骨架
+    互不参与竞争——对辩骨架的 closing 拍写死了"由对方接一句"，混进独白的
+    候选池就是一次静默穿帮。
 
     注意"够格"必须要求依赖全中，而不只是"剪枝后还剩几拍"：裂痕式里有三个节拍不依赖
     数据（追问/极短回应/留下分歧），如果只看剩余节拍数，一份只有行情数据、连主营构成
     都没有的 payload 也会被判定为"适合裂痕式"，然后丢掉它最关键的"反常识数字开场"。
     这不是"有数据就加"，是硬凑。
     """
+    registry = arcs_for_format(format)
+    fallback = fallback_arc(format)
     requested = str(configured or "auto").strip()
-    if requested and requested != "auto" and requested in ARCS:
-        arc = ARCS[requested]
+    if requested and requested != "auto" and requested in registry:
+        arc = registry[requested]
         beats = prune_beats(arc, payload)
         if not beats:
-            beats = ARC_FALLBACK.beats
-            return ArcChoice(arc=ARC_FALLBACK, beats=beats, forced=True)
+            beats = fallback.beats
+            return ArcChoice(arc=fallback, beats=beats, forced=True)
         return ArcChoice(arc=arc, beats=beats, forced=True)
 
     qualified: list[Arc] = []
     skipped: list[tuple[str, tuple[str, ...]]] = []
-    for arc in ARCS.values():
-        if arc.id == ARC_FALLBACK.id:
+    for arc in registry.values():
+        if arc.id == fallback.id:
             continue  # 回退骨架不参与竞争，只在没人够格时上场
         beats = prune_beats(arc, payload)
         missing = missing_needs(arc, payload)
@@ -345,8 +416,8 @@ def select_arc(payload: Mapping[str, Any], *, configured: str = "auto",
         qualified.append(arc)
 
     if not qualified:
-        beats = prune_beats(ARC_FALLBACK, payload)
-        return ArcChoice(arc=ARC_FALLBACK, beats=beats or ARC_FALLBACK.beats,
+        beats = prune_beats(fallback, payload)
+        return ArcChoice(arc=fallback, beats=beats or fallback.beats,
                          eligible=(), skipped=tuple(skipped))
 
     # 够格的骨架里 optional 拍仍可能因缺数据被剪（资讯拍），所以返回剪枝后的

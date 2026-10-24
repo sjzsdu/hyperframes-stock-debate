@@ -11,6 +11,15 @@ dialogue:
   # options:
   #   base_url: https://api.openai.com/v1   # 兼容端点
   #   api_key_env: OPENAI_API_KEY           # 读 key 的环境变量名（key 不落配置文件）
+
+  # 内容形态（2026-10-24）。这是一个开关，额度不放在这里：
+  #   debate     看多/看空两人对辩（默认，既有行为）
+  #   monologue  单人独白讲透一家公司（2-4 分钟，见 dialogue.monologue 段）
+  # 切到 monologue 会连带改变：骨架注册表（arcs.MONOLOGUE_ARCS）、说话人数
+  # （characters.narrator 一人一音色）、片尾风险提示（双人接力轮关闭）、
+  # 画面（单人开场卡、第 N 节徽标、不出双栏互动卡）。
+  format: debate
+
   # 成片时长目标：2-5 分钟（120-300 秒）。2026-09-20 用户反馈"内容太短、
   # 得不到有效启示"，从原来的 70-110 秒上调——用时长换内容深度。
   # 权衡记录：平台分成只算有效播放，完播率是决定性因素，长片完播率更低，
@@ -41,7 +50,24 @@ dialogue:
   #   peers    同行对比：同行家数→规模位置→毛利差距→排名证据→小结
   # 想固定成一种风格就写它的 id（例如 annual），想恢复旧观感写 mainline。
   arc: auto
-  # 短回应（"嗯""有道理""但是——"）的字数上限：对话该长则长、该短则短，
+
+  # 独白形态（dialogue.format: monologue）的额度。放在这一层而不是覆盖上面的
+  # 对辩额度：默认配置文件要能同时写死两种形态，format 只是开关。
+  # 缺省值同样写在代码里（dialogue_generator.MONOLOGUE_DEFAULTS），这里是可改处。
+  monologue:
+    # 2026-10-24 用户决策：独白 2-4 分钟（120-240 秒）——一人连讲，比对辩紧一档，
+    # 字数预算 576-1152 字。
+    min_duration_seconds: 120
+    max_duration_seconds: 240
+    # 单段上限 220 字（约 46 秒）。对辩的 80 字是"短交锋"节奏；独白没有对手接话，
+    # 一轮 80 字会碎成十几段没人接的短句，讲不透一件事。220 落在"段落 150-300 字"
+    # 的中段，超了仍由 _split_line 按句号拆成续轮。
+    max_line_chars: 220
+    # 片尾风险提示关闭：它是"一人一句接力"的双人机制，独白里没有第二个人可接，
+    # 硬拼只会让同一个声音念两句免责声明。片尾画面卡上的合规提示照常显示。
+    risk_exchange: false
+
+  # 短回应（"嗯""有道理""但是——"）的字数上限：对话该长则长该短则短，
   # 用户 2026-09-22 明确要求。命中的轮次不再重画画面图板（一句话的认可没必要）。
   short_line_chars: 20
   # 本期提示词（CLI: -m/--message，可重复，@文件 读取文本文件）。它注入到剧本生成
@@ -103,6 +129,22 @@ characters:
     instruction: 用沉稳冷静、带审视和质疑的语气指出风险，语气笃定
     speed: 1.0
     pitch: 1.0   # 解说小明本身够亮，不再升调（post_process.pitch 生效中）
+  # 独白形态（dialogue.format: monologue）的唯一说话人。对辩片完全用不到它，
+  # 写在这里没有副作用——独白片则**必须**有它：TTS 按 characters.<role>.voice_id
+  # 取音色，缺角色时 tts_agent._turns 会把该说话人的全部台词静默过滤掉
+  # （成片零配音且不报错）。就算配置里删掉这一段，dialogue_generator.
+  # ensure_narrator_character 也会补一份默认人设回来。
+  narrator:
+    name: 主讲人
+    persona: 一个人对着镜头把一家公司讲透：先讲清它卖什么、靠什么赚钱，再讲账、讲护城河与风险，
+             最后给观众留下可复用的认知；口语化、有节奏，不播报、不堆指标
+    # 音色复用「解说小明」——它是为"解说腔"做的 A/B 选型（2026-10-07），
+    # 独白片要的正是一个人讲透，而不是辩论里的任何一方。
+    voice_id: zh_male_jieshuoxiaoming_uranus_bigtts
+    supports_instruction: true
+    instruction: 用沉稳、有节奏的讲解语气，像把一件事讲给朋友听；该停顿处停顿，强调关键数字时放慢，不播音腔
+    speed: 1.0
+    pitch: 1.0
 
 compliance:
   forbidden_words:

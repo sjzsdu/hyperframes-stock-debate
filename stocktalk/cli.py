@@ -165,12 +165,12 @@ def main(argv: list[str] | None = None) -> None:
         if args.duration_minutes < 1:
             parser.error("--duration-minutes 必须为正整数")
         seconds = args.duration_minutes * 60
-        config.setdefault("dialogue", {}).update({"min_duration_seconds": seconds, "max_duration_seconds": seconds})
+        _apply_duration_bounds(config, seconds, seconds)
     elif args.short_form:
         # Keep the long-form default intact for existing publishing workflows;
         # short-form is an explicit experiment so retention can be compared on
         # the same stock and day instead of silently changing the product.
-        config.setdefault("dialogue", {}).update({"min_duration_seconds": 45, "max_duration_seconds": 75})
+        _apply_duration_bounds(config, 45, 75)
 
     if args.platforms:
         names = [p.strip() for p in args.platforms.replace("，", ",").split(",") if p.strip()]
@@ -232,6 +232,19 @@ def main(argv: list[str] | None = None) -> None:
     except KeyboardInterrupt:
         print("\n已中断。已成功的平台不会重发；失败的用 `tangulunjin <code> --republish` 补发。")
         sys.exit(130)
+
+
+def _apply_duration_bounds(config: dict, min_seconds: int, max_seconds: int) -> None:
+    """把时长目标写回 config（对辩与独白两层都写）。
+
+    --duration-minutes / --short-form 是操作者的显式意图，必须在两种形态下都生效。
+    独白形态读的是 ``dialogue.monologue`` 那一层（它有自己的默认 120-240 秒），
+    只写顶层会被那一层盖掉——"我明明给了 --duration-minutes 3 却还是 4 分钟"。
+    """
+    dialogue = config.setdefault("dialogue", {})
+    dialogue.update({"min_duration_seconds": min_seconds, "max_duration_seconds": max_seconds})
+    dialogue.setdefault("monologue", {}).update(
+        {"min_duration_seconds": min_seconds, "max_duration_seconds": max_seconds})
 
 
 # 提示词整条进 LLM 上下文（prompt 本身已有骨架说明和几万字数据 JSON），超过这个
