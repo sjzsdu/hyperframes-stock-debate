@@ -14,6 +14,7 @@ from typing import Any, Callable, Mapping, Sequence
 
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 
+from stocktalk.modules.arcs import MONOLOGUE_SPEAKER
 from stocktalk.modules.business_rows import NON_PRODUCT_ROW_SUFFIXES
 from stocktalk.modules.numbers import to_display, unbreakable_spans
 
@@ -35,6 +36,11 @@ def _parallel_capture_timed_out(detail: str) -> bool:
 
 
 Runner = Callable[[Sequence[str], Path], subprocess.CompletedProcess[str]]
+
+# 内容形态（与 dialogue_generator 的 FORMATS 同值）：debate 双人对辩，
+# monologue 单人独白。这里不 import dialogue_generator——那边 import 了
+# 本模块的 short_business_label，会成环；按值判定即可。
+FORMAT_MONOLOGUE = "monologue"
 
 # One-line captions: the spoken line is split at punctuation so every caption
 # fits a single row.  Horizontal: 22 chars at ~40px in a 1220px strip.
@@ -333,6 +339,12 @@ class HyperFramesBuilder:
         video = self.config.get("video", {})
         self.video_config = dict(video) if isinstance(video, Mapping) else {}
         self.characters = self.config.get("characters", {})
+        # 内容形态：dialogue.format（默认 debate）。builder 只是按值读一次——
+        # 归一化在 dialogue_generator.dialogue_format，这里不重复实现。
+        dialogue_cfg = self.config.get("dialogue", {})
+        self.format = str((dialogue_cfg or {}).get("format", "debate") or "debate").strip().lower()
+        if self.format != FORMAT_MONOLOGUE:
+            self.format = "debate"
         self.layout = str(self.video_config.get("canvas", "horizontal")).strip().lower()
         if self.layout not in CANVAS_PRESETS:
             self.layout = "horizontal"
@@ -433,6 +445,11 @@ class HyperFramesBuilder:
     def build_project(self, stock_data: Mapping[str, Any], script: Mapping[str, Any] | None, tts_timeline: Mapping[str, Any] | None) -> HyperFramesProject:
         directory = Path(self.video_config.get("project_dir", self._output_dir / "hyperframes")); directory.mkdir(parents=True, exist_ok=True)
         script = script if isinstance(script, Mapping) else {}
+        # 脚本自带的 format（dialogue_generator 归一化时写入）优先于 config：
+        # 测试与二次构建可以只在脚本里声明形态。
+        script_format = str(script.get("format") or "").strip().lower()
+        if script_format in ("debate", FORMAT_MONOLOGUE):
+            self.format = script_format
         # 计划随脚本一起到（pipeline 写进 script["episode_plan"]），横竖两版共用
         # 同一份——否则两个画幅会各自重排，同一句话配出两张不同的图。
         plan = script.get("episode_plan")
@@ -582,7 +599,7 @@ class HyperFramesBuilder:
                 duration = self._float(item.get("duration"), 0.0)
                 start = self._float(item.get("start_time"), 0.0)
                 if line and duration > 0:
-                    character = str(item.get("character", "bull"))
+                    character = str(item.get("character") or self._cast()[0])
                     topic, topic_title, keywords = meta_for(line, character)
                     visual_id, round_id = visual_for(line)
                     segments.append({"line": line, "character": character, "start": max(0.0, start), "duration": duration, "audio_path": item.get("audio_path"), "topic": topic, "topic_title": topic_title, "keywords": keywords, "short": short_for(line), "visual_id": visual_id, "round_id": round_id})
@@ -591,9 +608,10 @@ class HyperFramesBuilder:
             return self._decorate_segments(segments)
 
         cursor = 0.0
+        cast = set(self._cast())
         for turn in script_turns:
             character, line = str(turn.get("speaker", "")), str(turn.get("line", "")).strip()
-            if character in {"bull", "bear"} and line:
+            if character in cast and line:
                 topic, topic_title, keywords = meta_for(line, character)
                 duration = max(2.5, min(30.0, len(line) * 0.23))
                 segments.append({"line": line, "character": character, "start": cursor, "duration": duration, "audio_path": None, "topic": topic, "topic_title": topic_title, "keywords": keywords, "short": bool(turn.get("short")), "visual_id": str(turn.get("visual_id") or ""), "round_id": str(turn.get("round_id") or "")})
@@ -703,6 +721,14 @@ class HyperFramesBuilder:
         value = value if isinstance(value, Mapping) else {}
         return str(value.get("name") or role)
 
+    def _cast(self) -> tuple[str, ...]:
+        """本期出镜阵容：独白只有 narrator，辩论是 bull/bear。
+
+        台词白名单、首帧角色行、speakers 渲染上下文都从这里取，不再散落
+        ("bull","bear") 硬编码——否则独白成片要么零分段、要么首帧画两个空角色。
+        """
+        return (MONOLOGUE_SPEAKER,) if self.format == FORMAT_MONOLOGUE else ("bull", "bear")
+
     def _slots(self, segments: Sequence[Mapping[str, Any]], duration: float = 0.0) -> dict[str, list[dict[str, Any]]]:
         """Split the dialogue into independently-updating stage slots."""
         slots: dict[str, list[dict[str, Any]]] = {name: [] for name in self.SLOT_NAMES}
@@ -716,7 +742,7 @@ class HyperFramesBuilder:
         market_span = max(0.6, market_end - market_start)
         visual_entries: list[tuple[float, float, str, dict[str, Any]]] = [
             (market_start, market_span, "__market__", {"kind": "market"})]
-        first_character = str(first.get("character") or "bull")
+        first_character = str(first.get("character") or self._cast()[0])
         tint_entries: list[tuple[float, float, str, dict[str, Any]]] = [
             (market_start, market_span, first_character,
              {"character": first_character, "name": self._character_name(first_character)})]
@@ -728,7 +754,7 @@ class HyperFramesBuilder:
             duration = max(0.25, float(segment.get("visual_duration") or 1.0))
             if index == len(segments) - 1:
                 duration += 0.5
-            character = str(segment.get("character") or "bull")
+            character = str(segment.get("character") or self._cast()[0])
             topic = str(segment.get("topic") or "industry")
             if index:
                 tint_entries.append((start, duration, character,
@@ -771,7 +797,10 @@ class HyperFramesBuilder:
             slots["round"].append({
                 "start": round(turn_start, 3),
                 "duration": round(max(0.2, float(segment.get("duration") or 1.0)), 3),
-                "label": f"观点 {index + 1} / {len(segments)}",
+                # 独白没有「观点交锋」，用「第 i 节 / n」讲清叙事进度；
+                # 辩论保留「观点 i / n」（tests/test_hyperframes_builder.py:177 钉死）。
+                "label": (f"第 {index + 1} 节 / {len(segments)}" if self.format == FORMAT_MONOLOGUE
+                          else f"观点 {index + 1} / {len(segments)}"),
                 "character": character,
             })
         slots["tint"] = self._merge_slot(tint_entries)
@@ -1004,7 +1033,9 @@ class HyperFramesBuilder:
                                           visual=self._turn_board_svg(segment, quote, history, technical, news,
                                                                       financials, f10, chart_state)))
         cta = self._cta_payload(script)
-        if cta and len(rendered_segments) > 1:
+        # 独白没有两方立场，双列互动图板会画出两个空列——直接跳过，片尾的
+        # hook/question 仍走 outro 标题与提示行（不受影响）。
+        if cta and len(rendered_segments) > 1 and self.format != FORMAT_MONOLOGUE:
             # 片尾把最后一块图板换成互动图板（多空立场 + 下期盯什么 + 一个真问题）。
             # 这不是新槽位——复用 visual 槽，所以模板/CSS/JS 一行都不用改。
             rendered_segments[-1] = dict(rendered_segments[-1],
@@ -1047,7 +1078,10 @@ class HyperFramesBuilder:
             safe_side_left=self.safe_side_left,
             safe_side_right=self.safe_side_right,
             stage_in=self.STAGE_IN,
-            speakers={role: self._character_name(role) for role in ("bull", "bear")},
+            # 出镜阵容（独白=narrator 一人）：首帧角色行循环 cast，不再写死
+            # speakers.bull/bear——否则独白首帧画两个空角色位。
+            cast=list(self._cast()),
+            speakers={role: self._character_name(role) for role in self._cast()},
             financials=self._financials(quote, financials, technical),
             chart=self._candles(history),
             f10_text=self._f10_text(f10, ("公司概况", "经营分析")),
