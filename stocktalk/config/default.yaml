@@ -481,6 +481,10 @@ notify:
 # 封面失败只会降级为「不带封面发布」，不会中断发布。
 cover:
   enabled: true
+  # 封面风格：auto = 跟着这一期的形态走（独白片用「一人讲透」版式，辩论片用
+  # 「多空对话」版式，判断依据是剧本自带的 dialogue.format）。也可以写死
+  # debate / monologue 强制统一——比如整个账号只想用一个封面版式时。
+  style: auto
   # 留空自动探测（macOS 的 Google Chrome / Chromium / Edge，再退到 PATH）。
   chrome_path: ""
   # 单张封面的截图超时。Chrome 截完图后常被辅助进程拖着不退出，

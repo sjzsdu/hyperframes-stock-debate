@@ -52,6 +52,32 @@ CHROME_CANDIDATES: tuple[str, ...] = (
 # Chart panel title per canvas family.
 CHART_TITLES = {"portrait": "近30日价格走势", "landscape": "近30日价格走势", "wide": "近30日价格走势"}
 
+# 封面视觉风格（2026-10-25 用户要求「封面与之前的风格做一个区别」）。
+# 两个形态是两种内容，封面在信息流里得一眼可分：辩论片「多空对话」，
+# 独白片「一人讲透一家公司」。风格名与剧本的 format 字段同字面量
+# （dialogue_generator.FORMAT_*），但这里不 import 它——cover 被审查页与
+# 发布链路 import，拉进 dialogue_generator 会把 providers/行情客户端一起带进
+# 来；test_cover_style.py 用一个断言把两边字面量锁住，防止悄悄漂移。
+STYLE_DEBATE = "debate"
+STYLE_MONOLOGUE = "monologue"
+COVER_STYLES: tuple[str, ...] = (STYLE_DEBATE, STYLE_MONOLOGUE)
+
+# 风格 → 模板文件。两套模板各自 self-contained（Chrome 直接打开 HTML），
+# Python 侧的共用地基只有一份：合规 hook、话题词、真实收盘价曲线、涨跌配色
+# 深浅、价格与涨跌幅文案。
+COVER_TEMPLATES: dict[str, str] = {
+    STYLE_DEBATE: "cover.html.j2",
+    STYLE_MONOLOGUE: "cover-monologue.html.j2",
+}
+
+# 与 dialogue_generator.SPEECH_CHARS_PER_SECOND 同源（实测语速 4.8 字/秒）。
+# 剧本没带 estimated_seconds 时（旧 JSON、手写剧本）靠它把字数折成时长，
+# 让封面上的「约 N 分钟」与视频实际节奏对得上。同样由测试锁住。
+SPEECH_CHARS_PER_SECOND = 4.8
+
+# 章节导轨最多画几个方块：独白片 6 节左右最好看，再多在缩略图里就是噪声。
+SECTION_MARK_LIMIT = 8
+
 # 涨跌幅 → 背景色深浅（2026-09-23 用户反馈：每张封面都是同一种浅浅红，
 # 看多了审美疲劳）。|涨跌幅| 线性映射到强度 0-1、TINT_SATURATION_PCT 处
 # 饱和到顶：A 股日常 5-7% 的大阳线就该是最醒目的一档，20cm 涨停不再加深。
@@ -96,6 +122,8 @@ class CoverGenerator:
                                 autoescape=select_autoescape(["html", "j2"]))
         self._screenshotter = screenshotter or self._chrome_screenshot
         self._chrome = chrome
+        # cover.style: auto（默认）跟着剧本形态走；写死 debate/monologue 则强制。
+        self.style_config = str(cover.get("style") or "auto").strip().lower()
         self.compliance = ComplianceAgent(self.config)
 
     # ------------------------------------------------------------------
@@ -162,6 +190,26 @@ class CoverGenerator:
     # ------------------------------------------------------------------
     # Internals
     # ------------------------------------------------------------------
+    def style_for(self, script: Mapping[str, Any] | None = None) -> str:
+        """本期封面用哪套视觉。
+
+        优先级：``cover.style`` 写死的 debate/monologue ＞ 剧本自带的 ``format``
+        ＞ config 的 ``dialogue.format`` ＞ debate。
+
+        剧本排在 config 前面，理由与画面一致：``--republish`` / 补抓封面时跑的是
+        旧成片的剧本 JSON，而 config 可能早就换成另一种形态了——封面样式必须跟
+        这一期真正的形态走，否则补发出去的封面和片子对不上。
+        """
+        if self.style_config in COVER_STYLES:
+            return self.style_config
+        scripted = str((script or {}).get("format") or "").strip().lower()
+        if scripted in COVER_STYLES:
+            return scripted
+        dialogue = self.config.get("dialogue")
+        configured = str((dialogue or {}).get("format") or "").strip().lower() \
+            if isinstance(dialogue, Mapping) else ""
+        return configured if configured in COVER_STYLES else STYLE_DEBATE
+
     def _render_one(self, chrome: str, stock_data: Mapping[str, Any], script: Mapping[str, Any],
                     stock_code: str, size: str, preset: tuple[int, int],
                     directory: Path, tag: str) -> Path:
@@ -195,7 +243,8 @@ class CoverGenerator:
         sparkline, spark_end_y = self._sparkline(bars, tone)
         # 首帧冲突数字（2026-10-07）：与视频 intro-card 同源，合规审查后进封面
         spotlight = script.get("spotlight") if isinstance(script.get("spotlight"), Mapping) else {}
-        template = self._env.get_template("cover.html.j2")
+        style = self.style_for(script)
+        template = self._env.get_template(COVER_TEMPLATES[style])
         return template.render(
             name=stock_name or stock_code,
             code=stock_code,
@@ -214,7 +263,42 @@ class CoverGenerator:
             tags=self._tags(script),
             spotlight_label=str(spotlight.get("label") or "").strip(),
             spotlight_value=str(spotlight.get("value") or "").strip(),
+            # 独白封面的专属字段（辩论模板不读，多传不会渲染出东西）。
+            **self._monologue_context(script),
         )
+
+    @classmethod
+    def _monologue_context(cls, script: Mapping[str, Any]) -> dict[str, Any]:
+        """独白封面的「章节导轨」：几节、讲多久。
+
+        独白片是分节讲述（画面上的徽章就是「第 i 节 / n」），封面把「几节 + 多
+        久 + 一个人讲完」写在报价下方，既是它跟辩论封面的区分点，也让观众在信息
+        流里就知道点进去是一段完整深读，而不是几十秒的碎片。
+        """
+        turns = [turn for turn in (script.get("turns") or ())
+                 if isinstance(turn, Mapping) and str(turn.get("line") or "").strip()]
+        count = len(turns)
+        return {
+            "section_count": count,
+            "section_marks": [f"{index:02d}" for index in range(1, min(count, SECTION_MARK_LIMIT) + 1)],
+            "section_overflow": count > SECTION_MARK_LIMIT,
+            "duration_text": cls._duration_text(script, turns),
+        }
+
+    @classmethod
+    def _duration_text(cls, script: Mapping[str, Any], turns: Sequence[Mapping[str, Any]]) -> str:
+        """「约 N 分钟」：优先用剧本的实测估算，没有就按字数折一次。
+
+        封面不写秒：缩略图里没人读得懂「187.9 秒」，取整到分钟才是一眼能用的
+        信息；不足一分钟也写「约 1 分钟」，不写「0 分钟」。
+        """
+        seconds = cls._number(script.get("estimated_seconds"))
+        if seconds is None:
+            chars = sum(len(str(turn.get("line") or "")) for turn in turns)
+            seconds = chars / SPEECH_CHARS_PER_SECOND if chars else 0.0
+        if seconds <= 0:
+            return ""
+        return f"约 {max(1, round(seconds / 60))} 分钟"
 
     @staticmethod
     def _sparkline(bars: Sequence[Mapping[str, Any]], tone: str) -> tuple[str, float | None]:
