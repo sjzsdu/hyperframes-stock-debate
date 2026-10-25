@@ -7,8 +7,10 @@
   --accent: #69b7ff;
   --bull: #ff78bc;
   --bear: #65baff;
+  --narrator: #c084fc;
   --bull-soft: rgba(255, 120, 188, .12);
   --bear-soft: rgba(101, 186, 255, .12);
+  --narrator-soft: rgba(192, 132, 252, .12);
   /* A股配色：红涨绿跌 */
   --up: #ff7188;
   --down: #5ee0a7;
@@ -118,6 +120,7 @@ h1 em { color: var(--accent); font-style: normal; font-size: 30px; font-weight: 
 .stage-tint { position: absolute; inset: 0; opacity: 0; visibility: hidden; }
 .stage-tint.bull { background: radial-gradient(circle at 22% 16%, var(--bull-soft), transparent 46%), radial-gradient(circle at 80% 84%, rgba(105,183,255,.06), transparent 44%); }
 .stage-tint.bear { background: radial-gradient(circle at 22% 16%, var(--bear-soft), transparent 46%), radial-gradient(circle at 80% 84%, rgba(255,120,188,.05), transparent 44%); }
+.stage-tint.narrator { background: radial-gradient(circle at 22% 16%, var(--narrator-soft), transparent 46%), radial-gradient(circle at 80% 84%, rgba(255,209,102,.05), transparent 44%); }
 
 /* ---- 说话人徽标（2026-09-26）----
    抽帧反馈：静音刷到的观众不知道现在是谁在说。徽标挂在 tint 层上，跟随 tint
@@ -132,6 +135,8 @@ h1 em { color: var(--accent); font-style: normal; font-size: 30px; font-weight: 
 .speaker-chip.bull::before { background: var(--bull); box-shadow: 0 0 10px var(--bull); }
 .speaker-chip.bear { color: var(--bear); border-color: color-mix(in srgb, var(--bear) 80%, transparent); }
 .speaker-chip.bear::before { background: var(--bear); box-shadow: 0 0 10px var(--bear); }
+.speaker-chip.narrator { color: var(--narrator); border-color: color-mix(in srgb, var(--narrator) 80%, transparent); }
+.speaker-chip.narrator::before { background: var(--narrator); box-shadow: 0 0 10px var(--narrator); }
 
 /* ---- Horizontal: identity is a right-aligned strip in the band between the
         headline and the keyword chips.  The 300px left rail was mostly static
@@ -154,6 +159,7 @@ h1 em { color: var(--accent); font-style: normal; font-size: 30px; font-weight: 
 .round-badge::before { content: ""; width: 8px; height: 8px; margin-right: 9px; border-radius: 50%; }
 .round-badge.bull::before { background: var(--bull); box-shadow: 0 0 10px var(--bull); }
 .round-badge.bear::before { background: var(--bear); box-shadow: 0 0 10px var(--bear); }
+.round-badge.narrator::before { background: var(--narrator); box-shadow: 0 0 10px var(--narrator); }
 
 /* ---- Slot 2: talking-point chips.  The kicker text was removed 2026-09-23
         (the board SVG carries its own Chinese title; the old label showed raw
@@ -209,6 +215,8 @@ svg text[data-hl="1"] { fill: var(--gold) !important; font-weight: 700; }
 .caption-line.bull::before { background: var(--bull); box-shadow: 0 0 14px color-mix(in srgb, var(--bull) 70%, transparent); }
 .caption-line.bear { color: #b8dcff; }
 .caption-line.bear::before { background: var(--bear); box-shadow: 0 0 14px color-mix(in srgb, var(--bear) 70%, transparent); }
+.caption-line.narrator { color: #e4d4ff; }
+.caption-line.narrator::before { background: var(--narrator); box-shadow: 0 0 14px color-mix(in srgb, var(--narrator) 70%, transparent); }
 .progress-fill { position: absolute; left: 0; right: 0; bottom: 0; height: 4px; display: block;
   transform-origin: left center; transform: scaleX(0);
   background: linear-gradient(90deg, var(--bull), var(--accent), var(--bear)); }
@@ -246,6 +254,8 @@ svg text[data-hl="1"] { fill: var(--gold) !important; font-weight: 700; }
 .intro-roles .role.bull i { background: var(--bull); box-shadow: 0 0 12px var(--bull); }
 .intro-roles .role.bear { color: var(--bear); border-color: color-mix(in srgb, var(--bear) 55%, transparent); }
 .intro-roles .role.bear i { background: var(--bear); box-shadow: 0 0 12px var(--bear); }
+.intro-roles .role.narrator { color: var(--narrator); border-color: color-mix(in srgb, var(--narrator) 55%, transparent); }
+.intro-roles .role.narrator i { background: var(--narrator); box-shadow: 0 0 12px var(--narrator); }
 /* 首帧冲突数字（2026-10-07）：封面/分享卡同源的「底牌」。静态、无动画——
    首帧纪律：分享卡=第 0 帧必须完整排版，禁入场淡入。 */
 .intro-spotlight { display: flex; align-items: baseline; gap: 16px;

@@ -18,7 +18,9 @@ from rich.progress import BarColumn, Progress, SpinnerColumn, TextColumn, TimeEl
 
 from stocktalk.modules.compliance import ComplianceAgent
 from stocktalk.modules.cover import CoverGenerator
-from stocktalk.modules.dialogue_generator import DialogueGenerator
+from stocktalk.modules.dialogue_generator import (create_dialogue_generator,
+                                                  dialogue_format,
+                                                  ensure_narrator_character)
 from stocktalk.modules.episode_planner import EpisodePlanner
 from stocktalk.modules.hyperframes_builder import HyperFramesBuilder
 from stocktalk.modules.publisher import PLATFORM_LABELS, SauPublisher, cover_sizes_for
@@ -44,12 +46,22 @@ def _merge_config(defaults: Mapping[str, Any], overrides: Mapping[str, Any]) -> 
 
 
 def load_config(path: str | Path | None = None) -> dict[str, Any]:
-    """Load bundled defaults, optionally overlaid by a user config file."""
+    """Load bundled defaults, optionally overlaid by a user config file.
+
+    An explicitly requested file that does not exist is an error, not a silent
+    fallback to the defaults: ``--config config.monologue.yaml`` run from the
+    wrong directory would otherwise quietly produce a *debate* film, and the
+    difference only shows up after ten minutes of rendering (形态在骨架、说话
+    人、封面版式上都不同，静默降级是最难查的一类坑)。
+    """
     with DEFAULT_CONFIG_PATH.open(encoding="utf-8") as f:
         defaults = yaml.safe_load(f) or {}
-    if path is None or not Path(path).exists():
+    if path is None:
         return defaults
-    with Path(path).open(encoding="utf-8") as f:
+    requested = Path(path)
+    if not requested.exists():
+        raise FileNotFoundError(str(requested))
+    with requested.open(encoding="utf-8") as f:
         return _merge_config(defaults, yaml.safe_load(f) or {})
 
 
@@ -61,6 +73,12 @@ class Pipeline:
         self.config = config or {}
         self.console = console or Console()
         self._sleep = sleep
+        # 独白形态要在建任何 agent 之前补齐 characters.narrator：TTS 按角色取音色，
+        # 缺角色会把该说话人的台词静默过滤掉（成片零配音且不报错）。
+        ensure_narrator_character(self.config)
+        # 形态由工厂决定（dialogue.format: debate | monologue）——生成器类型一旦
+        # 分家，后面所有按形态分支的地方都必须和它取同一个值，不能各读一次 config。
+        self.format = dialogue_format(self.config)
         self.stock_client = StockDataClient(StockDataConfig(
             retries=self.config.get("stock_data", {}).get("retries", 0),
             timeout_seconds=self.config.get("stock_data", {}).get("timeout_seconds", 60.0),
@@ -68,7 +86,7 @@ class Pipeline:
             news_days=int(self.config.get("stock_data", {}).get("news_days", 0)),
             require_company_data=bool(self.config.get("stock_data", {}).get("require_company_data", True)),
         ))
-        self.dialogue_gen = DialogueGenerator(self.config)
+        self.dialogue_gen = create_dialogue_generator(self.config)
         self.episode_planner = EpisodePlanner()
         self.compliance = ComplianceAgent(self.config)
         self.tts = TTSAgent(self.config)
@@ -109,10 +127,13 @@ class Pipeline:
 
         长片最容易出的偏差是模型多写几百字（2-5 分钟目标下就是多出一两分钟），
         渲染前提醒比渲完才发现便宜得多。只提醒不阻断：真要缩短，调
-        ``dialogue.max_duration_seconds`` 即可。
+        ``dialogue.max_duration_seconds``（独白是 ``dialogue.monologue``）即可。
+
+        上限取生成器的**生效值**而不是 config 顶层：独白形态的额度在
+        ``dialogue.monologue`` 里，拿 300 秒当独白的上限会漏掉一整个区间。
         """
         try:
-            cap = float((self.config.get("dialogue", {}) or {}).get("max_duration_seconds") or 0)
+            cap = float(getattr(self.dialogue_gen.config, "max_duration_seconds", 0) or 0)
             estimated = float(script.get("estimated_seconds") or 0.0)
         except (TypeError, ValueError):
             return
@@ -239,9 +260,13 @@ class Pipeline:
                 cuts[platform] = str(path)
         return cuts
 
-    @staticmethod
-    def _silent_timeline(script: Mapping[str, Any], srt_path: Path) -> dict[str, Any]:
-        """Create subtitle timing for a silent render when TTS is unavailable."""
+    def _silent_timeline(self, script: Mapping[str, Any], srt_path: Path) -> dict[str, Any]:
+        """Create subtitle timing for a silent render when TTS is unavailable.
+
+        说话人白名单取 ``tts.speakers``（= resolve_speakers，配置里声明的角色
+        都算），不写死 ("bull", "bear")：独白片的 narrator 会被硬编码的元组
+        静默过滤掉——整条片没有字幕也没有任何提示。
+        """
         segments: list[dict[str, Any]] = []
         cursor = 0.0
         for turn in script.get("turns", []):
@@ -249,9 +274,11 @@ class Pipeline:
                 continue
             character = str(turn.get("speaker", ""))
             line = str(turn.get("line", "")).strip()
-            if character not in ("bull", "bear") or not line:
+            if character not in self.tts.speakers or not line:
                 continue
-            duration = max(2.5, min(9.0, len(line) * 0.23))
+            # 0.23s/字 ≈ 4.3 字/秒。上限从 9 秒放宽到 60：独白单段可到 220 字
+            # （≈46 秒），按 9 秒截断会让字幕与画面差出一整个段落。
+            duration = max(2.5, min(60.0, len(line) * 0.23))
             segments.append({"character": character, "line": line, "start_time": cursor,
                              "end_time": cursor + duration, "duration": duration, "audio_path": None})
             cursor += duration + 0.25

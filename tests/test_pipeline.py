@@ -56,8 +56,18 @@ FAKE_AUDIO: dict[str, Any] = {
 # ---------------------------------------------------------------------------
 
 
-def test_load_config_missing_file() -> None:
-    config = load_config("/nonexistent.yaml")
+def test_load_config_missing_file_is_an_error() -> None:
+    """显式点名的配置文件不存在时必须报错，不能静默退回默认。
+
+    2026-10-25：用户习惯性带 `--config config.monologue.yaml`，一旦路径打错或
+    换了目录，旧行为会安静地生成一条**辩论**片——形态差异要到渲完才看出来。
+    """
+    with pytest.raises(FileNotFoundError):
+        load_config("/nonexistent.yaml")
+
+
+def test_load_config_none_uses_the_shipped_defaults() -> None:
+    config = load_config(None)
     assert "voice_id" in config["characters"]["bull"]
 
 

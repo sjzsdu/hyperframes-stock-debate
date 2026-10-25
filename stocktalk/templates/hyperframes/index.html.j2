@@ -96,11 +96,10 @@
     {# 首帧冲突数字（2026-10-07）：本期最反差的一个数字直接进分享卡。
        静态展示、无入场动画——首帧纪律（分享卡=第 0 帧完整排版）。 #}
     {% if spotlight %}<div class="intro-spotlight"><span>{{ spotlight.label }}</span><strong>{{ spotlight.value }}</strong></div>{% endif %}
-    {# 角色出场：新观众前 3 秒必须知道这是两个人在辩论，谁暖谁冷从第一帧就立住。 #}
+    {# 角色出场：辩论首帧亮出「谁 × 谁」与各自的立场色；独白只有一个主讲人（谈股论金），
+       不画「×」，避免首帧暗示还存在对辩方。 #}
     <div class="intro-roles">
-      <span class="role bull"><i></i>{{ speakers.bull }}</span>
-      <em>×</em>
-      <span class="role bear"><i></i>{{ speakers.bear }}</span>
+      {% for role in cast %}{% if not loop.first %}<em>×</em>{% endif %}<span class="role {{ role }}"><i></i>{{ speakers[role] }}</span>{% endfor %}
     </div>
   </section>
 

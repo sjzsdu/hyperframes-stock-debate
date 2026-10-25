@@ -1,0 +1,267 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>{{ name }} {{ code }}</title>
+<style>
+  /* 独白片封面（2026-10-25，用户要求「封面与之前的风格做一个区别」）。
+
+     与辩论封面（cover.html.j2）刻意分成两种视觉语言，feed 里滑过去一眼可分：
+       1) 底色：辩论是「深海军蓝 + 细网格」；独白是「墨黑 + 主讲人紫 + 台本横线」，
+          并且不做整幅红绿氛围——涨跌只留在价格、胶囊和走势带里。
+       2) 主体：辩论把右半/中部交给一块大曲线图板；独白换成一条通栏细走势带
+          （ticker 感），把最大的位置留给「股票名 + 讲什么」。
+       3) 身份行：辩论写「多空对话 · 只看生意与数据」；独白写「一人讲透一家公司」
+          并多一行「N 节 · 约 M 分钟 · 一人讲完」的章节导轨——独白是分节讲述，
+          不是两人交锋。
+
+     self-contained：Chrome 直接打开本文件，配色与字体都在这里，不依赖
+     stock-debate.css（那份样式里的 bull/bear 变量与独白无关）。
+     缩略图可读性纪律与辩论封面一致：大名字、大涨幅、大钩子，技术信号词
+     与合规提示语一律不上封面。 */
+  :root {
+    --ink: #07060e;
+    --ink-2: #120c1f;
+    --violet: #c084fc;
+    --violet-deep: #7c4ddb;
+    --amber: #ffc466;
+    --text: #f6f1ff;
+    --muted: #a99bc4;
+    --line: rgba(192, 132, 252, .30);
+    --up: #ff7188;
+    --down: #5ee0a7;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { width: 100%; height: 100%; overflow: hidden; }
+  body {
+    background: var(--ink);
+    color: var(--text);
+    font-family: "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", Arial, sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  #cover {
+    position: relative;
+    width: 100vw; height: 100vh;
+    overflow: hidden;
+    isolation: isolate;
+    display: grid;
+    grid-template-areas: "brand" "hero" "strip" "meta" "sections" "hook" "tags";
+    grid-template-rows: auto auto auto auto minmax(0, 1fr) auto auto;
+    row-gap: 2.2vh;
+    padding: 5vh 6.6vw 4.4vh 7.6vw;
+    /* 主讲人一盏灯（左上偏紫）＋ 右下一点暖光；没有整幅红绿氛围。 */
+    background:
+      radial-gradient(circle at 12% 4%, rgba(192, 132, 252, .30) 0, transparent 54%),
+      radial-gradient(circle at 88% 96%, rgba(255, 196, 102, .10) 0, transparent 46%),
+      linear-gradient(168deg, var(--ink-2) 0, var(--ink) 66%);
+  }
+  /* 台本横线：给墨底一点「稿纸」质感，与辩论封面的方格纹理区分开 */
+  #cover::before {
+    content: ""; position: absolute; inset: 0; z-index: -1;
+    background: repeating-linear-gradient(0deg, rgba(192, 132, 252, .07) 0 1px, transparent 1px 7.6vh);
+    mask-image: linear-gradient(180deg, #000 0, rgba(0, 0, 0, .45) 52%, transparent 92%);
+  }
+  /* 装订线：左侧一道竖向紫线，独白封面最认得出的记号 */
+  #cover::after {
+    content: ""; position: absolute; left: 3.6vw; top: 6.4vh; bottom: 8.6vh;
+    width: 2px; border-radius: 2px;
+    background: linear-gradient(180deg, var(--violet) 0, rgba(192, 132, 252, .12) 72%, transparent 100%);
+  }
+
+  .brand { grid-area: brand; display: flex; align-items: baseline; gap: 1.3vw; flex-wrap: wrap; }
+  .brand .mark {
+    font-size: min(2.2vw, 1.6vh); font-weight: 700; letter-spacing: .22em;
+    color: #f0e4ff; padding: .55vh 1.2vw;
+    border: 1px solid var(--line); border-radius: 999px;
+    background: linear-gradient(135deg, rgba(192, 132, 252, .26), rgba(124, 77, 219, .06));
+  }
+  .brand .sub { font-size: min(1.45vw, 1.1vh); color: var(--muted); letter-spacing: .1em; }
+
+  .hero { grid-area: hero; }
+  .hero .name-row { display: flex; align-items: baseline; gap: 1.4vw; flex-wrap: wrap; }
+  .hero h1 {
+    font-size: min(11.2vw, 8vh); line-height: 1.02; letter-spacing: -.015em; font-weight: 800;
+    text-shadow: 0 1.4vh 4.5vh rgba(0, 0, 0, .62);
+  }
+  /* 代码做成描边胶囊（辩论封面是无框小字）：独白封面的第二处记认 */
+  .hero .code {
+    font-size: min(2.05vw, 1.5vh); font-weight: 600; color: #e6d6ff;
+    letter-spacing: .14em; font-variant-numeric: tabular-nums;
+    padding: .45vh 1vw; border: 1px solid var(--line); border-radius: 8px;
+    background: rgba(124, 77, 219, .12);
+  }
+  .quote { display: flex; align-items: baseline; gap: 1.8vw; margin-top: 1.4vh; flex-wrap: wrap; }
+  .quote .price {
+    font-size: min(7vw, 5vh); font-weight: 700; font-variant-numeric: tabular-nums;
+  }
+  .quote .change {
+    font-size: min(4.4vw, 3.2vh); font-weight: 800; font-variant-numeric: tabular-nums;
+    padding: .6vh 1.4vw; border-radius: 12px;
+  }
+  .quote.up .price, .quote.up .change { color: var(--up); }
+  .quote.down .price, .quote.down .change { color: var(--down); }
+  /* 胶囊深浅跟涨跌幅走（--tint-chip 由 cover.py 内联注入，固定值只是回退） */
+  .quote.up .change { background: var(--tint-chip, rgba(255, 113, 136, .15)); text-shadow: 0 0 3.4vh rgba(255, 113, 136, .65); }
+  .quote.down .change { background: var(--tint-chip, rgba(94, 224, 167, .15)); text-shadow: 0 0 3.4vh rgba(94, 224, 167, .55); }
+  .quote.flat .change { color: var(--muted); background: rgba(145, 168, 191, .12); text-shadow: none; }
+
+  /* 细走势带：没有图板、没有圆角、没有环境色，只有一条曲线和上下两道发丝线 */
+  .strip {
+    grid-area: strip; display: flex; flex-direction: column; gap: .6vh;
+    padding: 1.2vh 0 1vh;
+    border-top: 1px solid var(--line); border-bottom: 1px solid var(--line);
+  }
+  .strip .strip-head {
+    display: flex; justify-content: space-between; align-items: baseline;
+    font-size: min(1.6vw, 1.2vh); color: var(--muted); letter-spacing: .12em;
+  }
+  .strip .strip-head b { color: #e6d6ff; font-weight: 600; font-variant-numeric: tabular-nums; }
+  /* 竖屏竖向空间富裕，曲线带给得比横屏高：它是这一版的主体图形 */
+  .strip .strip-body { position: relative; height: min(18vh, 13vw); }
+  .strip svg { width: 100%; height: 100%; display: block; }
+  .strip .spark-fill { opacity: .8; }
+  .strip .spark-line {
+    fill: none; stroke-width: 4.2; vector-effect: non-scaling-stroke;
+    filter: drop-shadow(0 0 1.4vh currentColor);
+  }
+  .strip.up { color: var(--up); }
+  .strip.down { color: var(--down); }
+  .strip.flat { color: var(--violet); }
+  .strip.up .spark-line { stroke: var(--up); }
+  .strip.down .spark-line { stroke: var(--down); }
+  .strip.flat .spark-line { stroke: var(--violet); }
+  .strip .grid { stroke: rgba(192, 132, 252, .16); stroke-width: 1; vector-effect: non-scaling-stroke; }
+  /* 末点光晕：绝对定位的 HTML 层，不受 SVG 拉伸影响（不会变椭圆） */
+  .strip .pulse {
+    position: absolute; right: -.5vw; top: 50%; transform: translateY(-50%);
+    width: min(5.4vw, 3.6vh); aspect-ratio: 1; border-radius: 50%;
+    background: radial-gradient(circle, currentColor 0, rgba(255, 255, 255, .5) 12%, transparent 68%);
+    opacity: .95; pointer-events: none;
+  }
+
+  /* 章节导轨：几节、讲多久、一个人讲完——独白封面的身份行 */
+  .meta { grid-area: meta; display: flex; align-items: center; flex-wrap: wrap; gap: .9vw; }
+  .meta span {
+    font-size: min(1.85vw, 1.35vh); color: #eee2ff; letter-spacing: .06em;
+    border: 1px solid var(--line); border-radius: 999px;
+    padding: .6vh 1.25vw; background: rgba(124, 77, 219, .16);
+  }
+  .meta span b { color: var(--violet); font-weight: 800; font-variant-numeric: tabular-nums; }
+
+  /* 章节导轨：竖屏落在中段空白里（01 02 03…），横屏退到右下角 */
+  .sections { grid-area: sections; display: flex; flex-wrap: wrap; align-self: center; gap: .7vw; }
+  .sections i {
+    font-style: normal; font-size: min(2.6vw, 2vh); color: #e3ccff;
+    border: 1px solid var(--line); border-radius: 9px; padding: .8vh 1.15vw;
+    font-variant-numeric: tabular-nums; letter-spacing: .04em;
+    background: rgba(124, 77, 219, .13);
+  }
+
+  .hook { grid-area: hook; align-self: end; }
+  .hook .kicker {
+    display: flex; align-items: center; gap: 1.1vw;
+    font-size: min(1.75vw, 1.28vh); color: var(--violet); letter-spacing: .26em;
+    margin-bottom: 1.3vh;
+  }
+  .hook .kicker::before { content: ""; width: 3.6vw; height: 2px; background: var(--violet); opacity: .85; }
+  .hook .text {
+    font-size: min(5.4vw, 4.1vh); line-height: 1.36; font-weight: 700;
+    text-shadow: 0 1vh 3vh rgba(0, 0, 0, .55);
+  }
+  /* 首帧冲突数字（与视频 intro-card 同源）：缩略图里数字比句子更抓眼 */
+  .hook .spotlight { display: flex; align-items: baseline; gap: 1.2vw; margin-bottom: 1.1vh; }
+  .hook .spotlight em {
+    font-style: normal; font-size: min(1.85vw, 1.35vh);
+    color: var(--muted); letter-spacing: .12em;
+  }
+  .hook .spotlight b {
+    font-size: min(3.5vw, 2.7vh); font-weight: 800; color: var(--amber);
+    font-variant-numeric: tabular-nums; text-shadow: 0 .8vh 2.6vh rgba(0, 0, 0, .5);
+  }
+
+  .tags { grid-area: tags; display: flex; gap: 1.1vw; flex-wrap: wrap; }
+  .tags span {
+    font-size: min(1.75vw, 1.3vh); color: var(--muted);
+    border: 1px solid var(--line); border-radius: 999px;
+    padding: .7vh 1.4vw; background: rgba(192, 132, 252, .06);
+  }
+
+  /* 横屏（4:3 与 16:9）：左列名字/报价/导轨/钩子，右列走势带通高 + 章节方块垫底。 */
+  @media (min-aspect-ratio: 1/1) {
+    #cover {
+      grid-template-areas: "brand strip" "hero strip" "meta strip" "hook sections" "tags sections";
+      grid-template-columns: 54fr 46fr;
+      grid-template-rows: auto auto auto minmax(0, 1fr) auto;
+      column-gap: 3.4vw;
+      row-gap: 2.4vh;
+      padding: 5.4vh 5.2vw 5vh 6.2vw;
+    }
+    #cover::after { left: 3vw; top: 6vh; bottom: 9vh; }
+    .hero h1 { font-size: min(6.2vw, 7.4vh); }
+    .quote .price { font-size: min(4.2vw, 5.2vh); }
+    .quote .change { font-size: min(2.8vw, 3.4vh); }
+    .strip { height: 100%; padding: 1.6vh 0; }
+    .strip .strip-body { flex: 1; height: auto; }
+    .hook { align-self: end; }
+    .hook .text { font-size: min(2.7vw, 3.5vh); }
+    .sections { align-self: end; justify-content: flex-end; gap: .6vw; }
+    .sections i {
+      font-size: min(1.6vw, 1.5vh); padding: .5vh .8vw; border-radius: 6px;
+      color: var(--violet); background: rgba(124, 77, 219, .10);
+    }
+  }
+</style>
+</head>
+<body>
+<main id="cover" class="{{ tone }}" data-ratio="{{ width }}x{{ height }}" data-style="monologue"{% if tint_style %} style="{{ tint_style }}"{% endif %}>
+
+  <header class="brand">
+    <span class="mark">谈股论金</span>
+    <span class="sub">一人讲透一家公司 · 只看生意与数据</span>
+  </header>
+
+  <section class="hero">
+    <div class="name-row">
+      <h1>{{ name }}</h1>
+      <span class="code">{{ code }}</span>
+    </div>
+    <div class="quote {{ tone }}">
+      <span class="price">{{ price_text }}</span>
+      <span class="change">{{ change_text }}</span>
+    </div>
+  </section>
+
+  {# 细走势带：独白封面的主体图形，取代辩论封面的图板 #}
+  <section class="strip {{ tone }}">
+    <div class="strip-head">
+      <span>近 30 日</span>
+      <span>{% if chart_min %}<b>{{ chart_min }}</b> 低　<b>{{ chart_max }}</b> 高{% endif %}</span>
+    </div>
+    <div class="strip-body">
+      {{ sparkline|safe }}{% if spark_end_y is not none %}<i class="pulse" style="top: {{ spark_end_y }}%"></i>{% endif %}
+    </div>
+  </section>
+
+  {# 章节导轨（2026-10-25）：独白是分节讲述，封面把「几节 + 多久 + 一人讲完」顶上
+     ——它既是独白片的身份，也是与「多空对话」封面的第一眼区别。 #}
+  <div class="meta">
+    {% if section_count > 1 %}<span><b>{{ section_count }}</b> 节</span>{% endif %}
+    {% if duration_text %}<span>{{ duration_text }}</span>{% endif %}
+    <span>一个人讲完</span>
+  </div>
+
+  <div class="hook">
+    <span class="kicker">本期讲透</span>
+    {% if spotlight_value %}<div class="spotlight"><em>{{ spotlight_label }}</em><b>{{ spotlight_value }}</b></div>{% endif %}
+    <div class="text">{{ hook }}</div>
+  </div>
+
+  <div class="tags">{% for tag in tags %}<span>{{ tag }}</span>{% endfor %}</div>
+
+  {# 章节方块：竖屏在中段（01 02 03…），横屏退到右下角 #}
+  {% if section_marks %}
+  <div class="sections">{% for mark in section_marks %}<i>{{ mark }}</i>{% endfor %}{% if section_overflow %}<i>…</i>{% endif %}</div>
+  {% endif %}
+</main>
+</body>
+</html>

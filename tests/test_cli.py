@@ -187,6 +187,73 @@ def test_main_platform_override_reaches_the_publisher() -> None:
     assert fake.config["publish"]["platforms"] == ["douyin", "bilibili"]
 
 
+def test_main_canvas_override_reaches_the_config() -> None:
+    """--canvas vertical 要写回 video.canvas——手机版就靠这一下切换。"""
+    fake = FakePipeline()
+    with _patch_pipeline(fake):
+        cli.main(["601689", "--canvas", "vertical", "--no-render"])
+
+    assert fake.config["video"]["canvas"] == "vertical"
+
+
+def test_main_without_canvas_leaves_config_alone() -> None:
+    fake = FakePipeline()
+    config = {"video": {"canvas": "horizontal"}}
+    with patch.multiple(cli, Pipeline=lambda conf: (setattr(fake, "config", conf), fake)[1],
+                        load_config=lambda path=None: dict(config)):
+        cli.main(["601689", "--no-render"])
+
+    assert fake.config["video"]["canvas"] == "horizontal"
+
+
+def test_main_format_override_reaches_the_config() -> None:
+    """--format monologue 等价于 --config config.monologue.yaml，不用每次带配置文件。"""
+    fake = FakePipeline()
+    with _patch_pipeline(fake):
+        cli.main(["601689", "--format", "monologue", "--no-render"])
+
+    assert fake.config["dialogue"]["format"] == "monologue"
+
+
+def test_main_format_override_beats_the_config_file() -> None:
+    """命令行显式给了形态就以命令行为准（配置文件里的 dialogue.format 被覆盖）。"""
+    fake = FakePipeline()
+    with _patch_pipeline(fake, {"dialogue": {"format": "debate"}}):
+        cli.main(["601689", "--format", "monologue", "--no-render"])
+
+    assert fake.config["dialogue"]["format"] == "monologue"
+
+
+def test_main_without_format_leaves_the_config_file_alone() -> None:
+    fake = FakePipeline()
+    with _patch_pipeline(fake, {"dialogue": {"format": "debate", "max_line_chars": 80}}):
+        cli.main(["601689", "--no-render"])
+
+    assert fake.config["dialogue"] == {"format": "debate", "max_line_chars": 80}
+
+
+def test_main_rejects_an_unknown_format() -> None:
+    with _patch_pipeline(FakePipeline()):
+        with pytest.raises(SystemExit) as excinfo:
+            cli.main(["601689", "--format", "podcast", "--no-render"])
+
+    assert excinfo.value.code == 2
+
+
+def test_main_fails_loudly_when_the_config_file_is_missing() -> None:
+    """--config 指到不存在的文件必须当场报错：静默退回默认会出一条辩论片。
+
+    这条故意不 mock load_config——要走的正是真实的「文件不存在 → 报错」路径。
+    """
+    fake = FakePipeline()
+    with patch.multiple(cli, Pipeline=lambda conf: (setattr(fake, "config", conf), fake)[1]):
+        with pytest.raises(SystemExit) as excinfo:
+            cli.main(["601689", "--config", "config.monologu.yaml", "--no-render"])
+
+    assert excinfo.value.code == 2
+    assert not fake.calls  # 一行片子都没跑，报错在开跑之前
+
+
 def test_main_rejects_an_unknown_platform() -> None:
     with _patch_pipeline(FakePipeline()):
         with pytest.raises(SystemExit):

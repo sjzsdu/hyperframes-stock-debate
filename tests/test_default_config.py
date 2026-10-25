@@ -7,6 +7,7 @@ here so a future edit cannot quietly switch them back.
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 from stocktalk.pipeline import load_config
@@ -116,3 +117,14 @@ def test_baijiahao_spec_needs_a_wide_cover() -> None:
     spec = PLATFORM_SPECS["baijiahao"]
     assert dict(spec["covers"])["--thumbnail"] == "wide"
     assert "wide" in cover_sizes_for(["baijiahao"])
+
+
+def test_monologue_example_config_only_switches_the_format() -> None:
+    """config.monologue.yaml 是示例：它只切形态，额度/人设/封面版式都随默认走。"""
+    example = Path(__file__).resolve().parents[1] / "config.monologue.yaml"
+    overlaid = load_config(example)
+    assert overlaid["dialogue"]["format"] == "monologue"
+    defaults = _config()
+    assert overlaid["dialogue"]["monologue"] == defaults["dialogue"]["monologue"]
+    assert overlaid["cover"] == defaults["cover"]
+    assert overlaid["publish"] == defaults["publish"]
