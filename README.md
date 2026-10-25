@@ -6,6 +6,7 @@
 
 - 零操作出片：不用剪辑、不用配音、不用排版、不用写稿
 - 双人设对话：股市新手（乐观冲动） vs 股市老登（理性批判）
+- 两种形态：`--format debate`（默认，多空对辩）与 `--format monologue`（一个人把一家公司讲透，2-4 分钟、6 节、专属封面版式，见[独白形态](#独白形态一人把一家公司讲透)）
 - 内容专业：基本面财报 + 技术面 K 线综合解读
 - 结构不重样：剧本骨架按个股实际拿得到的数据自动挑（裂痕式 / 客户视角 / 年报逐条 / 同行对比 / 六层主线），有数据才讲、没数据不讲（见[剧本骨架](#剧本骨架arc让每期的结构不一样)）
 - 片尾有互动：每期给出一个可核对的下期变量、一个生意层面的二选一问题，多空分歧打在片尾图板上（见[片尾互动](#片尾互动内容层--画面层)）
@@ -134,6 +135,8 @@ tangulunjin --notify-test       # 确认「跑完的结果」真的能推到你�
 | 批量跑一批票 | `tangulunjin --watchlist watchlist.txt --publish` |
 | 多只票一次给 | `tangulunjin 601689 600519 000001 --publish` |
 | 只发某几个平台 | `tangulunjin 601689 --platforms douyin,tencent` |
+| 出独白片（一个人讲透一家公司） | `tangulunjin 601689 --format monologue` |
+| 出手机版（竖屏 1080×1920） | `tangulunjin 601689 --canvas vertical` |
 | 只补发上次失败的平台 | `tangulunjin 601689 --republish` |
 | 用已有 MP4 重发（不重新渲染） | `tangulunjin 601689 --publish-only output/xxx.mp4` |
 | 排到平台定时发表 | `tangulunjin 601689 --publish --publish-at 19:30` |
@@ -462,7 +465,11 @@ tangulunjin <股票代码...> [选项]
 
 选项：
   --name NAME           股票名称（可选，会自动获取；仅在单个代码时生效）
-  --config PATH         自定义配置文件路径
+  --config PATH         自定义配置文件路径（与内置 default.yaml 深度合并；
+                        文件不存在会直接报错，不会静默退回默认配置）
+  --format MODE         内容形态：debate（默认，双人对辩）/ monologue（单人独白）。
+                        等价于 --config config.monologue.yaml，但不用每次带配置文件
+  --canvas MODE         画幅：horizontal（默认，1920×1080 横屏）/ vertical（1080×1920 竖屏）
   --output-dir DIR      输出目录（默认 output/）
   --duration-minutes N  对话目标时长（分钟，默认 2-5）
   -m, --message TEXT    本期提示词：注入剧本生成，给 LLM 当选材与侧重的参考（可重复；
@@ -590,6 +597,37 @@ B站自动选择财经分区。五个平台的 AI 生成声明都到位：抖音
    `echo -n "123456" > third_party/social-auto-upload/verify_code.txt`（sau 读到后自动提交并删除）。
 2. **cookie 失效**：预检会拦下失效平台并在报告里提示 `sau <platform> login`，不会浪费一次渲染。
 3. **B站首次上传**：会从 GitHub 下载 `biliup` 二进制，网络不通时 B站失败但**不影响其他平台**。
+
+## 独白形态：一人把一家公司讲透
+
+```bash
+tangulunjin 300433 --format monologue                    # 横屏独白片
+tangulunjin 300433 --format monologue --canvas vertical   # 竖屏独白片（手机版）
+tangulunjin 300433 --format monologue --publish           # 出片后自动全平台发布
+```
+
+`--format monologue` 只是把 `dialogue.format` 切成 `monologue`，其余额度、人设、封面版式
+全部来自 `stocktalk/config/default.yaml`，所以**不需要每次带 `--config`**。仓库根那份
+`config.monologue.yaml` 仍然可用（等价写法，适合写进脚本固化形态），但日常手敲用 `--format` 更短。
+
+两种形态的差别：
+
+| | debate（默认） | monologue |
+|---|---|---|
+| 说话人 | 股市新手 × 股市老登 | 只有主讲人「谈股论金」 |
+| 结构 | 5 轮多空交锋（骨架随机） | 6 节深读：生意 → 账 → 护城河 → 风险 → 结论 |
+| 片长 | 2-5 分钟 | 2-4 分钟（`dialogue.monologue` 段单独控额度） |
+| 画面 | 双人角色卡、观点徽章、双列立场图板 | 单人角色卡、章节徽章「第 i 节 / n」、无双列图板 |
+| 封面 | 「多空对话」版式（深蓝 + 大曲线图板） | 「一人讲透一家公司」版式（墨黑紫调 + 细走势带 + 章节导轨） |
+
+几点值得知道：
+
+- 封面版式由 `cover.style` 决定，默认 `auto`：跟着**这一期剧本的 format** 走，
+  所以补发旧片（`--republish` / `--publish-only`）不会拿错版式。想全账号统一一种封面，
+  把 `cover.style` 写成 `debate` 或 `monologue`。
+- 发布链路两种形态完全一样：`--publish` 会自动挑画幅（`publish.platform_canvas`）、
+  生成对应封面、按平台下发标题与简介，失败只影响该平台。
+- `--config` 路径写错会直接报错停下，不会静默退回默认配置（否则独白片会悄悄变成辩论片）。
 
 ## 配置
 

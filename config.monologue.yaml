@@ -1,8 +1,11 @@
-# 独白形态配置（2026-10-24）：仅切换形态，其余全部走 default.yaml。
-# 用法：
-#   tangulunjin 600519 --config config.monologue.yaml                    # 桌面版（横屏 1920×1080）
-#   tangulunjin 600519 --config config.monologue.yaml --canvas vertical  # 手机版（竖屏 1080×1920）
-#   tangulunjin 600519 --config config.monologue.yaml --publish          # 渲染完自动发布（平台列表走 default.yaml）
+# 独白形态（2026-10-24）：只切形态，其余全部走 default.yaml。
+#
+# 日常手敲不用带这个文件，直接用命令行开关即可（两者等价，开关只改 dialogue.format）：
+#   tangulunjin 600519 --format monologue                     # 横屏独白片
+#   tangulunjin 600519 --format monologue --canvas vertical   # 竖屏独白片（手机版）
+#   tangulunjin 600519 --format monologue --publish           # 出片后自动全平台发布
+#
+# 这份文件保留给「把形态固化进脚本 / 守护进程」的场景：--format 每次都要敲，
+# 而配置文件写一次就跟着命令走。
 dialogue:
   format: monologue
-

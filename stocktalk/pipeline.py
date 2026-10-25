@@ -46,12 +46,22 @@ def _merge_config(defaults: Mapping[str, Any], overrides: Mapping[str, Any]) -> 
 
 
 def load_config(path: str | Path | None = None) -> dict[str, Any]:
-    """Load bundled defaults, optionally overlaid by a user config file."""
+    """Load bundled defaults, optionally overlaid by a user config file.
+
+    An explicitly requested file that does not exist is an error, not a silent
+    fallback to the defaults: ``--config config.monologue.yaml`` run from the
+    wrong directory would otherwise quietly produce a *debate* film, and the
+    difference only shows up after ten minutes of rendering (形态在骨架、说话
+    人、封面版式上都不同，静默降级是最难查的一类坑)。
+    """
     with DEFAULT_CONFIG_PATH.open(encoding="utf-8") as f:
         defaults = yaml.safe_load(f) or {}
-    if path is None or not Path(path).exists():
+    if path is None:
         return defaults
-    with Path(path).open(encoding="utf-8") as f:
+    requested = Path(path)
+    if not requested.exists():
+        raise FileNotFoundError(str(requested))
+    with requested.open(encoding="utf-8") as f:
         return _merge_config(defaults, yaml.safe_load(f) or {})
 
 

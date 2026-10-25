@@ -81,12 +81,18 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("stock_codes", nargs="*", metavar="CODE",
                         help="6位A股代码；可一次给多个，逐个生成并发布")
     parser.add_argument("--name", default=None, help="股票名称（可选，会自动获取；仅在单个代码时生效）")
-    parser.add_argument("--config", default=None, help="自定义配置文件路径")
+    parser.add_argument("--config", default=None,
+                        help="自定义配置文件路径（与 default.yaml 深度合并）。"
+                             "文件不存在会直接报错——静默退回默认配置会让你以为在跑独白，实际出了辩论片")
     parser.add_argument("--output-dir", default=None, help="输出目录（默认 output/）")
     parser.add_argument("--canvas", choices=["horizontal", "vertical"], default=None,
                         help="画幅：horizontal=桌面版（1920×1080 横屏），"
                              "vertical=手机版（1080×1920 竖屏，适配抖音/快手全屏）；"
                              "覆盖配置里的 video.canvas")
+    parser.add_argument("--format", choices=["debate", "monologue"], default=None, dest="dialogue_format",
+                        help="内容形态：debate=双人对辩，monologue=单人讲透一家公司（独白）；"
+                             "覆盖配置里的 dialogue.format，等价于 --config config.monologue.yaml，"
+                             "但不用每次带配置文件")
     parser.add_argument("--duration-minutes", type=int, default=None, help="对话目标时长（分钟，默认 2-5）")
     parser.add_argument("--short-form", action="store_true",
                         help="信息流短版：将目标时长设为 45-75 秒，适合与默认长版做 A/B 测试")
@@ -151,7 +157,12 @@ def main(argv: list[str] | None = None) -> None:
 
     args = parser.parse_args(argv)
     # Config first: --no-interactive mutates the publish section before anything runs.
-    config = load_config(args.config)
+    try:
+        config = load_config(args.config)
+    except FileNotFoundError as exc:
+        # --config 指到不存在的文件时绝不静默退回默认配置：那会让人以为在跑独白，
+        # 实际出了一条辩论片（形态在成片、封面、骨架上是判若两人的差别）。
+        parser.error(f"--config 指定的配置文件不存在：{exc}")
     if args.no_interactive:
         config.setdefault("publish", {})["interactive_verify_code"] = False
 
@@ -167,6 +178,12 @@ def main(argv: list[str] | None = None) -> None:
 
     if args.canvas:
         config.setdefault("video", {})["canvas"] = args.canvas
+
+    if args.dialogue_format:
+        # --format 是 --config config.monologue.yaml 的等价快捷方式：只切形态，
+        # 其余（独白时长额度、narrator 人设、封面版式）都由 default.yaml 决定。
+        # 命令行显式给了就以命令行为准，覆盖配置文件里的 dialogue.format。
+        config.setdefault("dialogue", {})["format"] = args.dialogue_format
 
     if args.duration_minutes is not None:
         if args.duration_minutes < 1:
