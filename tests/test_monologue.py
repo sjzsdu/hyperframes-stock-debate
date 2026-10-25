@@ -19,6 +19,7 @@ from stocktalk.modules.dialogue_generator import (FORMAT_DEBATE,
                                                  dialogue_format,
                                                  ensure_narrator_character)
 from stocktalk.modules.hyperframes_builder import HyperFramesBuilder
+from stocktalk.modules.publisher import PublishMetadataGenerator
 
 
 def _monologue_response():
@@ -48,7 +49,7 @@ class FormatConfigTests(unittest.TestCase):
         config: dict = {"dialogue": {"format": "monologue"}, "characters": {}}
         ensure_narrator_character(config)
         narrator = config["characters"][MONOLOGUE_SPEAKER]
-        self.assertEqual(narrator["name"], "主讲人")
+        self.assertEqual(narrator["name"], "谈股论金")
         self.assertTrue(str(narrator["voice_id"]).strip())
         # 幂等：再补一次不覆盖已有值
         config["characters"][MONOLOGUE_SPEAKER]["name"] = "老王"
@@ -187,7 +188,7 @@ class MonologueBuilderTests(unittest.TestCase):
         builder = HyperFramesBuilder({
             "video": {"output_dir": str(temp)},
             "dialogue": {"format": "monologue"},
-            "characters": {MONOLOGUE_SPEAKER: {"name": "主讲人"}}})
+            "characters": {MONOLOGUE_SPEAKER: {"name": "谈股论金"}}})
         return builder, builder.build_project(
             {"code": "000001", "quote": {"name": "平安银行", "price": 10.5}}, script, timeline or {})
 
@@ -211,7 +212,7 @@ class MonologueBuilderTests(unittest.TestCase):
             ]})
             content = project.composition_path.read_text(encoding="utf-8")
             self.assertIn('data-slot="caption"', content)
-            self.assertIn("主讲人", content)
+            self.assertIn("谈股论金", content)
 
     def test_round_badge_uses_section_label(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -290,6 +291,59 @@ class MonologueBuilderTests(unittest.TestCase):
             self.assertIn("第 1 节 / 2", content)
             self.assertIn('class="role narrator"', content)
             self.assertNotIn('<em>×</em>', content)
+
+
+class MonologueVerticalCanvasTests(unittest.TestCase):
+    """手机版（竖屏 1080×1920）：独白在竖屏画幅上要整套元素都在位。"""
+
+    def test_monologue_builds_on_vertical_canvas(self):
+        with tempfile.TemporaryDirectory() as temp:
+            builder = HyperFramesBuilder({
+                "video": {"output_dir": str(temp), "canvas": "vertical"},
+                "dialogue": {"format": "monologue"}, "characters": {}})
+            project = builder.build_project(
+                {"code": "000001", "quote": {"name": "平安银行", "price": 10.5}},
+                {"turns": [
+                    {"speaker": MONOLOGUE_SPEAKER, "line": "银行的生意是把存款变成贷款，赚中间的息差。"},
+                    {"speaker": MONOLOGUE_SPEAKER, "line": "下一季净息差是唯一要盯的变量。"}]}, {})
+            content = project.composition_path.read_text(encoding="utf-8")
+            self.assertIn("layout-vertical", content)
+            self.assertIn('data-width="1080"', content)
+            self.assertIn('data-height="1920"', content)
+            self.assertIn('class="role narrator"', content)
+            self.assertIn("第 1 节 / 2", content)
+            self.assertNotIn('<em>×</em>', content)
+
+    def test_horizontal_default_is_unchanged(self):
+        builder = HyperFramesBuilder({"dialogue": {"format": "monologue"}, "characters": {}})
+        self.assertEqual(builder.layout, "horizontal")
+        self.assertEqual((builder.canvas_width, builder.canvas_height), (1920, 1080))
+
+
+class MonologuePublishTests(unittest.TestCase):
+    """独白片的发布元数据：发布链路按 turns 泛化生成，不能卡在 narrator-only 脚本上。"""
+
+    def _script(self):
+        return {"title": "平安银行（000001）：靠息差吃饭的生意", "turns": [
+            {"speaker": MONOLOGUE_SPEAKER, "line": "银行的生意是把存款变成贷款，赚中间的息差。",
+             "beat": "business", "visual": ["息差"]},
+            {"speaker": MONOLOGUE_SPEAKER, "line": "不良率和拨备覆盖率才是真功夫。",
+             "beat": "risk", "visual": ["不良率"]},
+        ], "hook": "下一季净息差", "question": "低成本存款还能守多久",
+            "disclaimers": ["本内容仅供学习交流，不构成投资建议"]}
+
+    def test_metadata_generation_works_for_monologue_script(self):
+        meta = PublishMetadataGenerator().generate(self._script(), "平安银行", "000001")
+        self.assertEqual(meta.title, "平安银行（000001）：靠息差吃饭的生意")
+        self.assertIn("赚中间的息差", meta.description)
+        self.assertIn("息差", meta.tags)
+        self.assertIn("不构成投资建议", meta.full_description)
+
+    def test_metadata_clamps_per_platform_for_monologue(self):
+        gen = PublishMetadataGenerator()
+        meta = gen.generate(self._script(), "平安银行", "000001")
+        self.assertLessEqual(len(gen.for_platform(meta, "xiaohongshu").title), 20)
+        self.assertLessEqual(len(gen.for_platform(meta, "douyin").title), 30)
 
 
 class MonologueCssTests(unittest.TestCase):

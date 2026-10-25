@@ -83,6 +83,10 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--name", default=None, help="股票名称（可选，会自动获取；仅在单个代码时生效）")
     parser.add_argument("--config", default=None, help="自定义配置文件路径")
     parser.add_argument("--output-dir", default=None, help="输出目录（默认 output/）")
+    parser.add_argument("--canvas", choices=["horizontal", "vertical"], default=None,
+                        help="画幅：horizontal=桌面版（1920×1080 横屏），"
+                             "vertical=手机版（1080×1920 竖屏，适配抖音/快手全屏）；"
+                             "覆盖配置里的 video.canvas")
     parser.add_argument("--duration-minutes", type=int, default=None, help="对话目标时长（分钟，默认 2-5）")
     parser.add_argument("--short-form", action="store_true",
                         help="信息流短版：将目标时长设为 45-75 秒，适合与默认长版做 A/B 测试")
@@ -160,6 +164,9 @@ def main(argv: list[str] | None = None) -> None:
 
     if args.output_dir:
         config.setdefault("output", {})["dir"] = args.output_dir
+
+    if args.canvas:
+        config.setdefault("video", {})["canvas"] = args.canvas
 
     if args.duration_minutes is not None:
         if args.duration_minutes < 1:

@@ -65,7 +65,7 @@ def dialogue_format(config: Mapping[str, Any] | None) -> str:
 # tts_agent._turns 会把该说话人的全部台词**静默过滤掉**——成片零配音、还不报错，
 # 是这条链路上最难查的一类坑。宁可在这里写死一份默认人设，也不赌下游能报错。
 NARRATOR_DEFAULTS: dict[str, Any] = {
-    "name": "主讲人",
+    "name": "谈股论金",
     "persona": "一个人对着镜头把一家公司讲透：先讲清它卖什么、靠什么赚钱，"
                "再讲账、讲护城河与风险，最后给观众留下可复用的认知；"
                "口语化、有节奏，不播报、不堆指标",
@@ -1200,7 +1200,7 @@ class MonologueGenerator(DialogueGenerator):
 
     def _system_prompt(self, arc: Arc | None = None) -> str:
         choice = self._choice_for(arc)
-        narrator = self._character(MONOLOGUE_SPEAKER, "主讲人",
+        narrator = self._character(MONOLOGUE_SPEAKER, "谈股论金",
                                    "一个人把一家公司讲透的财经讲述人")
         return (
             "你是财经短视频编导，为对投资感兴趣的普通观众写一段**一个人把一家公司讲透**的中文独白。"
@@ -1251,7 +1251,7 @@ class MonologueGenerator(DialogueGenerator):
         minutes = (f"{self._minutes(min_s)}-{self._minutes(max_s)} 分钟" if max_s > min_s
                    else f"{self._minutes(max_s)} 分钟")
         beat_keys = beats_by_key(choice.beats)
-        narrator = self._character(MONOLOGUE_SPEAKER, "主讲人", "")
+        narrator = self._character(MONOLOGUE_SPEAKER, "谈股论金", "")
         schema = {"title": "股票名（代码）：一句话点出这门生意或行业看点", "turns": [
             {"speaker": MONOLOGUE_SPEAKER,
              "line": f"一段完整自然的话，{floor_chars} 到 {self.config.max_line_chars} 字；"
@@ -1308,7 +1308,8 @@ class MonologueGenerator(DialogueGenerator):
 
     def _lead_label(self, lead: str) -> str:
         """独白片没有"谁领讲"：五章仍是有用的叙事地图，但 lead 是双人片的产物。"""
-        return "本章由主讲人一个人讲完"
+        name = self._character(MONOLOGUE_SPEAKER, "谈股论金", "")["name"]
+        return f"本章由{name}一个人讲完"
 
     def _seed_opener(self, side: str) -> str:
         """开法种子里的"建议由谁起头"在单人片里没有指派对象。"""

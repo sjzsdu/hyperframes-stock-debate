@@ -1,7 +1,8 @@
-# 独白形态验收用配置覆盖（2026-10-24）：仅切换形态，其余全部走 default.yaml。
+# 独白形态配置（2026-10-24）：仅切换形态，其余全部走 default.yaml。
+# 用法：
+#   tangulunjin 600519 --config config.monologue.yaml                    # 桌面版（横屏 1920×1080）
+#   tangulunjin 600519 --config config.monologue.yaml --canvas vertical  # 手机版（竖屏 1080×1920）
+#   tangulunjin 600519 --config config.monologue.yaml --publish          # 渲染完自动发布（平台列表走 default.yaml）
 dialogue:
   format: monologue
-video:
-  output_dir: ./output/monologue_acceptance
-publish:
-  platforms: []
+

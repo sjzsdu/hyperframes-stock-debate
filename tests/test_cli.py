@@ -187,6 +187,25 @@ def test_main_platform_override_reaches_the_publisher() -> None:
     assert fake.config["publish"]["platforms"] == ["douyin", "bilibili"]
 
 
+def test_main_canvas_override_reaches_the_config() -> None:
+    """--canvas vertical 要写回 video.canvas——手机版就靠这一下切换。"""
+    fake = FakePipeline()
+    with _patch_pipeline(fake):
+        cli.main(["601689", "--canvas", "vertical", "--no-render"])
+
+    assert fake.config["video"]["canvas"] == "vertical"
+
+
+def test_main_without_canvas_leaves_config_alone() -> None:
+    fake = FakePipeline()
+    config = {"video": {"canvas": "horizontal"}}
+    with patch.multiple(cli, Pipeline=lambda conf: (setattr(fake, "config", conf), fake)[1],
+                        load_config=lambda path=None: dict(config)):
+        cli.main(["601689", "--no-render"])
+
+    assert fake.config["video"]["canvas"] == "horizontal"
+
+
 def test_main_rejects_an_unknown_platform() -> None:
     with _patch_pipeline(FakePipeline()):
         with pytest.raises(SystemExit):
