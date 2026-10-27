@@ -199,10 +199,26 @@ class DebateOnlyTensionGuardTests(unittest.TestCase):
                                   runner=lambda argv, timeout: "{}")
 
     def test_monologue_prompt_has_no_debate_tension_rules(self):
-        system = self._monologue()._system_prompt()
-        message = self._monologue()._user_prompt({"code": "000001"})
+        """整段比对而不是只比几个 marker（2026-10-27 review 建议）。
 
-        for marker in ("态度与交锋", "语气必须分家", "平行独白", "激变点", "观点反转"):
+        理由：marker 级断言只覆盖当下的措辞——态度段里新增/改写一句话，这句话就
+        落在守卫之外，漏进独白也不会红。改成运行时取 `_attitude_rules()` 全文做
+        assertNotIn，覆盖自动化、不依赖任何具体字面，改态度文案不需要同步改测试。
+        marker 断言保留在下面，只为失败时能立刻指出漏的是哪一句。
+        """
+        debate = self._debate()
+        monologue = self._monologue()
+        system = monologue._system_prompt()
+        message = monologue._user_prompt({"code": "000001"})
+
+        attitude = debate._attitude_rules().strip()
+        self.assertTrue(attitude)                     # 别让它哪天返回空串，把守卫变成空转
+        self.assertIn(attitude, debate._system_prompt())   # 全文确实挂在对辩 prompt 上
+        self.assertNotIn(attitude, system)
+        self.assertNotIn(attitude, message)
+
+        for marker in ("态度与交锋", "语气必须分家", "平行独白", "激变点", "观点反转",
+                       "实质发言", "固定前缀"):
             self.assertNotIn(marker, system)
             self.assertNotIn(marker, message)
 

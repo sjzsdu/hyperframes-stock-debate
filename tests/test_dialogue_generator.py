@@ -501,6 +501,25 @@ class DebateTensionTests(unittest.TestCase):
         self.assertIn("至少两次", system)
         self.assertIn("还回去", system)
 
+    def test_exchange_requirement_has_explicit_exceptions(self):
+        """「接住对方」不能是全称量词（2026-10-27 review 阻塞项）。
+
+        同一份 prompt 里还有两条相反要求：开场轮第一句就要 25 字内带数字
+        （这时还没人说过话）、允许 ≤20 字的短回应轮（「嗯」「有道理」）。
+        写成「每次发言都要」会自相矛盾，模型照字面满足的最省力方式就是每轮
+        机械加「你刚才说……」——那是刚治掉的套话，还会被 sharpness 的
+        opposing 口径奖励。所以钉死两件事：例外明写、全称量词不许回潮。
+        """
+        system = DialogueGenerator()._system_prompt()
+
+        self.assertIn("除开场轮", system)
+        self.assertIn("短回应", system)
+        self.assertIn("实质发言", system)
+        # 机械前缀本身也是套话，必须在同一处被点名禁止
+        self.assertIn("不是一句固定前缀", system)
+        self.assertNotIn("每次发言都要", system)
+        self.assertNotIn("每一次发言都要", system)
+
     def test_at_least_one_reversal_with_a_real_cause(self):
         """至少一处观点反转/立场激变，且必须由具体数字掰过来，不许「你说得对」敷衍。"""
         system = DialogueGenerator()._system_prompt()
@@ -518,12 +537,20 @@ class DebateTensionTests(unittest.TestCase):
         self.assertIn("不许承诺收益", system)
 
     def test_user_prompt_repeats_the_tension_spec_next_to_the_data(self):
-        """系统提示写过一遍，用户提示里紧贴数据再收一次口。"""
+        """系统提示写过一遍，用户提示里紧贴数据再收一次口。
+
+        例外（开场轮 / 几个字的短回应）必须一起带过来：只改系统提示、用户提示
+        还留着全称量词，等于没改——模型读到的是那半句。
+        """
         message = DialogueGenerator()._user_prompt({"code": "1"})
 
         self.assertIn("态度要分家", message)
         self.assertIn("先接住对方刚说的原话或数字再反驳", message)
         self.assertIn("必须有一次由具体数字掰过来的观点反转", message)
+        # 与系统提示同口径：例外明写在这里，且不许留全称量词
+        self.assertIn("除开场轮和几个字的短回应之外", message)
+        self.assertIn("每次实质发言", message)
+        self.assertNotIn("每一轮都先接住", message)
 
 
 class RiskExchangeTests(unittest.TestCase):
