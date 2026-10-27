@@ -90,7 +90,7 @@ def main(argv: list[str] | None = None) -> None:
                              "vertical=手机版（1080×1920 竖屏，适配抖音/快手全屏）；"
                              "覆盖配置里的 video.canvas")
     parser.add_argument("--format", choices=["debate", "monologue"], default=None, dest="dialogue_format",
-                        help="内容形态：debate=双人对辩，monologue=单人讲透一家公司（独白）；"
+                        help="内容形态：debate=双人对辩，monologue=单人独白讲一家公司；"
                              "覆盖配置里的 dialogue.format，等价于 --config config.monologue.yaml，"
                              "但不用每次带配置文件")
     parser.add_argument("--duration-minutes", type=int, default=None, help="对话目标时长（分钟，默认 2-5）")

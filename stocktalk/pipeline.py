@@ -25,6 +25,7 @@ from stocktalk.modules.episode_planner import EpisodePlanner
 from stocktalk.modules.hyperframes_builder import HyperFramesBuilder
 from stocktalk.modules.publisher import PLATFORM_LABELS, SauPublisher, cover_sizes_for
 from stocktalk.modules.review import write_review_page
+from stocktalk.modules.sharpness import summary as sharpness_summary
 from stocktalk.modules.stock_data import StockDataClient, StockDataConfig, StockDataIncompleteError
 from stocktalk.modules.tts_agent import TTSAgent
 
@@ -324,6 +325,14 @@ class Pipeline:
             script = self._retry("Dialogue generation", lambda: self.dialogue_gen.generate(stock_data, episode_plan))
             script["episode_plan"] = episode_plan
             self._warn_if_over_budget(script)
+            # 锐度判定清单（2026-10-27 WAN-27）：未过的项在控制台点名，不必等
+            # 打开审查页才知道这期哪一条还是流水账。只提醒不阻断——内容好不好
+            # 最终仍由人看片决定，判定清单的作用是把"感觉"变成可核对的清单。
+            report = script.get("sharpness") if isinstance(script.get("sharpness"), dict) else {}
+            if report:
+                line = sharpness_summary(report)
+                color = "green" if not report.get("failed") else "yellow"
+                self.console.print(f"[{color}]文案{line}[/{color}]")
             progress.advance(task)
 
             progress.update(task, description="Reviewing compliance")

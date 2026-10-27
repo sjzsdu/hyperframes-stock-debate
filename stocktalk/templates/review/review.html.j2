@@ -163,6 +163,38 @@
   </div>
   {% endif %}
 
+  {% if sharpness and sharpness.checks %}
+  {# 文案体检（2026-10-27 WAN-27）：套话/复读是"套路感"的来源，锐度判定把"像在
+     报流水账"拆成七条可核对的红绿灯。放在剧本骨架之前——它是发布前最该先看的一栏。 #}
+  {% set q = quality or {} %}
+  <h2>文案体检（套话 / 重复度 / 锐度）</h2>
+  <div class="row">
+    <div class="panel" style="flex: 3 1 0;">
+      <h3>锐度判定 {{ sharpness.passed }}/{{ sharpness.total }}</h3>
+      <table>
+        <tr><th>判定</th><th>结果</th><th>依据</th><th>原文</th></tr>
+        {% for item in sharpness.checks %}
+        <tr class="{% if not item.ok %}warn{% endif %}">
+          <td>{{ item.label }}</td>
+          <td>{% if item.ok %}通过{% else %}未过{% endif %}</td>
+          <td>{{ item.detail }}</td>
+          <td>{{ item.evidence or "—" }}</td>
+        </tr>
+        {% endfor %}
+      </table>
+    </div>
+    <div class="panel" style="flex: 1 1 0;">
+      <h3>套话与复读</h3>
+      <div><span class="k">套话</span>{{ q.cliche_hits|join('、') or "无" }}</div>
+      <div><span class="k">熟语</span>{{ q.idiom_count or 0 }} 处</div>
+      <div><span class="k">跨轮复读</span>{{ q.repeated_phrases|join('、') or "无" }}</div>
+      {% if q.flags %}
+      <div><span class="k">提示</span>{{ q.flags|join('；') }}</div>
+      {% endif %}
+    </div>
+  </div>
+  {% endif %}
+
   {% if arc or cta.hook or cta.question or cta.bull or cta.bear or arc_notes or message %}
   <h2>本期结构与互动</h2>
   <div class="row">

@@ -131,7 +131,9 @@ def render_review_html(*, tag: str, stock_name: str, stock_code: str, created_at
                        cta: Mapping[str, Any] | None = None,
                        arc_notes: Sequence[str] = (),
                        message: str = "",
-                       episode_plan: Mapping[str, Any] | None = None) -> str:
+                       episode_plan: Mapping[str, Any] | None = None,
+                       quality: Mapping[str, Any] | None = None,
+                       sharpness: Mapping[str, Any] | None = None) -> str:
     """渲染审查页。``episode_plan`` 是"为什么讲这件事、为什么配这张图"的依据。"""
     return _environment().get_template("review.html.j2").render(
         tag=tag, video_tag=tag, stock_name=stock_name, stock_code=stock_code, created_at=created_at,
@@ -142,6 +144,8 @@ def render_review_html(*, tag: str, stock_name: str, stock_code: str, created_at
         arc=dict(arc or {}), rewrites=list(rewrites), cta=dict(cta or {}),
         arc_notes=list(arc_notes), message=str(message or ""),
         episode_plan=dict(episode_plan or {}),
+        quality=dict(quality or {}),
+        sharpness=dict(sharpness or {}),
     )
 
 
@@ -185,6 +189,10 @@ def write_review_page(output_dir: str | Path, tag: str, *, stock_name: str, stoc
         # 本期提示词（--message / dialogue.message）来自脚本本身，所以三条发布路径
         # （--publish-only / --republish 从 sidecar 读回剧本）都能照原样显示。
         message=str(script.get("message") or ""),
+        # 文案体检两栏（2026-10-27 WAN-27）：套话/复读是"套路感"的来源，锐度判定
+        # 把"像在报流水账"拆成七条红绿灯——发布前先看这一栏，再决定要不要重跑。
+        quality=script.get("quality") if isinstance(script.get("quality"), Mapping) else {},
+        sharpness=script.get("sharpness") if isinstance(script.get("sharpness"), Mapping) else {},
     )
     path = Path(output_dir) / f"{tag}.review.html"
     path.write_text(html, encoding="utf-8")

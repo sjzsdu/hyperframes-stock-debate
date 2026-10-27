@@ -994,7 +994,7 @@ class HyperFramesBuilder:
             return f"{board} · 今日{direction} {abs(change):.2f}%"
         if tags:
             return f"{board} · {tags[0]['label']} {tags[0]['value']}"
-        return f"{board} · 一起看看这门生意"
+        return f"{board} · 钱是怎么赚的"
 
     @staticmethod
     def _hue(code: str) -> int:

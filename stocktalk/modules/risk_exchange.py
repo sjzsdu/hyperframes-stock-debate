@@ -25,6 +25,7 @@ import re
 from dataclasses import dataclass
 from typing import Any, Mapping
 
+from stocktalk.modules import copy_guard
 from stocktalk.modules.arcs import satisfies
 
 # 合规锚点：这两句是片尾风险提示的底线，模板怎么变都不能丢。
@@ -74,19 +75,27 @@ def _name(payload: Mapping[str, Any]) -> str:
 
 
 # 候选池：条件命中的才有资格上场。通用三条（无 needs）永远兜底。
+#
+# 2026-10-27（WAN-27）重写：原先前两条是「聊完{industry}这门生意」和
+# 「把{name}聊透了」——它们正是用户点名的两句，而且是**每期必念**的确定性
+# 口播轮（4 只票 × 30 天里 40% 的期数命中这两条）。病根不在措辞：这两句都在
+# 对节目自己做总结（"我们聊完了"），信息量为零，且每期都占掉片尾最后一轮。
+# 现在的形状是：a 句仍然带合规锚点，但指向**本期留下的东西**（行业、主营、
+# 这张账、一组数字、没解决的分歧），b 句接一句当期判断——把最后一轮还给内容。
+# 新增模板必须过 copy_guard 的闸门（这里 + tests/test_risk_exchange.py 双层）。
 EXCHANGES: tuple[RiskExchange, ...] = (
-    RiskExchange("industry", "聊完{industry}这门生意，股市有风险。",
-                 "投资需谨慎，先看懂生意再谈其他。", needs=("f10.所属行业",)),
-    RiskExchange("item", "{item}再能赚钱，股市有风险。",
+    RiskExchange("industry", "{industry}这行，股市有风险。",
+                 "投资需谨慎，行当比故事耐用。", needs=("f10.所属行业",)),
+    RiskExchange("item", "{item}再赚钱，股市有风险。",
                  "投资需谨慎，一期业绩说明不了一切。", needs=("f10.主营构成.明细",)),
-    RiskExchange("name", "把{name}聊透了，股市有风险。",
+    RiskExchange("name", "{name}这张账，股市有风险。",
                  "投资需谨慎，判断留给自己。", needs=("quote.name",)),
-    RiskExchange("generic-signoff", "今天就聊到这里，股市有风险。",
-                 "投资需谨慎，别急着替市场下结论。"),
-    RiskExchange("generic-numbers", "数字讲完了，股市有风险。",
+    RiskExchange("generic-ledger", "账摆在这儿，股市有风险。",
+                 "投资需谨慎，行情比账跑得快。"),
+    RiskExchange("generic-numbers", "数字摆在这儿，股市有风险。",
                  "投资需谨慎，钱包自己做主。"),
-    RiskExchange("generic-stance", "观点摆完了，股市有风险。",
-                 "投资需谨慎，生意比行情耐用。"),
+    RiskExchange("generic-fork", "分歧摆在这儿，股市有风险。",
+                 "投资需谨慎，答案自己去核。"),
 )
 
 # 模板占位符 → 特征提取函数。占位符取不到值（空串）就整条弃用。
@@ -109,6 +118,11 @@ def _format(exchange: RiskExchange, payload: Mapping[str, Any]) -> tuple[str, st
     if len(a) > MAX_LINE_CHARS or len(b) > MAX_LINE_CHARS:
         return None
     if RISK_A not in a or RISK_B not in b:
+        return None
+    # 套话闸门（2026-10-27 WAN-27）：模板池是"每期都说一遍"的地方，一句话写错
+    # 就是整季复读。命中就整条弃用，落到下一条候选——成片先安全，问题由
+    # tests/test_risk_exchange.py 报出来，让人去改模板而不是让观众听出来。
+    if copy_guard.source_violations(a) or copy_guard.source_violations(b):
         return None
     return a, b
 

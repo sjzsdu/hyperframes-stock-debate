@@ -200,7 +200,9 @@ class TTSAgent:
         if any(word in line for word in ("风险", "警惕", "回撤", "不确定", "小心", "危险", "亏损", "隐患")):
             pitch_delta -= min(pitch_limit, 0.01)  # warnings sink and slow
             rate_delta -= speed_limit
-        if any(word in line for word in ("你看", "打个比方", "说白了", "也就是说", "举个例子")):
+        # 不再把「说白了」列进来（2026-10-27）：它已经在 copy_guard 的套话清单里，
+        # 台词里出现它是缺陷、不会再出现在成片里，也就不必为它单独放慢语速。
+        if any(word in line for word in ("你看", "打个比方", "也就是说", "举个例子")):
             rate_delta -= min(speed_limit, 0.02)  # explanatory asides ease off
         pitch = round(self._clamp(base_pitch + pitch_delta, 0.82, 1.22), 3)
         speed = round(self._clamp(base_rate + rate_delta, 0.92, 1.18), 3)
