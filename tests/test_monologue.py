@@ -217,8 +217,8 @@ class DebateOnlyTensionGuardTests(unittest.TestCase):
         self.assertNotIn(attitude, system)
         self.assertNotIn(attitude, message)
 
-        for marker in ("态度与交锋", "语气必须分家", "平行独白", "激变点", "观点反转",
-                       "实质发言", "固定前缀"):
+        for marker in ("态度与交锋", "兴冲冲", "找茬", "反裸报数", "平行独白", "激变点",
+                       "观点反转", "实质发言", "固定前缀"):
             self.assertNotIn(marker, system)
             self.assertNotIn(marker, message)
 

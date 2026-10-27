@@ -474,20 +474,69 @@ class DebateTensionTests(unittest.TestCase):
 
     用户反馈成片里「双方态度不够尖锐」，听下来像两个人各自把稿子念完。原来的
     提示词只要求「每轮是新信息」「两边真的对立」，从没要求过**接话**——于是
-    "两段平行独白拼起来"完全合法，每轮单看还都合格。这里把四条写法约束钉死：
-    语气分家、引用后反驳、至少一次真实反转、分歧留到片尾。
+    "两段平行独白拼起来"完全合法，每轮单看还都合格。
+
+    第二轮用户复述了要的感觉（「兴冲冲想买进去 / 冷静理性帮她把风险一条条拽住」），
+    所以断言一律钉**行为**，不钉形容词：形容词（热情/冷静）压不住模型，写出来的
+    东西才会。
     """
 
-    def test_attitude_split_is_required(self):
-        """多头热（热情/乐观）、空头冷（冷静/理性），两边不许写成同一种评述腔。"""
+    def test_bull_leads_with_emotion_before_argument(self):
+        """多头：情绪先于论证——先有反应和动作，再补理由；被打断时找补或嘴硬。"""
         system = DialogueGenerator()._system_prompt()
 
         self.assertIn("态度与交锋", system)
-        self.assertIn("语气必须分家", system)
-        for word in ("热情", "乐观", "有推动力"):
-            self.assertIn(word, system)
-        for word in ("冷静", "理性", "克制"):
-            self.assertIn(word, system)
+        self.assertIn("兴冲冲", system)
+        self.assertIn("情绪先于论证", system)
+        # 动作先于论证：给的是他自己的动作，不是结论
+        self.assertIn("这价我先上车", system)
+        # 被打断时不许立刻认同
+        self.assertIn("找补或嘴硬", system)
+        self.assertIn("认输只留给片尾那一处反转", system)
+        # 允许抢话、允许半句话被打断
+        self.assertIn("允许抢话", system)
+        self.assertIn("半句话被打断", system)
+
+    def test_bear_asks_one_concrete_question_then_dismantles(self):
+        """空头：不抢话，先问一个很具体的问题，再逐条拆。"""
+        system = DialogueGenerator()._system_prompt()
+
+        self.assertIn("找茬", system)
+        self.assertIn("不抢话", system)
+        self.assertIn("你先说清楚这个毛利怎么算的", system)
+        for dimension in ("估值撑不撑得住", "现金流跟不跟得上", "一次性的", "周期的哪个位置"):
+            self.assertIn(dimension, system)
+        # 全程不喊：把话递回去而不是把音量提上去
+        self.assertIn("不喊不叫", system)
+        self.assertIn("我不拦你，但你要知道", system)
+
+    def test_collision_uses_the_other_side_of_the_same_data(self):
+        """碰撞：用同一份数据里的另一面拆回去，且不许一方连续两轮没人质疑。"""
+        system = DialogueGenerator()._system_prompt()
+
+        self.assertIn("同一份数据里的另一面", system)
+        self.assertIn("不许出现某一方连续两轮没人质疑", system)
+        # 多头要反击，不是一被问就熄火
+        self.assertIn("反击回来", system)
+
+    def test_numbers_must_be_used_not_read_aloud(self):
+        """反裸报数：数字不许念完就过，必须被对方拿去用或质疑。
+
+        这条同时是"每轮必须有新数字"的对冲：那条约束乘以单轮 80 字，模型的
+        最省力解法就是「营收 12.3 亿，同比增长 18%」再换下一条——念了等于没讲。
+        """
+        system = DialogueGenerator()._system_prompt()
+        message = DialogueGenerator()._user_prompt({"code": "1"})
+
+        self.assertIn("反裸报数", system)
+        self.assertIn("营收 12.3 亿，同比增长 18%", system)   # 被点名的反面样板
+        self.assertIn("挂在动作、判断或情绪上", system)
+        self.assertIn("某一轮一个数字都没有是允许的", system)
+        # 系统提示与用户提示同口径：数字不再按轮计
+        self.assertIn("数字不是每轮的义务", system)
+        self.assertIn("数字不再按轮计", message)
+        self.assertIn("允许某一轮一个数字都没有", message)
+        self.assertIn("营收 12.3 亿，同比增长 18%", message)
 
     def test_head_to_head_exchange_is_required(self):
         """必须引用对方原话/数字再反驳，并且禁止平行独白式的各说各话。"""
@@ -530,11 +579,15 @@ class DebateTensionTests(unittest.TestCase):
         self.assertIn("具体的数字或事实", system)
 
     def test_tension_does_not_license_hype(self):
-        """热不等于吹票：热情不许破合规红线。"""
+        """热不等于吹票：上头是他自己的动作，不许变成喊别人买。"""
         system = DialogueGenerator()._system_prompt()
 
         self.assertIn("热情不等于吹票", system)
         self.assertIn("不许承诺收益", system)
+        # 「我先上车」只能是他自己的动作——这是本轮唯一新增的动作类表达，
+        # 必须连同它的合规边界一起钉住，否则热情会被写成喊单。
+        self.assertIn("他自己的动作", system)
+        self.assertIn("不是叫观众买", system)
 
     def test_user_prompt_repeats_the_tension_spec_next_to_the_data(self):
         """系统提示写过一遍，用户提示里紧贴数据再收一次口。
