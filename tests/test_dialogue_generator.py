@@ -469,6 +469,63 @@ class OpeningClosingTests(unittest.TestCase):
         self.assertIn("不要用行业定性开场", system)
 
 
+class DebateTensionTests(unittest.TestCase):
+    """多空态度对立与正面交锋（2026-10-27 WAN-29）。
+
+    用户反馈成片里「双方态度不够尖锐」，听下来像两个人各自把稿子念完。原来的
+    提示词只要求「每轮是新信息」「两边真的对立」，从没要求过**接话**——于是
+    "两段平行独白拼起来"完全合法，每轮单看还都合格。这里把四条写法约束钉死：
+    语气分家、引用后反驳、至少一次真实反转、分歧留到片尾。
+    """
+
+    def test_attitude_split_is_required(self):
+        """多头热（热情/乐观）、空头冷（冷静/理性），两边不许写成同一种评述腔。"""
+        system = DialogueGenerator()._system_prompt()
+
+        self.assertIn("态度与交锋", system)
+        self.assertIn("语气必须分家", system)
+        for word in ("热情", "乐观", "有推动力"):
+            self.assertIn(word, system)
+        for word in ("冷静", "理性", "克制"):
+            self.assertIn(word, system)
+
+    def test_head_to_head_exchange_is_required(self):
+        """必须引用对方原话/数字再反驳，并且禁止平行独白式的各说各话。"""
+        system = DialogueGenerator()._system_prompt()
+
+        self.assertIn("必须正面交锋", system)
+        self.assertIn("平行独白", system)
+        self.assertIn("点名复述", system)
+        self.assertIn("引用→反驳→回击", system)
+        # 至少两次往返，并且被点的一方要还手
+        self.assertIn("至少两次", system)
+        self.assertIn("还回去", system)
+
+    def test_at_least_one_reversal_with_a_real_cause(self):
+        """至少一处观点反转/立场激变，且必须由具体数字掰过来，不许「你说得对」敷衍。"""
+        system = DialogueGenerator()._system_prompt()
+
+        self.assertIn("激变点", system)
+        self.assertIn("观点反转", system)
+        self.assertIn("改口", system)
+        self.assertIn("具体的数字或事实", system)
+
+    def test_tension_does_not_license_hype(self):
+        """热不等于吹票：热情不许破合规红线。"""
+        system = DialogueGenerator()._system_prompt()
+
+        self.assertIn("热情不等于吹票", system)
+        self.assertIn("不许承诺收益", system)
+
+    def test_user_prompt_repeats_the_tension_spec_next_to_the_data(self):
+        """系统提示写过一遍，用户提示里紧贴数据再收一次口。"""
+        message = DialogueGenerator()._user_prompt({"code": "1"})
+
+        self.assertIn("态度要分家", message)
+        self.assertIn("先接住对方刚说的原话或数字再反驳", message)
+        self.assertIn("必须有一次由具体数字掰过来的观点反转", message)
+
+
 class RiskExchangeTests(unittest.TestCase):
     """片尾风险提示交换（2026-10-08 第二版）：一人一句、按个股特征变化。
 

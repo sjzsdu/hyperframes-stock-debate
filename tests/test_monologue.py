@@ -183,6 +183,50 @@ class MonologueGeneratorTests(unittest.TestCase):
         self.assertIn("看多一方的一句话立场", user)
 
 
+class DebateOnlyTensionGuardTests(unittest.TestCase):
+    """WAN-29 只改 debate：态度/交锋那套规则一律不许漏进独白片。
+
+    两种形态共用 _content_rules / _shared_opening_rules / _sharpness_rules——这三段
+    是数据纪律与锐度判据，改一个字独白片的风格就跟着漂。新增的多空对立规则因此
+    单独成一个方法（_attitude_rules），只挂在 DialogueGenerator 的 prompt 上。
+    """
+
+    def _debate(self):
+        return DialogueGenerator({"characters": {}}, runner=lambda argv, timeout: "{}")
+
+    def _monologue(self):
+        return MonologueGenerator({"dialogue": {"format": "monologue"}, "characters": {}},
+                                  runner=lambda argv, timeout: "{}")
+
+    def test_monologue_prompt_has_no_debate_tension_rules(self):
+        system = self._monologue()._system_prompt()
+        message = self._monologue()._user_prompt({"code": "000001"})
+
+        for marker in ("态度与交锋", "语气必须分家", "平行独白", "激变点", "观点反转"):
+            self.assertNotIn(marker, system)
+            self.assertNotIn(marker, message)
+
+    def test_shared_rule_blocks_still_reach_both_formats_verbatim(self):
+        """共用段（数据纪律 + 反套话/开场铺排）在两份 prompt 里必须逐字出现。
+
+        这三段是两形态共用的基线：只改 debate 的验收标准之一，就是它们没被
+        顺手改写成"对辩版"——否则独白片的风格会跟着漂，而没有任何测试发现。
+        """
+        shared = (
+            "内容要求（重要）",                       # _content_rules
+            "每轮输出一个 emotion 字段",              # _content_rules 8b
+            "**“这门生意”这四个字全片都不许出现**",   # _shared_opening_rules
+            "开场三秒（重要）",                       # _shared_opening_rules
+            "叙事铺排（重要）",                       # _shared_opening_rules
+        )
+        debate = self._debate()._system_prompt()
+        monologue = self._monologue()._system_prompt()
+
+        for sentence in shared:
+            self.assertIn(sentence, debate)
+            self.assertIn(sentence, monologue)
+
+
 class MonologueBuilderTests(unittest.TestCase):
     def _build(self, temp, script, timeline=None):
         builder = HyperFramesBuilder({

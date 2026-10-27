@@ -108,25 +108,29 @@ stock_data:
 characters:
   bull:
     name: 股市新手
-    persona: 年轻乐观的女生，喜欢从生意角度聊公司——这家公司靠什么赚钱、增长从哪来；只讨论已给出的数据
+    persona: 年轻乐观的女生，对好生意有股藏不住的热情——聊起生意节奏和增长从哪来就往前冲；
+             说话快、爱用类比和未来图景，被泼冷水时先找补；只讨论已给出的数据
     # 豆包 2.0 音色（2026-10-07 换）：爽快思思（爽朗活泼，官方标「视频配音」场景）
     # —— 10-06 用 Vivi 出了第一条成片后用户嫌「不够好」，A/B 试听选中思思。
     # 情绪走 additions.context_texts，由 instruction 通道透传。
     voice_id: zh_female_shuangkuaisisi_uranus_bigtts
     # 豆包情感走 additions.context_texts，由 instruction 通道透传
     supports_instruction: true
-    instruction: 用轻松愉快、兴奋分享的语气，像和朋友聊一家宝藏公司
+    # WAN-29：声音这一层也要跟人设分家——文案的热和配音的冷对不上，成片照样不尖。
+    instruction: 用热情、兴奋、带笑意的语气，语速带一点冲劲，像憋不住想把好消息讲给朋友听；乐观但不吹票
     speed: 1.07
     pitch: 1.03   # post_process.pitch 已生效：1.03 → +1 半音（微亮）
   bear:
     name: 股市老登
-    persona: 老练理性，擅长从行业格局和经营风险角度提问，追问生意的短板与数据边界
+    persona: 老练理性，语速慢、不轻易被说动——擅长从行业格局和经营风险角度提问，
+             专挑对方话里的漏洞，追问生意的短板与数据边界
     # 豆包 2.0 音色：解说小明（视频配音场景，F0≈155Hz 洪亮解说腔）。
     # 2026-10-07 二轮 A/B 选中（刘飞偏低 122Hz；云舟 106Hz 更低沉已淘汰；
     # 磁性解说男声 152Hz 备选，样本在 output/_voice_ab_pitch/round2/）。
     voice_id: zh_male_jieshuoxiaoming_uranus_bigtts
     supports_instruction: true
-    instruction: 用沉稳冷静、带审视和质疑的语气指出风险，语气笃定
+    # WAN-29：与多头的"热"对着来的"冷"——平、慢、笃定，不喊不叫。
+    instruction: 用冷静、平缓、带审视的语气逐条拆解对方的说法，先摆事实再下判断；笃定克制，不喊不叫
     speed: 1.0
     pitch: 1.0   # 解说小明本身够亮，不再升调（post_process.pitch 生效中）
   # 独白形态（dialogue.format: monologue）的唯一说话人。对辩片完全用不到它，
