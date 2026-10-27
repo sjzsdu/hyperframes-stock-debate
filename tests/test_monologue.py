@@ -132,7 +132,7 @@ class MonologueGeneratorTests(unittest.TestCase):
     def test_system_prompt_forces_single_speaker(self):
         system = self._generator()._system_prompt()
         self.assertIn(MONOLOGUE_SPEAKER, system)
-        self.assertIn("一个人把一家公司讲透", system)
+        self.assertIn("一个人把一家公司掰开讲", system)
         self.assertNotIn("两人必须交替发言", system)
 
     def test_user_prompt_budgets_576_to_1152_chars(self):

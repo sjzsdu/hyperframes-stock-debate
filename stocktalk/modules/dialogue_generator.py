@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from datetime import date
 from typing import Any, Callable, Mapping, Sequence
 
+from stocktalk.modules import copy_guard, sharpness
 from stocktalk.modules.episode_planner import (NUMBER_CAP_ANALOGY,
                                                NUMBER_CAP_ANCHOR)
 from stocktalk.modules.arcs import (Arc, ArcChoice, Beat, MONOLOGUE_SPEAKER,
@@ -66,7 +67,7 @@ def dialogue_format(config: Mapping[str, Any] | None) -> str:
 # 是这条链路上最难查的一类坑。宁可在这里写死一份默认人设，也不赌下游能报错。
 NARRATOR_DEFAULTS: dict[str, Any] = {
     "name": "谈股论金",
-    "persona": "一个人对着镜头把一家公司讲透：先讲清它卖什么、靠什么赚钱，"
+    "persona": "一个人对着镜头把一家公司掰开讲：先讲清它卖什么、靠什么赚钱，"
                "再讲账、讲护城河与风险，最后给观众留下可复用的认知；"
                "口语化、有节奏，不播报、不堆指标",
     # 豆包 2.0「解说小明」——为"解说腔"做的 A/B 选型（2026-10-07），
@@ -112,14 +113,10 @@ EMOTION_DIRECTIVES = {
     "平述": "",
 }
 
-# Deterministic style audit: these are not hard bans (a quote may legitimately
-# contain one), but repeated use is a strong signal of canned AI prose.  Keep
-# the audit observable in the run JSON so a human can decide whether to rewrite
-# a line instead of hiding a quality failure behind another full generation.
-STYLE_CLICHES = ("说白了", "总的来说", "值得注意的是", "不难发现", "在当前市场环境下",
-                 "我们先看", "接下来我们", "归根结底")
-STYLE_IDIOMS = ("一针见血", "锦上添花", "顺势而为", "乘风破浪", "稳中有进", "大有可为",
-                "水涨船高", "如火如荼", "不言而喻", "毋庸置疑")
+# 套话清单已集中到 ``copy_guard``（2026-10-27 WAN-27：用户点名「这门生意」
+# 「把…聊透了」）。清单必须**只有一份**：模板池扫描（谁往片尾模板里写了套话）、
+# 成片体检（这期念出来几次）、跨轮复读检测用的是同一批规则，各写一份的话，
+# 新加的词只会进其中一处，而漏掉的那一处决定成片。
 
 # 「照抄就变成新套话」的反例清单（2026-10-19 内容迭代）：句子 → 为什么会被念成套话、
 # 该往哪儿改。它和 episode_plan 的开法种子配成一对——种子给"照这个动作说话"，
@@ -326,24 +323,25 @@ class DialogueGenerator:
             "（业绩趋势/毛利率走势/股东回报/现金流/科目异动/收入结构位移）——"
             "它们正是这家公司区别于别家的地方，优先围绕它们展开；"
             "但每个角度都必须落到数据明细里的具体数字与年份，明细里撑不住的角度宁可不讲。\n"
-            "1. 以“讲懂这家公司”为主线：先说清它到底卖什么、靠什么赚钱、客户是谁、这门生意怎么运转；"
+            "1. 以“讲懂这家公司”为主线：先说清它到底卖什么、靠什么赚钱、客户是谁、"
+            "钱在它手里怎么转一圈再回来；"
             "再说它在所处行业里的位置、竞争格局、行业天花板与政策环境。\n"
-            "   数据里的「公司档案」来自交易所 F10 原文，是讲这门生意的第一手依据，必须据此展开：\n"
-            "   · 主营业务、主营构成（各产品/地区/销售模式的收入占比与毛利率）就是这门生意的骨架——"
+            "   数据里的「公司档案」来自交易所 F10 原文，是讲清上面这些的第一手依据，必须据此展开：\n"
+            "   · 主营业务、主营构成（各产品/地区/销售模式的收入占比与毛利率）就是整段叙事的骨架——"
             "哪块业务撑起收入、哪块最赚钱、直销和经销各占多少，都要讲到具体数字；"
             "提到某块业务时，统一用数据里给出的业务名称（已是画面同款简称），"
             "不要自创缩写或换一个叫法——旁白和画面必须用同一个词；\n"
             "   · 所属行业、行业地位（研究行业与同行家数）用来定位它在行业里的位置和同行对比；\n"
             "   · 管理层只提档案里写了姓名和职务的人，不评价能力、不推测想法、不编造言论；\n"
             "   · 经营评述是公司自述，可以复述但要说明这是公司的说法。\n"
-            "   board（行业/概念板块）是交易所对这家公司的分类，作为补充：含“白酒概念”就围绕白酒这门生意讲，"
+            "   board（行业/概念板块）是交易所对这家公司的分类，作为补充：含“白酒概念”就围绕白酒这条线讲，"
             "分类只到行业层面时就只讲行业层面的事实。"
             "档案和 board 里都没有的产品、客户、产能、管理层姓名与言论一律不得编造，宁可说“公开信息只到这一层”。\n"
-            "2. 财务与行情数据只用来佐证业务判断：把营收、利润、毛利率、ROE、价格和成交等数字翻译成生意层面的含义"
-            "（例如意味着什么生意变化），不要罗列指标，不要停留在K线、MACD等技术信号本身。\n"
-            "3. 聊听众关心的实际问题：这家公司凭什么在行业里站稳、增长从哪里来、钱从哪里赚、和同行比强在哪、"
+            "2. 财务与行情数据只用来佐证业务判断：把营收、利润、毛利率、ROE、价格和成交等数字翻译成"
+            "经营层面的含义（例如这个数字变动说明谁的日子变难了），不要罗列指标，不要停留在K线、MACD等技术信号本身。\n"
+            "3. 讲听众关心的实际问题：这家公司凭什么在行业里站稳、增长从哪里来、钱从哪里赚、和同行比强在哪、"
             "风险藏在哪个环节。\n"
-            "4. 有多少数据聊多少内容：充分利用数据里的财务指标、每股指标、利润/资产负债/现金流构成和历史走势；"
+            "4. 有多少数据讲多少内容：充分利用数据里的财务指标、每股指标、利润/资产负债/现金流构成和历史走势；"
             "结合最近的行情节奏（涨跌、量能、位置）自然展开，可以引用带日期的具体数字，但只解读不预测。\n"
             "5. 最新资讯是每期的必答块（2026-10-08）：数据里的 news/资讯 是该股票最近的公开新闻、研报和快讯。"
             "骨架里出现 news 节拍时，必须至少用一轮正面响应最新的一条——说清日期与信息类型"
@@ -351,7 +349,7 @@ class DialogueGenerator:
             "（印证了什么/矛盾在哪/或说明只是交易层面的异动），这正是观众点进来的原因；"
             "只能复述标题和摘要里已有的信息，不得脑补细节、不得据此预测股价；"
             "骨架里没有 news 节拍（数据里没给资讯）时才完全不提。\n"
-            "6. 多用通俗类比和生活化举例把生意讲透（如把经销网络比作水管、把预收款比作客户先排队交钱）；"
+            "6. 多用通俗类比和生活化举例把机制说成人话（如把经销网络比作水管、把预收款比作客户先排队交钱）；"
             "关键数字要说清楚\u201c意味着什么\u201d，而不是只报数字。\n"
             "7. 每轮对话都要给出画面指引：从 line 中提取 2-4 个关键词或短语（公司名、业务词、财务指标名、"
             "日期或区间、行业词、新闻事件词），按对话顺序填入 visual 数组；只允许出现 line 里说到的词；"
@@ -391,6 +389,10 @@ class DialogueGenerator:
             "\n反套话（重要）：每一期的开场都必须是新的。禁止把这些当开场套式——"
             "“咱们先看……”整个句式（不管宾语换成什么，2026-09-27 实锤：“咱们先看谁在给XX掏钱”只换了宾语、骨架照旧）、"
             "“说白了”“这家公司靠什么赚钱”式的设问、“XX 这门生意”式的名词解释。"
+            "**“这门生意”这四个字全片都不许出现**：它是把公司抽象成一个名词摆上台面，"
+            "观众记住的是这个说法而不是这家公司；要讲生意就直接说是谁在掏钱、钱卡在哪一环、谁替谁垫钱。"
+            "同样禁止“把某某聊透了”“讲透了”“今天就聊到这里”这类对节目自己的总结——"
+            "它们一旦出现在片尾，等于把最后一轮让给自夸，观众拿到的是零信息。"
             "这些意思可以在正文里讲，但第一句必须从具体事实、具体数字或一个反直觉的判断切入，"
             "不要出处介绍、不要背景铺垫。收尾同样禁止“总的来说/说到底”式的空转，要落到一个具体变量上。\n"
             "\n开场三秒（重要）：第一句不超过 25 个字，必须带一个具体数字或一个反直觉的判断，"
@@ -404,11 +406,37 @@ class DialogueGenerator:
             "不许为了戏剧性夸大、预判或编造任何数字，数据说什么就是什么。\n"
         )
 
+    def _sharpness_rules(self, *, two_sided: bool = True) -> str:
+        """锐度要求（对辩与独白共用，只在「谁来反驳」这一处措辞上分叉）。
+
+        用户的原话是「像在报流水账」「看完不想看下一集」，但说不出标准。标准写成
+        三条可执行的写作约束：每轮都是**能被反驳的具体判断**、对立面真的对撞、
+        全片留一处反常识。``sharpness`` 模块用同一套口径核对成片，于是"够不够锐"
+        不是感觉——能指出具体哪一轮还是流水账。
+        """
+        if two_sided:
+            opposition = ("两边必须真的对立：允许认同，但每一方至少要有一次直接推翻对方的具体依据"
+                          "（「你这条数说明不了这个」）；「你说得对，不过也要看到另一面」式的和稀泥"
+                          "一次都不要有。")
+        else:
+            opposition = ("你要自己跟自己抬杠：每给出一个判断，就当场替观众追问一句「凭什么」，"
+                          "再用数据把它答掉；一路顺着讲到底就是流水账。")
+        return (
+            "\n锐度（重要）：这不是一期资讯播报，观点要能扎人。"
+            "每一轮抛出的都必须是**当场能被反驳的具体判断**——谁在掏钱、凭什么非它不可、"
+            "代价压在哪个环节；只说「公司做了什么」是流水账，说出「这么做要付出什么」才是观点。"
+            + opposition
+            + "全片至少一处反常识：把数字和直觉拧过来（账上赚的和手里收的对不上、越赚钱越缺钱、"
+            "同行都在涨它却在掉），但只能是数据里已有的事实，不许为了反差夸大或编造。"
+            "观众看完要有一个「原来如此」的瞬间，而不是记住一串指标。\n"
+        )
+
     def _system_tail(self, choice: ArcChoice) -> str:
         """对辩形态的节奏与风格收束（骨架清单 + 反套话 / 开场 / 铺排 + 交替发言）。"""
         return (
             "\n" + self._arc_section(choice) + "\n"
             + self._shared_opening_rules()
+            + self._sharpness_rules()
             + "\n对话节奏（重要）：长度由内容决定，该长则长、该短则短。允许某一轮只有几个字"
             "（如“嗯”“有道理”“但是——”“等等，这个不对”），用来表示认可、打断或迟疑；"
             "也允许一方连续追问、另一方长答后短驳。不要为了凑字数把每一轮都写满，也不要每轮等长。"
@@ -509,14 +537,14 @@ class DialogueGenerator:
         """
         return (
             "至少一半的篇幅围绕公司业务和行业本身（生意模式、行业格局、竞争与需求），技术信号最多作为一句带过的佐证。"
-            f"{opening}就把“这家公司靠什么赚钱”讲明白，让观众听完能多懂一门生意，而不是听了一段行情点评。"
+            f"{opening}就把“这家公司靠什么赚钱”讲明白，让观众听完能看懂一个行当的赚钱方式，而不是听了一段行情点评。"
             "观众的获得感是这条视频的命：看完要让人觉得「学到了」，而不只是听了一嘴行情。"
             "每一期至少让观众带走两个可复用的认知，从下面三类里至少覆盖两类："
-            "① 行业门道——这个行业的钱怎么流转、产业链上下游谁卡着谁、为什么这类生意毛利高或账期长，讲清一个运转机制；"
+            "① 行业门道——这个行业的钱怎么流转、产业链上下游谁卡着谁、为什么这类行当毛利高或账期长，讲清一个运转机制；"
             "② 看财报的方法——结合本期真实数字讲一个指标怎么读、容易看漏什么"
             "（比如经营现金流为什么要和净利润对着看、存货和应收压着多少营收说明什么），"
             "让观众下次自己翻开财报也会用这一招；"
-            "③ 公司价值——把商业模式翻译成「这门生意好在哪、脆弱在哪」，不要停在概念词上。"
+            "③ 公司价值——把商业模式翻译成「它凭什么赚钱、哪一环最经不起查」，不要停在概念词上。"
             "讲通用财识可以用行业常识，但涉及本期公司的数字必须原样来自数据；"
             f"知识点要长在{where}自然讲出来，禁止开科普小课堂（「我们来了解一下」这类句式一律不要）。"
         )
@@ -574,7 +602,7 @@ class DialogueGenerator:
         minutes = (f"{self._minutes(min_s)}-{self._minutes(max_s)} 分钟" if max_s > min_s
                    else f"{self._minutes(max_s)} 分钟")
         beat_keys = beats_by_key(choice.beats)
-        schema = {"title": "股票名（代码）：一句话点出这门生意或行业看点", "turns": [
+        schema = {"title": "股票名（代码）：一句话点出这家公司的看点或它在行业里的位置", "turns": [
             {"speaker": "bull", "line": f"一句完整自然的话，{floor_chars} 到 {self.config.max_line_chars} 字；"
                                         f"说不下就拆成两轮说；短回应可以只有 2-8 字",
              "beat": f"骨架节拍，只能取：{'/'.join(beat_keys)}",
@@ -597,9 +625,9 @@ class DialogueGenerator:
             "写完自己检查每轮是否是完整的话，结尾不能是“……的”“……反而”这种断句。"
             "不要编号、不要 Round、不要强制一来一回；"
             "允许一方连续追问、另一方长答后短驳，长短句交错，不要每轮等长。"
-            + ("这是一条信息流短视频，不是快讯：每一轮都要让观众多懂一点这门生意，不能用铺垫消耗前几秒。"
+            + ("这是一条信息流短视频，不是快讯：每一轮都要让观众多懂一点它是怎么赚钱的，不能用铺垫消耗前几秒。"
                if max_s <= 90 else
-               "这是一条长视频，不是快讯：观众交出的是几分钟的注意力，每一轮都要让他多懂一点这门生意。")
+               "这是一条长视频，不是快讯：观众交出的是几分钟的注意力，每一轮都要让他多懂一点它是怎么赚钱的。")
             + "多轮短交锋，别让一个人一口气讲太久：一轮只讲一个点，讲完就把话头递出去。"
             "但每一轮仍必须有新信息、新数字或新角度，严禁把同一个意思换句话再说一遍。"
             "素材和数据多就往上限展开，素材少就收得住（不低于下限），不要为凑时长注水，也不要意犹未尽地草草收尾。"
@@ -858,6 +886,12 @@ class DialogueGenerator:
         script["quality"] = self._style_audit(turns)
         for flag in script["quality"]["flags"]:
             notes.append(f"[文风检查] {flag}")
+        # 锐度判定清单（2026-10-27 WAN-27）：把"够不够锐"拆成七条可核对的判定，
+        # 与 quality 一起落进剧本 JSON。同一只票改动前后各跑一次，哪几条从红转绿
+        # 一眼可见——否则"改好了没有"只能凭印象比较两期节目。
+        # 锐度不进 arc_notes：那里是"模型没照骨架走"的偏差记录，混进质量体检会
+        # 让「偏差」一栏变性；两项各自落在 quality / sharpness 字段里，审查页分栏看。
+        script["sharpness"] = sharpness.evaluate(script)
         if self.config.message:
             # 用了 --message 就要留痕：这期"为什么讲得跟别期不一样"必须能在成片
             # 旁边的 JSON / 审查页里看到原话，否则提示词是一条断掉的回溯链。
@@ -917,29 +951,13 @@ class DialogueGenerator:
 
     @staticmethod
     def _style_audit(turns: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
-        """Expose lightweight, deterministic human-speech quality signals.
+        """成片的套话/重复度体检——规则集中在 ``copy_guard``（2026-10-27）。
 
-        This intentionally reports instead of rewriting: a second LLM pass can
-        damage factual wording, while a reviewer can use the flags to target
-        only the offending lines.
+        刻意只报告、不改写：二次改写会伤到事实措辞（数字读法、来源归属），而
+        一次体检把命中项与原文摆出来，人就能只改那一句。清单与模板池扫描共用
+        同一份，避免"新套话只进了其中一处"。
         """
-        lines = [str(turn.get("line") or "").strip() for turn in turns if str(turn.get("line") or "").strip()]
-        joined = "\n".join(lines)
-        cliche_hits = [phrase for phrase in STYLE_CLICHES if joined.count(phrase)]
-        idiom_count = sum(joined.count(phrase) for phrase in STYLE_IDIOMS)
-        repeated = sum(1 for left, right in zip(lines, lines[1:]) if left == right)
-        flags: list[str] = []
-        if cliche_hits:
-            flags.append("套话：" + "、".join(cliche_hits))
-        if idiom_count > max(1, len(lines) // 8):
-            flags.append(f"熟语密度偏高（{idiom_count}处）")
-        if repeated:
-            flags.append(f"相邻台词重复（{repeated}处）")
-        return {"cliche_count": sum(joined.count(phrase) for phrase in STYLE_CLICHES),
-                "cliche_hits": cliche_hits, "idiom_count": idiom_count,
-                "repeated_adjacent_lines": repeated,
-                "short_turn_ratio": round(sum(len(line) <= 20 for line in lines) / len(lines), 3) if lines else 0.0,
-                "flags": flags}
+        return copy_guard.audit(turns)
 
     @staticmethod
     def _clean_spotlight(response: Mapping[str, Any]) -> dict[str, str] | None:
@@ -1044,7 +1062,7 @@ class DialogueGenerator:
     @staticmethod
     def _clean_title(value: Any, name: str, code: str) -> str:
         title = re.sub(r"\s+", " ", str(value or "")).strip()
-        return title[:60] or f"{name}（{code}）这门生意怎么看"
+        return title[:60] or f"{name}（{code}）这家公司怎么看"
 
     @staticmethod
     def _clean_text(value: Any, limit: int) -> str:
@@ -1201,14 +1219,14 @@ class MonologueGenerator(DialogueGenerator):
     def _system_prompt(self, arc: Arc | None = None) -> str:
         choice = self._choice_for(arc)
         narrator = self._character(MONOLOGUE_SPEAKER, "谈股论金",
-                                   "一个人把一家公司讲透的财经讲述人")
+                                   "一个人把一家公司掰开讲的财经讲述人")
         return (
-            "你是财经短视频编导，为对投资感兴趣的普通观众写一段**一个人把一家公司讲透**的中文独白。"
+            "你是财经短视频编导，为对投资感兴趣的普通观众写一段**一个人把一家公司掰开讲**的中文独白。"
             "只依据提供的数据发言；不编造数字、新闻或事实，不预测涨跌，不给出买卖或仓位建议，不承诺收益。\n"
             f"讲述人：{narrator['name']}，人设：{narrator['persona']}。\n"
             f"全片只有这一个说话人：每一轮的 speaker 都写 {MONOLOGUE_SPEAKER}。"
             "不要虚构第二个角色，也不要写成「一人分饰两角的辩论」——"
-            "这是一个人把这门生意讲给观众听，不是把一份对辩剧本一个人念完。\n"
+            "这是一个人把这家公司讲给观众听，不是把一份对辩剧本一个人念完。\n"
             + self._content_rules(emotion_close="独白没有对手接话，情绪起伏就是唯一的节奏")
             + self._system_tail(choice)
         )
@@ -1252,7 +1270,7 @@ class MonologueGenerator(DialogueGenerator):
                    else f"{self._minutes(max_s)} 分钟")
         beat_keys = beats_by_key(choice.beats)
         narrator = self._character(MONOLOGUE_SPEAKER, "谈股论金", "")
-        schema = {"title": "股票名（代码）：一句话点出这门生意或行业看点", "turns": [
+        schema = {"title": "股票名（代码）：一句话点出这家公司的看点或它在行业里的位置", "turns": [
             {"speaker": MONOLOGUE_SPEAKER,
              "line": f"一段完整自然的话，{floor_chars} 到 {self.config.max_line_chars} 字；"
                      "说不下就拆成下一段",
@@ -1266,7 +1284,7 @@ class MonologueGenerator(DialogueGenerator):
             }
         return (
             f"生成一段成片时长在 {min_s}-{max_s} 秒（约 {minutes}）的**单人独白**："
-            f"全片由 {narrator['name']} 一个人讲完，每一轮的 speaker 都写 {MONOLOGUE_SPEAKER}，"
+            f"全片由 {narrator['name']} 一个人从头讲到尾，每一轮的 speaker 都写 {MONOLOGUE_SPEAKER}，"
             "不要出现第二个说话人。\n"
             f"正文总字数控制在 {min_chars}-{budget_chars} 字之间（配音约 4.8 字/秒，超字数就会超时长），"
             f"分 {min_turns}-{max_turns} 段，单段 {floor_chars}-{self.config.max_line_chars} 字。"
@@ -1274,11 +1292,11 @@ class MonologueGenerator(DialogueGenerator):
             "任何一句话都不许为了压字数砍成半截——宁可多拆一段，也不能丢掉半句意思；"
             "写完自己检查每段是否是完整的话，结尾不能是“……的”“……反而”这种断句。"
             "不要编号、不要 Round。"
-            + ("这是一条信息流短视频，不是快讯：每一段都要让观众多懂一点这门生意，不能用铺垫消耗前几秒。"
+            + ("这是一条信息流短视频，不是快讯：每一段都要让观众多懂一点它是怎么赚钱的，不能用铺垫消耗前几秒。"
                if max_s <= 90 else
-               "这是一条长视频，不是快讯：观众交出的是几分钟的注意力，每一段都要让他多懂一点这门生意。")
+               "这是一条长视频，不是快讯：观众交出的是几分钟的注意力，每一段都要让他多懂一点它是怎么赚钱的。")
             +             "独白不是一人分饰两角，也不是把一份对辩剧本一个人念完：全片只有一个人在讲，"
-            "没有「看多看空的两个立场」要你轮流代言，讲的就是你对这门生意的理解——"
+            "没有「看多看空的两个立场」要你轮流代言，讲的就是你自己对这家公司的判断——"
             "但理解必须长在数据上，数据说什么就是什么。"
             "素材和数据多就往上限展开，素材少就收得住（不低于下限），不要为凑时长注水，也不要意犹未尽地草草收尾。"
             + self._audience_rules(opening="开头两段", where="叙事里")
@@ -1293,8 +1311,8 @@ class MonologueGenerator(DialogueGenerator):
             "不要把它们（或同义说法）写进任何台词。"
             "收尾句式每期必须换（2026-09-29 复盘：十期里七期都是「那就看下一期/下一份财报……」收尾，"
             "观众会腻）：禁止再把「那就看下一…」「咱们看下一期……」当结语模板。"
-            "要盯的变量会打在片尾画面上，台词点到变量本身即可，说法要从当期讲过的那门生意里自然长出来，"
-            "例如：「渠道里压着多少货、这批货能不能变成钱，是这门生意接下来的真问题。」"
+            "要盯的变量会打在片尾画面上，台词点到变量本身即可，说法要从当期讲过的内容里自然长出来，"
+            "例如：「渠道里压着多少货、这批货能不能变成钱，是这家公司接下来的真问题。」"
             "——例子只是示范语气，别整期复用同一句。"
             + self._interactive_fields(include_sides=False)
             + self._spotlight_rule()
@@ -1309,7 +1327,7 @@ class MonologueGenerator(DialogueGenerator):
     def _lead_label(self, lead: str) -> str:
         """独白片没有"谁领讲"：五章仍是有用的叙事地图，但 lead 是双人片的产物。"""
         name = self._character(MONOLOGUE_SPEAKER, "谈股论金", "")["name"]
-        return f"本章由{name}一个人讲完"
+        return f"本章由{name}一个人从头讲到尾"
 
     def _seed_opener(self, side: str) -> str:
         """开法种子里的"建议由谁起头"在单人片里没有指派对象。"""
