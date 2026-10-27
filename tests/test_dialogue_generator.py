@@ -604,10 +604,14 @@ class DebateTensionTests(unittest.TestCase):
         # 必须连同它的合规边界一起钉住，否则热情会被写成喊单。
         self.assertIn("他自己的动作", system)
         self.assertIn("不是叫观众买", system)
-        # 仓位词会被 compliance 换成别的说法（实测「我先加仓」→「我先调整关注重点」），
-        # 写进台词就是残句，所以在提示层直接禁掉。
-        self.assertIn("加仓／减仓／满仓／清仓", system)
-        self.assertIn("句子会散", system)
+        # 仓位词分两档后果，两种都要写清（2026-10-27 第三轮 review 阻塞项）：
+        # 加仓/减仓/清仓/建仓 会被 compliance 替换成中性词（「我先加仓」→
+        # 「我先调整关注重点」），句子散掉；满仓/锁仓/底仓/梭哈 在台词层零拦截，
+        # 会原样念出去当成喊单。写成"都会被合规层改散"是假话。
+        self.assertIn("加仓／减仓／清仓／建仓", system)
+        self.assertIn("满仓／锁仓／底仓／梭哈", system)
+        self.assertIn("句子直接散掉", system)
+        self.assertIn("根本没人拦", system)
 
     def test_user_prompt_repeats_the_tension_spec_next_to_the_data(self):
         """系统提示写过一遍，用户提示里紧贴数据再收一次口。

@@ -22,9 +22,10 @@
 
 判定的口径（写死在下面的词表里，改口径就改这里，不要在报告里另立标准）：
 
-* 多头首轮 hit = 出现动作词（上车/坐不住/忍不住/不等了…）或反应词（愣/没想到/
-  这数一出来…）；miss = 只做了生意陈述（出现占比、主营构成、业务结构这类词，
-  且没有动作/反应词）。
+* 多头首轮 hit = 出现**放行动作词**或反应词（愣/没想到/这数一出来…）。
+  放行的动作词按"台词层实测"筛过一遍，逐词状态写在 `ACTION_WORDS` 里；
+  被 prompt 禁掉的仓位词单独放在 `BANNED_ACTION_WORDS`，**不计命中**，只报次数
+  ——否则工具会奖励刚禁掉的行为，而且"禁令生效了没有"看不出来。
 * 空头首轮 hit = 带问号，或出现「你先说/先说清/我问一句」这类先问后拆的开法。
 * 裸报数 = 按句切分后，一句里有数字、且不含判断词（意味着/说明/因为/所以/可是/
   但/凭什么/站不住/我认/反而/这就是/等于），也不是提问句。
@@ -145,8 +146,45 @@ STOCKS: dict[str, dict[str, Any]] = {
     },
 }
 
-ACTION_WORDS = ("上车", "我先上", "先买", "买一点", "坐不住", "忍不住", "不等了", "手痒",
-                "直接干", "拍板", "先干了", "押上", "锁仓", "建仓", "建个底仓", "底仓")
+# ---- 动作词共识清单（WAN-29）------------------------------------------------
+# 这是「prompt 禁令 / A/B 口径 / 未来的替换表」三层要共用的同一份种子：一个词只有
+# 在这张表里、且注明台词层状态之后，才允许算作"多头下手"的命中。2026-10-27 review
+# 的阻塞项就是这张表当时缺位——口径把「锁仓／底仓」当成命中，等于工具在奖励 prompt
+# 刚禁掉的行为，还让"禁令是否生效"无法验证。
+#
+# 台词层实测（ComplianceAgent.sanitize + _review_line，2026-10-27 67d1fbb）：
+#   · 加仓 → 「调整关注重点」、减仓 → 「降低关注度」、清仓 → 「停止跟踪」、
+#     建仓 → 「开始跟踪」：会被替换，句子散掉，所以 prompt 明令禁止；
+#   · 满仓／锁仓／底仓／梭哈：**台词层零拦截**，原样念出去，所以 prompt 也禁——
+#     但这是提示层自律，确定性兜底要等合规轮把它们纳入替换/禁用表。
+ACTION_WORDS: dict[str, str] = {
+    "上车": "台词层放行（片尾图板红线：不许进 sides/hook/question）",
+    "我先上": "台词层放行",
+    "先买": "台词层放行（不含「买入」，ADVICE_REPLACEMENTS 不匹配）",
+    "买一点": "台词层放行",
+    "押上": "台词层放行（实测不被改写）",
+    "直接干": "台词层放行",
+    "拍板": "台词层放行",
+    "先干了": "台词层放行",
+    "不等了": "台词层放行",
+    "坐不住": "情绪反应，非仓位词",
+    "忍不住": "情绪反应，非仓位词",
+    "手痒": "情绪反应，非仓位词",
+}
+
+# 禁词：prompt 明令禁止，A/B 口径**不再**把它们算命中，改为独立计数——这样"禁令
+# 到底生效了没有"是可验证的，而不是混在命中率里看不出来。
+BANNED_ACTION_WORDS: dict[str, str] = {
+    "加仓": "被合规改散（→调整关注重点）",
+    "减仓": "被合规改散（→降低关注度）",
+    "清仓": "被合规改散（→停止跟踪）",
+    "建仓": "被合规改散（→开始跟踪）",
+    "满仓": "台词层零拦截（只有片尾图板红线）",
+    "锁仓": "台词层零拦截",
+    "底仓": "台词层零拦截",
+    "梭哈": "台词层零拦截（只有片尾图板红线）",
+}
+
 # 注意「我认 / 我先认」不算动作：那是"认可这个判断"，改前样本里多头就是这么写的，
 # 把它算成动作会把 before 也判成命中——口径必须能区分"认同"与"下手"。
 REACTION_WORDS = ("愣", "没想到", "这数一出来", "看到这个", "吓一跳", "一惊", "刚看到",
@@ -182,18 +220,25 @@ def evaluate(script: dict[str, Any]) -> dict[str, Any]:
     acted = any(word in bull_line for word in ACTION_WORDS)
     reacted = any(word in bull_line for word in REACTION_WORDS)
     dumped = any(word in bull_line for word in DUMP_WORDS)
+    # 禁词单独计数：prompt 禁掉之后，"禁令生效了没有"要看这个数，而不是看命中率。
+    # 首轮 + 全片分开记：首轮决定第一印象，全片决定有没有漏到后面几轮。
+    banned_first = [word for word in BANNED_ACTION_WORDS if word in bull_line]
+    banned_all = {word: sum(str(t.get("line") or "").count(word) for t in turns)
+                  for word in BANNED_ACTION_WORDS}
     bare = sum(1 for t in turns
                for sentence in re.split(r"(?<=[。！？])", str(t.get("line") or ""))
                if _is_bare_number_sentence(sentence))
     return {
         "bull_first": bull_line,
-        "bull_hit": bool(acted or reacted) and not (dumped and not (acted or reacted)),
+        "bull_hit": bool(acted or reacted),
         "bull_acted": acted,
         "bull_reacted": reacted,
         "bull_dumped": dumped,
         "bear_first": bear_line,
         "bear_hit": ("？" in bear_line or "?" in bear_line
                      or any(word in bear_line for word in ASK_OPENERS)),
+        "banned_first": banned_first,
+        "banned_total": sum(banned_all.values()),
         "bare_numbers": bare,
         "turns": len(turns),
         "sharpness": script.get("sharpness", {}).get("score"),
@@ -224,6 +269,7 @@ def main() -> int:
             print(f"  多头首轮 hit={report['bull_hit']}（动作={report['bull_acted']} "
                   f"反应={report['bull_reacted']} 陈述={report['bull_dumped']}）：{report['bull_first']}")
             print(f"  空头首轮 hit={report['bear_hit']}：{report['bear_first']}")
+            print(f"  禁词 首轮={report['banned_first'] or '无'} 全片={report['banned_total']} 次")
             print(f"  裸报数={report['bare_numbers']} 轮数={report['turns']} 锐度={report['sharpness']}")
         sys.stdout.flush()
     return 0
