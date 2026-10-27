@@ -519,6 +519,22 @@ class DebateTensionTests(unittest.TestCase):
         # 多头要反击，不是一被问就熄火
         self.assertIn("反击回来", system)
 
+    def test_opening_turn_is_a_reaction_not_a_business_summary(self):
+        """多头首轮由骨架指派成"反应 + 动作"，不是"说清生意"。
+
+        WAN-29 第三轮：前两轮改的是"怎么说"，但首拍的指派本身就是一次 info-dump
+        （"说清卖什么、用占比/毛利率当骨架"），模型照着写出来就是"先冷静陈述一遍"。
+        这条钉住骨架侧：`_arc_section` 渲染出的开场要求必须带"反应 + 动作"。
+        """
+        system = DialogueGenerator()._system_prompt()
+
+        self.assertIn("开场要求：", system)
+        self.assertIn("看到本期那个好消息之后的反应 + 想上车的动作", system)
+        self.assertIn("不许在第一句讲", system)
+        # 首拍 intent 也不许再是陈述式的"说清…用占比当骨架"
+        self.assertIn("紧跟开场那个反应把生意讲清", system)
+        self.assertNotIn("用主营构成里的真实占比和毛利率作为骨架", system)
+
     def test_numbers_must_be_used_not_read_aloud(self):
         """反裸报数：数字不许念完就过，必须被对方拿去用或质疑。
 
@@ -588,6 +604,10 @@ class DebateTensionTests(unittest.TestCase):
         # 必须连同它的合规边界一起钉住，否则热情会被写成喊单。
         self.assertIn("他自己的动作", system)
         self.assertIn("不是叫观众买", system)
+        # 仓位词会被 compliance 换成别的说法（实测「我先加仓」→「我先调整关注重点」），
+        # 写进台词就是残句，所以在提示层直接禁掉。
+        self.assertIn("加仓／减仓／满仓／清仓", system)
+        self.assertIn("句子会散", system)
 
     def test_user_prompt_repeats_the_tension_spec_next_to_the_data(self):
         """系统提示写过一遍，用户提示里紧贴数据再收一次口。
