@@ -36,12 +36,16 @@ RANKING = {
 }
 
 
-def _picker(tmp_path: Path, runner: Any, **topics_cfg: Any) -> TopicPicker:
+def _picker(tmp_path: Path, runner: Any, *, clock: Any = None, **topics_cfg: Any) -> TopicPicker:
     config = {
         "output": {"dir": str(tmp_path)},
         "topics": {"timeout_seconds": 5, **topics_cfg},
     }
-    return TopicPicker(config, runner=runner)
+    # clock 必须显式传给 TopicPicker：以前它被 **topics_cfg 吞进配置、被忽略，
+    # 于是保留期测试用的是真实时钟——把记录写成固定日期后，30 天一到就自己失败
+    # （2026-10-28 实测：写死的 2026-09-22 记录被当成过期剪掉）。
+    options = {"clock": clock} if clock is not None else {}
+    return TopicPicker(config, runner=runner, **options)
 
 
 def _ranking_runner(payload: dict[str, Any] | None = None, prefix: str = ""):
