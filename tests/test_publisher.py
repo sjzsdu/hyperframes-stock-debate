@@ -652,10 +652,13 @@ def test_environment_check_reports_every_tool(tmp_path: Path, monkeypatch: pytes
     checks = check_environment({"publish": {"sau_dir": str(tmp_path)}}, publisher)
 
     names = {item["name"] for item in checks}
-    assert names == {"sau", "npx", "chrome"}
+    assert names == {"sau", "npx", "chrome", "cover_ai"}
     sau = next(item for item in checks if item["name"] == "sau")
     assert not sau["ok"] and sau["required"]
     assert all(item["required"] is False for item in checks if item["name"] != "sau")
+    # 没配 cover.ai 段时 AI 底图是关的：预检只报告状态，不发请求、不花钱。
+    cover_ai = next(item for item in checks if item["name"] == "cover_ai")
+    assert not cover_ai["ok"]
 
 
 # ---------------------------------------------------------------------------

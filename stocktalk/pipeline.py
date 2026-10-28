@@ -118,6 +118,10 @@ class Pipeline:
         except Exception as exc:
             self.console.print(f"[yellow]封面图生成失败，将不带封面发布: {exc}[/yellow]")
             return {}
+        # AI 底图（cover.ai）是可降级的锦上添花：失败只提示一次，封面照常按
+        # 模板出图，渲染/发布流程一个字都不改。
+        if getattr(self.covers, "ai", None) is not None and self.covers.ai.last_error:
+            self.console.print(f"[yellow]{self.covers.ai.last_error}，已回落为纯模板封面[/yellow]")
         missing = [size for size in sizes if size not in rendered]
         if missing:
             self.console.print(f"[yellow]封面图缺失（{', '.join(missing)}），相关平台将不带封面发布[/yellow]")

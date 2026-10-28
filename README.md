@@ -33,6 +33,7 @@
 |---|---|
 | `ffmpeg` / `ffprobe` | 不做句首句尾静音裁剪与淡入淡出，相邻台词衔接略生硬 |
 | Chrome | 不生成封面图，降级为「不带封面发布」 |
+| `DASHSCOPE_API_KEY`（或 `bl` 登录态） | 不生成 AI 封面底图，封面回落到纯模板渐变 |
 | `sau`（已内置在 `third_party/`） | 不能发布，但出片不受影响 |
 
 一条命令全查：`tangulunjin --check`，输出里会分别标注必需项与降级项。
@@ -455,6 +456,34 @@ third_party/social-auto-upload/verify_code.txt`；命令行可加 `--no-interact
 约定，内容为股票名/代码/最新价/涨跌幅/真实收盘曲线/看点一句话。封面失败只会
 降级为「不带封面发布」，绝不影响已经渲染好的视频发布。配置见 `cover:` 段。
 
+#### AI 底图（每个个股一张专属背景）
+
+`cover.ai` 会给每支股票生成一张**背景图**，铺在现有版式下面、被渐变压暗：
+文字、曲线、版式一点不动，所以同一个模板出的封面只是「背景」换成了这只股票
+自己的氛围（`cover.ai.enabled: auto` 默认：有凭据就开）。
+
+```bash
+export DASHSCOPE_API_KEY=sk-...   # 或者 bl auth login 一次
+tangulunjin 600519 --publish      # 自动带 AI 底图
+STOCKTALK_COVER_AI=0 tangulunjin 600519   # 临时关掉，不用改配置
+```
+
+- **降级**：没有 `bl` CLI、没有凭据、超时、非零退出、产物缺失——一律回落到
+  原来的纯 CSS 渐变封面，渲染/发布流程不感知这次失败。第一次失败后本进程内
+  不再重试（一次渲染要出 1-3 个尺寸，逐个等超时会把链路拖死）。
+- **不重复付费**：底图按 `<ticker>/<size>-<digest>` 缓存在 `cover-art/`（默认
+  `<output.dir>/cover-art`），命中即复用。`cover.ai.reuse: ticker`（默认）让同一
+  支股票的每一期共用一张底图；改成 `episode` 才会按每期的标题叙事重画。
+- **可复现**：seed 由 ticker 派生、`prompt_extend` 关闭，同一支股票反复生成是
+  同一套视觉。
+- **成本**：`wan2.6-t2i` 按张计费（千像素级约 ¥0.2-0.3/张，以百炼官方定价为准）。
+  首次渲染按平台出 1-3 个尺寸 ≈ ¥0.2-0.9；之后同 ticker 命中缓存是免费的。
+- **尺寸**：请求的像素与 `COVER_PRESETS` 一一对应（1080×1440 / 1080×810 /
+  1440×810），服务端实测原样返回，不需要改渲染器布局。
+- **prompt 纪律**：公司名、股票代码、标题原句**不进 prompt**——实测它们会被
+  原样画成图上的字（AI 图里的字不过合规审查）。prompt 只放风格锚 + 构图 +
+  行业意象 + 色调 + 英文禁字约束；公司名只用来推断行业意象。
+
 ## CLI 命令
 
 ```
@@ -760,6 +789,7 @@ output:
 │       ├── tts_agent.py      # TTS 语音合成
 │       ├── hyperframes_builder.py  # 视频工程构建（含片尾互动图板）
 │       ├── cover.py          # 封面图（headless Chrome 截图）
+│       ├── cover_art.py      # AI 封面底图（按 ticker 生成并缓存、可降级）
 │       ├── review.py         # 审查页（成片 + 封面 + 文案 + 合规自检一页看全）
 │       ├── topic_picker.py   # 定时任务的选题（tongstock 热门榜 + 轮转记忆）
 │       ├── scheduler.py      # 排期引擎（发布窗口、窗口内随机、错过即认）
@@ -791,6 +821,7 @@ output/
 │   ├── subtitles.srt                      #   字幕
 │   ├── audio/                             #   逐句配音
 │   └── vertical/                          #   竖版工程
+├── cover-art/                             # AI 封面底图缓存（按 ticker 复用，删掉=下次重新付费）
 ├── daemon.log                             # 守护进程：每次运行的完整输出
 ├── .daemon_state.json                     # 守护进程：排期、退出码、累计成败、上一次的平台级结果
 ├── .session_state.json                    # 登录态心跳：各平台最后有效时间

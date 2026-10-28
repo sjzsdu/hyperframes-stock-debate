@@ -28,6 +28,7 @@ from typing import Any
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 
 from stocktalk.modules.compliance import ComplianceAgent
+from stocktalk.modules.cover_art import AiCoverArt, Runner as ArtRunner
 from stocktalk.modules.numbers import has_digit
 
 # name -> (width, height).  3:4 竖版给抖音/快手/小红书/视频号，4:3 与 16:9 横版
@@ -110,7 +111,8 @@ class CoverGenerator:
 
     def __init__(self, config: Mapping[str, Any] | None = None,
                  screenshotter: Screenshotter | None = None,
-                 chrome: str | None = None) -> None:
+                 chrome: str | None = None,
+                 art_runner: ArtRunner | None = None) -> None:
         self.config = dict(config or {})
         cover = self.config.get("cover", {}) if isinstance(self.config.get("cover"), Mapping) else {}
         self.enabled = bool(cover.get("enabled", True))
@@ -125,6 +127,9 @@ class CoverGenerator:
         # cover.style: auto（默认）跟着剧本形态走；写死 debate/monologue 则强制。
         self.style_config = str(cover.get("style") or "auto").strip().lower()
         self.compliance = ComplianceAgent(self.config)
+        # AI 底图（cover.ai）：一张按个股生成的背景层，可降级、按 ticker 缓存。
+        # art_runner 只为测试注入；生产走 bl image generate 子进程。
+        self.ai = AiCoverArt(self.config, runner=art_runner)
 
     # ------------------------------------------------------------------
     # Environment
@@ -244,6 +249,8 @@ class CoverGenerator:
         # 首帧冲突数字（2026-10-07）：与视频 intro-card 同源，合规审查后进封面
         spotlight = script.get("spotlight") if isinstance(script.get("spotlight"), Mapping) else {}
         style = self.style_for(script)
+        hook = self._hook(script, stock_name, stock_code)
+        tags = self._tags(script)
         template = self._env.get_template(COVER_TEMPLATES[style])
         return template.render(
             name=stock_name or stock_code,
@@ -259,13 +266,46 @@ class CoverGenerator:
             chart_max=f"{max(clamps):,.2f}" if clamps else "",
             sparkline=sparkline,
             spark_end_y=spark_end_y,
-            hook=self._hook(script, stock_name, stock_code),
-            tags=self._tags(script),
+            hook=hook,
+            tags=tags,
+            # AI 底图（cover.ai）：data URI 或空串。空串时模板不渲染这一层，
+            # 出来的封面与加这个功能之前一模一样。
+            ai_art=self._ai_art_uri(stock_name or stock_code, stock_code, stock_data,
+                                    hook, tone, size, (width, height)),
             spotlight_label=str(spotlight.get("label") or "").strip(),
             spotlight_value=str(spotlight.get("value") or "").strip(),
             # 独白封面的专属字段（辩论模板不读，多传不会渲染出东西）。
             **self._monologue_context(script),
         )
+
+    def _ai_art_uri(self, stock_name: str, stock_code: str, stock_data: Mapping[str, Any],
+                    hook: str, tone: str, size: str, preset: tuple[int, int]) -> str:
+        """One AI background per size, or "" when the feature is off/unavailable.
+
+        公司名只用来推断行业意象，叙事只在 ``reuse: episode`` 时参与缓存键：
+        名字、代码、标题原句一旦进 prompt，模型会把它们画成图上的字，而图上的
+        字不受合规审查（2026-10-28 实测，详见 cover_art 的模块注释）。
+        """
+        try:
+            uri = self.ai.background_uri(stock_name=stock_name, stock_code=stock_code,
+                                         narrative=hook, tone=tone, size=size, preset=preset,
+                                         industry=self._industry(stock_data))
+        except Exception:  # noqa: BLE001 — 底图失败必须等价于「没有底图」
+            return ""
+        return uri or ""
+
+    @staticmethod
+    def _industry(stock_data: Mapping[str, Any]) -> str:
+        """F10 的「所属行业」，有就用——比按公司名猜准。"""
+        for key in ("profile", "f10", "company"):
+            block = stock_data.get(key)
+            if not isinstance(block, Mapping):
+                continue
+            for field in ("所属行业", "所属研究行业", "证监会行业", "行业"):
+                value = block.get(field)
+                if isinstance(value, str) and value.strip():
+                    return value.strip()
+        return ""
 
     @classmethod
     def _monologue_context(cls, script: Mapping[str, Any]) -> dict[str, Any]:

@@ -128,3 +128,17 @@ def test_monologue_example_config_only_switches_the_format() -> None:
     assert overlaid["dialogue"]["monologue"] == defaults["dialogue"]["monologue"]
     assert overlaid["cover"] == defaults["cover"]
     assert overlaid["publish"] == defaults["publish"]
+
+
+def test_ai_cover_defaults_are_opt_in_but_not_silently_expensive() -> None:
+    """AI 封面底图：默认 auto（有凭据才开）、按 ticker 复用、尺寸走封面预设。
+
+    2026-10-28 用户要求「每个个股通过 AI 生成个性化专业封面」。默认值锁在这里，
+    因为它是「每渲一期花掉几次图像生成费用」的开关——不能被顺手改成 true 或
+    episode，那会让每一期、每个尺寸都重新付费。
+    """
+    ai = _config()["cover"]["ai"]
+    assert ai["enabled"] == "auto"          # 没有凭据就静默关，不花钱也不报错
+    assert ai["reuse"] == "ticker"          # 同一支股票复用一张底图
+    assert ai["model"] == "wan2.6-t2i"
+    assert ai["cache_dir"] == ""            # 留空 → <output.dir>/cover-art
