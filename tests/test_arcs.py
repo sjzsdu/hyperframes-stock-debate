@@ -126,9 +126,33 @@ def test_every_arc_declares_an_opener_and_sane_min_beats() -> None:
         assert arc.beats, arc.id
         assert len(arc.beats) >= arc.min_beats, arc.id
         assert len({beat.key for beat in arc.beats}) == len(arc.beats), f"{arc.id} 有重复节拍 key"
-    for arc_id in ("crack", "customer", "annual", "peers"):
+    for arc_id in ARCS:
         assert ARCS[arc_id].opener, f"{arc_id} 没有开场约束，模型会回到套话开场"
-    assert not MAINLINE.opener  # 回退主线不额外约束开场
+    # 回退主线也要有开场约束（2026-10-27 WAN-29 第三轮）：它是最常上场的一条，
+    # 原先留空意味着"数据薄一点就退回没有开场要求的 info-dump"。
+    assert MAINLINE.opener
+
+
+def test_arcs_opening_on_bull_ask_for_a_reaction_not_an_info_dump() -> None:
+    """首拍落在多头的对辩骨架，开场必须要求"反应 + 动作"，而不是"说清/报占比"。
+
+    WAN-29 第三轮：模型把多头首轮写成"先冷静陈述生意和数字"，根因不是形容词不够，
+    而是骨架把首拍派给了多头去做一次 info-dump。开场约束（opener）与首拍 intent
+    必须同时改，否则两者互相打架。
+    """
+    from stocktalk.modules.arcs import DEBATE_OPENER
+
+    bull_first = [arc for arc in ARCS.values()
+                  if arc.beats and (arc.beats[0].speaker or "bull") == "bull"]
+    assert {arc.id for arc in bull_first} == {"mainline", "crack", "customer", "annual"}
+
+    for arc in bull_first:
+        assert arc.opener.startswith(DEBATE_OPENER), f"{arc.id} 的开场没有要求多头「反应+动作」"
+        assert "反应" in arc.opener and "动作" in arc.opener, arc.id
+        # 首句不许再是"说清公司卖什么/用占比当骨架"这种陈述式指派
+        first = arc.beats[0].intent
+        assert "先说清" not in first, f"{arc.id} 首拍仍是陈述式 info-dump"
+        assert "用主营构成里的真实占比" not in first, f"{arc.id} 首拍仍让占比当骨架"
 
 
 def test_crack_has_a_short_interjection_beat() -> None:

@@ -469,6 +469,167 @@ class OpeningClosingTests(unittest.TestCase):
         self.assertIn("不要用行业定性开场", system)
 
 
+class DebateTensionTests(unittest.TestCase):
+    """多空态度对立与正面交锋（2026-10-27 WAN-29）。
+
+    用户反馈成片里「双方态度不够尖锐」，听下来像两个人各自把稿子念完。原来的
+    提示词只要求「每轮是新信息」「两边真的对立」，从没要求过**接话**——于是
+    "两段平行独白拼起来"完全合法，每轮单看还都合格。
+
+    第二轮用户复述了要的感觉（「兴冲冲想买进去 / 冷静理性帮她把风险一条条拽住」），
+    所以断言一律钉**行为**，不钉形容词：形容词（热情/冷静）压不住模型，写出来的
+    东西才会。
+    """
+
+    def test_bull_leads_with_emotion_before_argument(self):
+        """多头：情绪先于论证——先有反应和动作，再补理由；被打断时找补或嘴硬。"""
+        system = DialogueGenerator()._system_prompt()
+
+        self.assertIn("态度与交锋", system)
+        self.assertIn("兴冲冲", system)
+        self.assertIn("情绪先于论证", system)
+        # 动作先于论证：给的是他自己的动作，不是结论
+        self.assertIn("这价我先上车", system)
+        # 被打断时不许立刻认同
+        self.assertIn("找补或嘴硬", system)
+        self.assertIn("认输只留给片尾那一处反转", system)
+        # 允许抢话、允许半句话被打断
+        self.assertIn("允许抢话", system)
+        self.assertIn("半句话被打断", system)
+
+    def test_bear_asks_one_concrete_question_then_dismantles(self):
+        """空头：不抢话，先问一个很具体的问题，再逐条拆。"""
+        system = DialogueGenerator()._system_prompt()
+
+        self.assertIn("找茬", system)
+        self.assertIn("不抢话", system)
+        self.assertIn("你先说清楚这个毛利怎么算的", system)
+        for dimension in ("估值撑不撑得住", "现金流跟不跟得上", "一次性的", "周期的哪个位置"):
+            self.assertIn(dimension, system)
+        # 全程不喊：把话递回去而不是把音量提上去
+        self.assertIn("不喊不叫", system)
+        self.assertIn("我不拦你，但你要知道", system)
+
+    def test_collision_uses_the_other_side_of_the_same_data(self):
+        """碰撞：用同一份数据里的另一面拆回去，且不许一方连续两轮没人质疑。"""
+        system = DialogueGenerator()._system_prompt()
+
+        self.assertIn("同一份数据里的另一面", system)
+        self.assertIn("不许出现某一方连续两轮没人质疑", system)
+        # 多头要反击，不是一被问就熄火
+        self.assertIn("反击回来", system)
+
+    def test_opening_turn_is_a_reaction_not_a_business_summary(self):
+        """多头首轮由骨架指派成"反应 + 动作"，不是"说清生意"。
+
+        WAN-29 第三轮：前两轮改的是"怎么说"，但首拍的指派本身就是一次 info-dump
+        （"说清卖什么、用占比/毛利率当骨架"），模型照着写出来就是"先冷静陈述一遍"。
+        这条钉住骨架侧：`_arc_section` 渲染出的开场要求必须带"反应 + 动作"。
+        """
+        system = DialogueGenerator()._system_prompt()
+
+        self.assertIn("开场要求：", system)
+        self.assertIn("看到本期那个好消息之后的反应 + 想上车的动作", system)
+        self.assertIn("不许在第一句讲", system)
+        # 首拍 intent 也不许再是陈述式的"说清…用占比当骨架"
+        self.assertIn("紧跟开场那个反应把生意讲清", system)
+        self.assertNotIn("用主营构成里的真实占比和毛利率作为骨架", system)
+
+    def test_numbers_must_be_used_not_read_aloud(self):
+        """反裸报数：数字不许念完就过，必须被对方拿去用或质疑。
+
+        这条同时是"每轮必须有新数字"的对冲：那条约束乘以单轮 80 字，模型的
+        最省力解法就是「营收 12.3 亿，同比增长 18%」再换下一条——念了等于没讲。
+        """
+        system = DialogueGenerator()._system_prompt()
+        message = DialogueGenerator()._user_prompt({"code": "1"})
+
+        self.assertIn("反裸报数", system)
+        self.assertIn("营收 12.3 亿，同比增长 18%", system)   # 被点名的反面样板
+        self.assertIn("挂在动作、判断或情绪上", system)
+        self.assertIn("某一轮一个数字都没有是允许的", system)
+        # 系统提示与用户提示同口径：数字不再按轮计
+        self.assertIn("数字不是每轮的义务", system)
+        self.assertIn("数字不再按轮计", message)
+        self.assertIn("允许某一轮一个数字都没有", message)
+        self.assertIn("营收 12.3 亿，同比增长 18%", message)
+
+    def test_head_to_head_exchange_is_required(self):
+        """必须引用对方原话/数字再反驳，并且禁止平行独白式的各说各话。"""
+        system = DialogueGenerator()._system_prompt()
+
+        self.assertIn("必须正面交锋", system)
+        self.assertIn("平行独白", system)
+        self.assertIn("点名复述", system)
+        self.assertIn("引用→反驳→回击", system)
+        # 至少两次往返，并且被点的一方要还手
+        self.assertIn("至少两次", system)
+        self.assertIn("还回去", system)
+
+    def test_exchange_requirement_has_explicit_exceptions(self):
+        """「接住对方」不能是全称量词（2026-10-27 review 阻塞项）。
+
+        同一份 prompt 里还有两条相反要求：开场轮第一句就要 25 字内带数字
+        （这时还没人说过话）、允许 ≤20 字的短回应轮（「嗯」「有道理」）。
+        写成「每次发言都要」会自相矛盾，模型照字面满足的最省力方式就是每轮
+        机械加「你刚才说……」——那是刚治掉的套话，还会被 sharpness 的
+        opposing 口径奖励。所以钉死两件事：例外明写、全称量词不许回潮。
+        """
+        system = DialogueGenerator()._system_prompt()
+
+        self.assertIn("除开场轮", system)
+        self.assertIn("短回应", system)
+        self.assertIn("实质发言", system)
+        # 机械前缀本身也是套话，必须在同一处被点名禁止
+        self.assertIn("不是一句固定前缀", system)
+        self.assertNotIn("每次发言都要", system)
+        self.assertNotIn("每一次发言都要", system)
+
+    def test_at_least_one_reversal_with_a_real_cause(self):
+        """至少一处观点反转/立场激变，且必须由具体数字掰过来，不许「你说得对」敷衍。"""
+        system = DialogueGenerator()._system_prompt()
+
+        self.assertIn("激变点", system)
+        self.assertIn("观点反转", system)
+        self.assertIn("改口", system)
+        self.assertIn("具体的数字或事实", system)
+
+    def test_tension_does_not_license_hype(self):
+        """热不等于吹票：上头是他自己的动作，不许变成喊别人买。"""
+        system = DialogueGenerator()._system_prompt()
+
+        self.assertIn("热情不等于吹票", system)
+        self.assertIn("不许承诺收益", system)
+        # 「我先上车」只能是他自己的动作——这是本轮唯一新增的动作类表达，
+        # 必须连同它的合规边界一起钉住，否则热情会被写成喊单。
+        self.assertIn("他自己的动作", system)
+        self.assertIn("不是叫观众买", system)
+        # 仓位词分两档后果，两种都要写清（2026-10-27 第三轮 review 阻塞项）：
+        # 加仓/减仓/清仓/建仓 会被 compliance 替换成中性词（「我先加仓」→
+        # 「我先调整关注重点」），句子散掉；满仓/锁仓/底仓/梭哈 在台词层零拦截，
+        # 会原样念出去当成喊单。写成"都会被合规层改散"是假话。
+        self.assertIn("加仓／减仓／清仓／建仓", system)
+        self.assertIn("满仓／锁仓／底仓／梭哈", system)
+        self.assertIn("句子直接散掉", system)
+        self.assertIn("根本没人拦", system)
+
+    def test_user_prompt_repeats_the_tension_spec_next_to_the_data(self):
+        """系统提示写过一遍，用户提示里紧贴数据再收一次口。
+
+        例外（开场轮 / 几个字的短回应）必须一起带过来：只改系统提示、用户提示
+        还留着全称量词，等于没改——模型读到的是那半句。
+        """
+        message = DialogueGenerator()._user_prompt({"code": "1"})
+
+        self.assertIn("态度要分家", message)
+        self.assertIn("先接住对方刚说的原话或数字再反驳", message)
+        self.assertIn("必须有一次由具体数字掰过来的观点反转", message)
+        # 与系统提示同口径：例外明写在这里，且不许留全称量词
+        self.assertIn("除开场轮和几个字的短回应之外", message)
+        self.assertIn("每次实质发言", message)
+        self.assertNotIn("每一轮都先接住", message)
+
+
 class RiskExchangeTests(unittest.TestCase):
     """片尾风险提示交换（2026-10-08 第二版）：一人一句、按个股特征变化。
 
