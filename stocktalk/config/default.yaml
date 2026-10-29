@@ -496,6 +496,32 @@ cover:
   timeout_seconds: 90
   # 截图前的虚拟时间预算，等待字体与 CSS 渐变就绪。
   virtual_time_budget_ms: 4000
+  # AI 底图：给每支股票生成一张专属背景图，叠在现有版式下面（文字层不动）。
+  # 这是「锦上添花」的一层：没有 bl CLI / 没有凭据 / 调用失败 / 超时，都自动
+  # 回落到纯 CSS 渐变封面，渲染与发布流程不受影响。
+  ai:
+    # auto = 有凭据（DASHSCOPE_API_KEY 或 bl 登录态）就开，没有就静默关；
+    # true 强制开（仍会因调用失败降级）；false 彻底关。
+    # 临时关掉不用改配置：STOCKTALK_COVER_AI=0 环境变量优先。
+    enabled: auto
+    # 走 `bl image generate` 子进程，凭据由 bl 自己解析：
+    #   export DASHSCOPE_API_KEY=sk-...   （优先，与 TTS 的 dashscope provider 同一个变量）
+    # 或者 bl auth login 一次，把凭据写进 ~/.bailian/config.json。
+    # 默认 wan2.6-t2i：定位是文生图，画面上不容易长出字。**不要换成
+    # qwen-image 系列**——它以文字渲染见长，实测会把中文标语、假图标条整版
+    # 画进底图（2026-10-28 A/B：同一句 prompt 下 qwen-image-3.0 出假标题）。
+    model: wan2.6-t2i
+    # cache_dir: 留空 → <output.dir>/cover-art；按 <ticker>/<size>-<digest> 缓存，
+    # 命中即复用，同一支股票不会每次渲染都重新付费。
+    cache_dir: ""
+    # ticker = 同一支股票所有期次共用一张底图（省钱、身份感稳定，默认）；
+    # episode = 每期按新的标题叙事重画（每期都产生一次生成费用）。
+    reuse: ticker
+    # 单张图的服务端等待上限（qwen-image 同步接口通常 10-40 秒）。
+    timeout_seconds: 240
+    # 追加的风格描述，留空用内置风格锚。整个账号想统一某种质感时写在这里。
+    style: ""
+    negative_prompt: "文字, 汉字, 英文字母, 数字, 水印, logo, 商标, 二维码, 界面截图, K线图, 坐标轴, 拼贴, 低分辨率, 模糊, 畸形的手, 多余的手指"
 
 output:
   dir: output

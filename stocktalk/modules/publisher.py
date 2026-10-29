@@ -314,6 +314,7 @@ ENVIRONMENT_CHECKS: tuple[tuple[str, str, bool], ...] = (
     ("sau", "sau CLI（发布）", True),
     ("npx", "Node/npx（MP4 渲染）", False),
     ("chrome", "Chrome（封面图，缺失则无封面发布）", False),
+    ("cover_ai", "AI 封面底图（缺失则回落纯模板封面）", False),
 )
 
 
@@ -340,6 +341,17 @@ def check_environment(config: Mapping[str, Any] | None = None, publisher: SauPub
         found["chrome"] = (bool(chrome), chrome or "未找到 Chrome/Chromium；封面图将跳过")
     except Exception as exc:  # pragma: no cover - defensive
         found["chrome"] = (False, str(exc))
+    # AI 底图（cover.ai）：只报告「会不会尝试」，不在这里发请求/花钱。
+    try:
+        from stocktalk.modules.cover import CoverGenerator
+
+        art = CoverGenerator(resolved.config).ai
+        if art.enabled:
+            found["cover_ai"] = (True, f"{art.model} → {art.cache_dir}")
+        else:
+            found["cover_ai"] = (False, "未启用（cover.ai.enabled / 缺少 DASHSCOPE_API_KEY 与 bl）")
+    except Exception as exc:  # pragma: no cover - defensive
+        found["cover_ai"] = (False, str(exc))
     checks: list[dict[str, Any]] = []
     for name, label, required in ENVIRONMENT_CHECKS:
         ok, detail = found.get(name, (False, "未检查"))

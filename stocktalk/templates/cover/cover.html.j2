@@ -53,6 +53,24 @@
   #cover.up   { --tint-a: rgba(255, 90, 120, .34); --tint-b: rgba(255, 113, 136, .16); --tint-chip: rgba(255, 113, 136, .15); }
   #cover.down { --tint-a: rgba(70, 230, 165, .26); --tint-b: rgba(94, 224, 167, .13); --tint-chip: rgba(94, 224, 167, .15); }
   #cover.flat { --tint-a: rgba(105, 183, 255, .26); --tint-b: rgba(105, 183, 255, .12); }
+  /* AI 底图（cover.ai）：按个股生成的一张背景图，铺满整帧、被渐变压暗。
+     它是纯背景层，网格布局和文字层一点不动——有图没图，版式完全一致。 */
+  #cover.has-art { background: transparent; }
+  .ai-art { position: absolute; inset: 0; z-index: -2; }
+  /* 3px 柔焦：模型偶尔还会在坛子/标牌上留下装饰性小字（实测无法彻底
+     禁止），柔焦到不可辨认，同时给背景一点景深感。scale 补偿模糊边缘。 */
+  .ai-art img {
+    width: 100%; height: 100%; object-fit: cover; display: block;
+    filter: blur(3px) saturate(1.05); transform: scale(1.04);
+  }
+  /* 压暗 + 氛围色：底图不能抢字。红涨绿跌的深浅仍由 --tint-* 决定。 */
+  .ai-art::after {
+    content: ""; position: absolute; inset: 0;
+    background:
+      radial-gradient(circle at 78% 6%, var(--tint-a) 0, transparent 52%),
+      radial-gradient(circle at 12% 88%, var(--tint-b) 0, transparent 46%),
+      linear-gradient(160deg, rgba(6,13,24,.88) 0, rgba(6,13,24,.62) 46%, rgba(6,13,24,.90) 100%);
+  }
   /* 细网格纹理：给深底一点印刷质感 */
   #cover::before {
     content: ""; position: absolute; inset: 0; z-index: -1;
@@ -182,7 +200,9 @@
 </style>
 </head>
 <body>
-<main id="cover" class="{{ tone }}" data-ratio="{{ width }}x{{ height }}"{% if tint_style %} style="{{ tint_style }}"{% endif %}>
+<main id="cover" class="{{ tone }}{% if ai_art %} has-art{% endif %}" data-ratio="{{ width }}x{{ height }}"{% if tint_style %} style="{{ tint_style }}"{% endif %}>
+
+  {% if ai_art %}<div class="ai-art" aria-hidden="true"><img src="{{ ai_art }}" alt=""></div>{% endif %}
 
   <header class="brand">
     <span class="mark">谈股论金</span>
