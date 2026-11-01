@@ -128,6 +128,21 @@ patches here so they survive an upgrade and can be sent upstream later:
     必须逐个挑可见的那个。
   - 快捷登录成功后仍走原收尾路径（`storage_state` 回写 + `cookie_auth` 校验），
     不另起一套登录代码。
+- `patches/0010-sau-cn-direct-connection.patch` (2026-11-01)
+  - 现象：`sau kuaishou login` / `sau baijiahao login` 全部失败。快手死在登录前置
+    cookie 校验（`ERR_CONNECTION_CLOSED at https://cp.kuaishou.com/article/publish/video`），
+    百家号死在登录页（`ERR_CONNECTION_CLOSED` / `ERR_TIMED_OUT at .../builder/theme/bjh/login`）。
+  - 根因与 sau 版本无关：同一时刻 `curl` 直连两家均 200，但 Playwright 启动的浏览器
+    **跟随 macOS 系统代理**（本机 Clash Verge，`127.0.0.1:7897`），而该代理把
+    `cp.kuaishou.com`、`baijiahao.baidu.com` 的连接直接掐断（`curl -x 127.0.0.1:7897`
+    可复现 `SSL_ERROR_SYSCALL`）。用 `--proxy-server=direct://` 启动 Chromium 后两家
+    立刻恢复 200，`www.baidu.com` / `example.com` 走代理则一直正常。
+  - 修复：快手的 4 处 launch（cookie 校验 / 扫码登录 / 视频上传 / 图文上传）与百家号
+    的 `_build_launch_kwargs` 统一加 `--proxy-server=direct://`。两家只在大陆可访问，
+    直连即可；需要代理的 YouTube 走 `conf.YT_PROXY`，不受影响。
+  - 验证：`sau kuaishou check` / `sau baijiahao check` 均 `valid`，扫码登录页的二维码
+    也都能取到（快手 `div.qr-login img[alt="qrcode"]`、百度 passport 二维码 URL）。
+    另外两家原有 cookie 本来就有效，之前日志里的「失效」是网络失败导致的假阴性。
 
 Re-apply after an upgrade (all patches are diffed against `0012d2c` and
 verified with `git apply --check`; apply in numeric order):
@@ -142,6 +157,7 @@ git apply ../patches/0005-sau-baijiahao-system-chrome-title-panel.patch
 git apply ../patches/0006-sau-tencent-cover-dialog-visible.patch
 git apply ../patches/0007-sau-tencent-keepalive.patch
 git apply ../patches/0008-sau-tencent-quick-login.patch
+git apply ../patches/0010-sau-cn-direct-connection.patch
 ```
 
 注意补丁里的路径是 **vendored 目录相对**（`sau_cli.py`、`uploader/...`），所以上面这套

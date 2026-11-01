@@ -90,6 +90,10 @@ def _build_launch_kwargs(headless: bool) -> dict:
     executable_path = LOCAL_CHROME_PATH or _find_system_chrome()
     if executable_path:
         launch_kwargs["executable_path"] = executable_path
+    # 2026-11-01: 浏览器默认跟随 macOS 系统代理（本机 Clash Verge，127.0.0.1:7897），
+    # 该代理对 baijiahao.baidu.com 的连接直接掐断——`sau baijiahao login` 报
+    # net::ERR_CONNECTION_CLOSED / ERR_TIMED_OUT。百家号只在大陆可访问，直连即可。
+    launch_kwargs["args"] = ["--proxy-server=direct://"]
     return launch_kwargs
 
 

@@ -32,6 +32,11 @@ KUAISHOU_PUBLISH_STRATEGY_IMMEDIATE = "immediate"
 KUAISHOU_PUBLISH_STRATEGY_SCHEDULED = "scheduled"
 KUAISHOU_UPLOAD_TIMEOUT_SECONDS = 480
 KUAISHOU_PUBLISH_ATTEMPTS = 3
+# 2026-11-01: 浏览器默认跟随 macOS 系统代理（本机 Clash Verge，127.0.0.1:7897），
+# 该代理对 cp.kuaishou.com 的连接直接掐断——`sau kuaishou login` 前置 cookie 校验
+# 报 net::ERR_CONNECTION_CLOSED，登录页也打不开。快手只在大陆可访问，直连即可；
+# 需要代理的 YouTube 走 conf.YT_PROXY，不受影响。
+KUAISHOU_DIRECT_CONNECTION_ARGS = ["--proxy-server=direct://"]
 
 
 def _msg(emoji: str, text: str) -> str:
@@ -224,9 +229,9 @@ async def _is_ks_login_page_gone(page: Page) -> bool:
 async def cookie_auth(account_file):
     async with async_playwright() as playwright:
         if LOCAL_CHROME_PATH:
-            browser = await playwright.chromium.launch(headless=True, executable_path=LOCAL_CHROME_PATH)
+            browser = await playwright.chromium.launch(headless=True, executable_path=LOCAL_CHROME_PATH, args=KUAISHOU_DIRECT_CONNECTION_ARGS)
         else:
-            browser = await playwright.chromium.launch(headless=True, channel="chromium")
+            browser = await playwright.chromium.launch(headless=True, channel="chromium", args=KUAISHOU_DIRECT_CONNECTION_ARGS)
         try:
             context = await browser.new_context(storage_state=account_file)
             context = await set_init_script(context)
@@ -298,9 +303,9 @@ async def get_ks_cookie(
             should_close_context = False
         else:
             if LOCAL_CHROME_PATH:
-                browser = await playwright.chromium.launch(headless=headless, executable_path=LOCAL_CHROME_PATH)
+                browser = await playwright.chromium.launch(headless=headless, executable_path=LOCAL_CHROME_PATH, args=KUAISHOU_DIRECT_CONNECTION_ARGS)
             else:
-                browser = await playwright.chromium.launch(headless=headless, channel="chromium")
+                browser = await playwright.chromium.launch(headless=headless, channel="chromium", args=KUAISHOU_DIRECT_CONNECTION_ARGS)
             context = await browser.new_context()
             should_close_context = True
         context = await set_init_script(context)
@@ -668,11 +673,13 @@ class KSVideo(KSBaseUploader):
             browser = await playwright.chromium.launch(
                 headless=self.headless,
                 executable_path=self.local_executable_path,
+                args=KUAISHOU_DIRECT_CONNECTION_ARGS,
             )
         else:
             browser = await playwright.chromium.launch(
                 headless=self.headless,
                 channel="chromium",
+                args=KUAISHOU_DIRECT_CONNECTION_ARGS,
             )
         context = await browser.new_context(storage_state=self.account_file)
         context = await set_init_script(context)
@@ -931,11 +938,13 @@ class KSNote(KSBaseUploader):
             browser = await playwright.chromium.launch(
                 headless=self.headless,
                 executable_path=self.local_executable_path,
+                args=KUAISHOU_DIRECT_CONNECTION_ARGS,
             )
         else:
             browser = await playwright.chromium.launch(
                 headless=self.headless,
                 channel="chromium",
+                args=KUAISHOU_DIRECT_CONNECTION_ARGS,
             )
         context = await browser.new_context(storage_state=self.account_file)
         context = await set_init_script(context)
