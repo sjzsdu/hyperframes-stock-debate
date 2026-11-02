@@ -954,7 +954,7 @@ class DialogueGenerator:
                 # 按实测语速换算的自估时长。长片最容易出的偏差是模型多写几百字，
                 # 把它留在结果里，pipeline 就能在渲染前提醒（而不是渲完才发现超长）。
                 "estimated_seconds": round(char_count / SPEECH_CHARS_PER_SECOND, 1)}
-        script["quality"] = self._style_audit(turns)
+        script["quality"] = self._style_audit(turns, on_screen=self._on_screen_texts(script))
         for flag in script["quality"]["flags"]:
             notes.append(f"[文风检查] {flag}")
         # 锐度判定清单（2026-10-27 WAN-27）：把"够不够锐"拆成七条可核对的判定，
@@ -1021,14 +1021,30 @@ class DialogueGenerator:
                 "visual_id": str(entry.get("visual_id") or visual.get("id") or "")}
 
     @staticmethod
-    def _style_audit(turns: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    def _on_screen_texts(script: Mapping[str, Any]) -> list[str]:
+        """上屏但不进配音的文字：封面/发布标题 + 首帧大卡的 label/value。
+
+        这几个字是观众**第一眼**看到的（封面就是它），却不在 ``turn[].line``
+        里——不接进体检的话，「封面上写一句套话」永远漏检（2026-11-02 WAN-28）。
+        """
+        texts = [str(script.get("title") or "")]
+        spotlight = script.get("spotlight")
+        if isinstance(spotlight, Mapping):
+            texts.extend(str(spotlight.get(key) or "") for key in ("label", "value"))
+        return texts
+
+    @staticmethod
+    def _style_audit(turns: Sequence[Mapping[str, Any]],
+                     on_screen: Sequence[str] = ()) -> dict[str, Any]:
         """成片的套话/重复度体检——规则集中在 ``copy_guard``（2026-10-27）。
 
         刻意只报告、不改写：二次改写会伤到事实措辞（数字读法、来源归属），而
         一次体检把命中项与原文摆出来，人就能只改那一句。清单与模板池扫描共用
         同一份，避免"新套话只进了其中一处"。
+
+        ``on_screen`` 是封面标题与首帧大卡的上屏文字，一起查套话（2026-11-02）。
         """
-        return copy_guard.audit(turns)
+        return copy_guard.audit(turns, on_screen=on_screen)
 
     @staticmethod
     def _clean_spotlight(response: Mapping[str, Any]) -> dict[str, str] | None:
