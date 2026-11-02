@@ -72,6 +72,24 @@ class DialogueGeneratorTests(unittest.TestCase):
         self.assertEqual(audit["repeated_adjacent_lines"], 1)
         self.assertTrue(audit["flags"])
 
+    def test_on_screen_cliches_from_cover_title_and_spotlight_are_flagged(self):
+        """封面标题与首帧大卡不进口播，但一样是观众第一眼看到的字（2026-11-02 WAN-28）。"""
+        response = json.dumps({
+            "title": "平安银行（000001）：先说清这门生意",
+            "spotlight": {"label": "息差", "value": "1.8%→1.5%"},
+            "turns": [
+                {"speaker": "bull", "beat": "生意本质",
+                 "line": "存款变贷款赚息差，这个模式没变，变的是零售客户黏性。"},
+                {"speaker": "bear", "beat": "行业追问",
+                 "line": "息差收窄的时候客户黏性顶不住不良率，这笔账要重算。"},
+            ]}, ensure_ascii=False)
+        generator = DialogueGenerator({"dialogue": {"max_line_chars": 80}},
+                                      runner=lambda argv, timeout: response)
+        with patch("stocktalk.modules.providers.bailian_chat.shutil.which", return_value="bl"):
+            script = generator.generate({"code": "000001", "quote": {"name": "平安银行"}})
+        self.assertTrue(script["quality"]["on_screen_hits"])
+        self.assertIn("no_rerun", script["sharpness"]["failed"])
+
     def test_default_budget_targets_a_two_to_five_minute_cut(self):
         """默认配置按 2-5 分钟算预算，轮次多、单轮短（2026-09-22 用户反馈）。
 

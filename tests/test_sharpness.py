@@ -56,6 +56,34 @@ def _failed(script: dict[str, Any]) -> list[str]:
     return sharpness.evaluate(script)["failed"]
 
 
+def _judgement(script: dict[str, Any], check_id: str) -> dict[str, Any]:
+    return next(item for item in sharpness.checks(script) if item["id"] == check_id)
+
+
+# 12 轮 × anchor ≤4：episode_plan 的数字纪律下最常见的长度。四个 anchor 都讲成
+# 了含义，其余轮次本来就不该有数字。旧口径在这里的合法上限是 4/12 = 33%，永远
+# 红；新口径的分母只看这四处（2026-11-02 WAN-28）。
+DISCIPLINED: dict[str, Any] = {
+    "sides": {"bull": "直销放量足以对冲周期", "bear": "价盘松动会先反噬利润"},
+    "spotlight": {"label": "存货", "value": "512亿≈半年收入"},
+    "turns": [
+        {"speaker": "bull", "line": "自己卖的比给经销商卖，一件多赚一成二——凭什么？"},
+        {"speaker": "bear", "line": "这钱是经销商先垫的，渠道推力一弱就还回去。"},
+        {"speaker": "bull", "line": "存货五百一十二亿压着不动，说明它是在囤基酒，不是卖不掉。"},
+        {"speaker": "bear", "line": "动销一缓，这五百亿就变成周转天数，代价压在账上。"},
+        {"speaker": "bull", "line": "先不谈数字，价盘才是这条线的命门。"},
+        {"speaker": "bear", "line": "价盘一个月内跌两成，等于把三个月的利润还回去。"},
+        {"speaker": "bull", "line": "可它不是被动扛价，是主动收窄供给。"},
+        {"speaker": "bear", "line": "供给收窄换不来动销，库存只会继续往上堆。"},
+        {"speaker": "bull", "line": "所以真正的分歧只有一个：价盘能不能撑住。"},
+        {"speaker": "bear", "line": "我承认品牌在，但这解释不了渠道的账期越拖越长。"},
+        {"speaker": "bull", "line": "那就盯下一期动销，别猜。"},
+        {"speaker": "bear", "line": "对，这一期只认存货和价格两个事实。"},
+    ],
+    "quality": {"cliche_hits": [], "repeated_phrases": []},
+}
+
+
 def test_the_sharp_sample_passes_every_check() -> None:
     report = sharpness.evaluate(SHARP)
     assert report["failed"] == [], report["checks"]
@@ -113,3 +141,45 @@ def test_every_check_carries_evidence_a_human_can_check() -> None:
 def test_summary_names_the_failed_checks() -> None:
     line = sharpness.summary(sharpness.evaluate(FLAT))
     assert "未过" in line and "hook" in line
+
+
+def test_refutable_passes_on_a_script_that_obeys_the_number_budget() -> None:
+    """数字纪律合规的 12 轮片子必须能绿——旧口径在这里是 33%，永远红。"""
+    item = _judgement(DISCIPLINED, "refutable")
+    assert item["ok"], item
+    assert "4/4" in item["detail"]
+    # 分母只算出现数字的四处，不是全片 12 轮：这正是这次改口径的实质。
+    assert "12" not in item["detail"]
+
+
+def test_refutable_fails_when_the_numbers_are_read_out_without_a_point() -> None:
+    """报了四处数字却全是裸报：换分母不能把裸报放过。"""
+    script = {key: (dict(value) if isinstance(value, dict) else list(value))
+              for key, value in DISCIPLINED.items()}
+    turns = [dict(turn) for turn in DISCIPLINED["turns"]]
+    for index, text in ((0, "一件多赚一成二。"), (2, "存货五百一十二亿。"),
+                        (3, "这五百亿趴在账上。"), (5, "价盘一个月内跌两成。")):
+        turns[index]["line"] = text
+    script["turns"] = turns
+    item = _judgement(script, "refutable")
+    assert not item["ok"], item
+    assert "裸报" in item["detail"]
+
+
+def test_refutable_does_not_turn_green_on_bare_metric_words_alone() -> None:
+    """旧口径下唯一能合法过线的路子：往半数轮次塞「占比/现金流/存货」这类裸词
+    骗过词表。它们让 _has_anchor 为真，却给不出任何可被反驳的论点。新口径只认
+    带量纲的数，塞裸词既不算数字也骗不到判定。"""
+    filler = ("这一块占比不小，", "现金流也在正常范围，", "存货周转还算平稳，",
+              "应收结构没有异常，", "毛利率维持原样，", "净利率并没有变化，")
+    script = {
+        "sides": {"bull": "看好", "bear": "看淡"},
+        "spotlight": {"label": "存货", "value": "512亿≈半年收入"},
+        "turns": [{"speaker": "bull" if index % 2 == 0 else "bear",
+                   "line": filler[index % len(filler)] + "公司整体经营稳健，没什么可反驳的。"}
+                  for index in range(12)],
+        "quality": {"cliche_hits": [], "repeated_phrases": []},
+    }
+    item = _judgement(script, "refutable")
+    assert not item["ok"], item
+    assert "没有一处上场的数字" in item["detail"]

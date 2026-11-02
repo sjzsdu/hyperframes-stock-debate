@@ -22,8 +22,10 @@ from stocktalk.modules.risk_exchange import EXCHANGES, TRAITS
 
 ROOT = pathlib.Path(__file__).resolve().parents[1] / "stocktalk"
 
-# 清单本体当然写着这些词；它是唯一允许的地方。
-EXEMPT_FILES = {"copy_guard.py"}
+# 清单本体当然写着这些词；但只豁免**这几个常量里的字符串**，文件其余部分照常扫
+# （2026-11-02 WAN-28）。整体豁免一个文件，等于给 copy_guard.py 的其它文案开了
+# 一个永久后门——套话写进那里的提示词或样板句，扫描永远看不见。
+EXEMPT_CONSTANTS = {"copy_guard.py": {"CLICHES", "IDIOMS", "TEACHING_MARKERS"}}
 
 
 def _live_template_sentences() -> list[str]:
@@ -55,6 +57,33 @@ def test_a_prompt_may_quote_a_banned_phrase_only_when_it_bans_it() -> None:
     assert copy_guard.source_violations(plain)
 
 
+def test_a_stray_marker_word_does_not_exempt_the_whole_string() -> None:
+    """一处无关的标记词不能给整串放行（2026-11-02 WAN-28）。
+
+    这两句当初都被整串豁免了：套话本身是实质性使用，只因句子别处恰好有个
+    「不要／反例」——那个词管的是后半句，不是被禁短语。
+    """
+    for text in ("先把这门生意讲清楚，不要像上期那样报流水账。",
+                 "写标题时可以先用这门生意，反例以后再改。"):
+        assert copy_guard.source_violations(text), text
+
+
+def test_a_real_teaching_quote_still_exempts_the_hit_it_governs() -> None:
+    """纯教学引用照旧放行：标记词就写在被禁短语前面。"""
+    for text in ("禁止写「这门生意」这种把公司抽象成生意的说法。",
+                 "不要用「把某某聊透了」这类对节目自己的总结。",
+                 "反例：『这门生意』——改成具体的谁在掏钱。"):
+        assert copy_guard.source_violations(text) == [], text
+
+
+def test_one_teaching_quote_does_not_exempt_a_second_real_use() -> None:
+    """逐命中豁免的实质：同一串里，被禁引用的那处放行，实质使用的那处照抓。"""
+    text = "禁止写「这门生意」这种说法，但正文里还是把这家公司聊透了。"
+    phrases = [hit["phrase"] for hit in copy_guard.source_violations(text)]
+    assert phrases, text
+    assert all("这门生意" not in phrase for phrase in phrases), phrases
+
+
 def test_repeated_phrases_finds_new_cliches_without_a_blacklist() -> None:
     """清单之外的新套话：同一段六字表述跨三轮复读就该被抬出来。"""
     lines = ["先说清它到底靠什么赚钱客户是谁",
@@ -78,6 +107,32 @@ def test_audit_counts_every_occurrence_not_just_distinct_phrases() -> None:
     assert audit["cliche_hits"] == ["说白了"]
 
 
+def test_audit_checks_on_screen_texts_too() -> None:
+    """封面标题与首帧大卡是上屏文字，也是观众第一眼看到的字（2026-11-02 WAN-28）。
+
+    台词干净、上屏写套话，是最容易漏的一种——它不进口播，所以旧 ``audit`` 只看
+    ``turn[].line`` 时永远抓不到。
+    """
+    audit = copy_guard.audit(
+        ["渠道压货这件事，价盘一松就露馅。"],
+        on_screen=["贵州茅台：先说清这门生意", "经营现金流", "512亿≈半年收入"])
+    assert [hit["phrase"] for hit in audit["on_screen_hits"]] == ["这门生意"]
+    assert any("上屏文字套话" in flag for flag in audit["flags"])
+    # 上屏命中不改写"念了几遍"的口径：这几个字没有配音
+    assert audit["cliche_count"] == 0
+    assert audit["cliche_hits"] == []
+
+
+def test_on_screen_texts_do_not_skew_turn_level_stats() -> None:
+    """上屏卡片不是轮次：重复度/短句比例的分母仍然是台词轮次。"""
+    lines = ["第一句讲渠道。", "第二句讲价盘。"]
+    plain = copy_guard.audit(lines)
+    with_screen = copy_guard.audit(lines, on_screen=["贵州茅台", "存货", "512亿"])
+    assert with_screen["short_turn_ratio"] == plain["short_turn_ratio"]
+    assert with_screen["repeated_adjacent_lines"] == plain["repeated_adjacent_lines"]
+    assert with_screen["repeated_phrases"] == plain["repeated_phrases"]
+
+
 def test_risk_exchange_templates_are_clean_after_placeholders_are_filled() -> None:
     """片尾风险提示是每期必念的确定性轮：模板池干净才算治住源头。"""
     dirty = {sentence: [hit["phrase"] for hit in copy_guard.source_violations(sentence)]
@@ -85,11 +140,29 @@ def test_risk_exchange_templates_are_clean_after_placeholders_are_filled() -> No
     assert not {k: v for k, v in dirty.items() if v}, dirty
 
 
+def _exempt_constant_strings(tree: ast.Module, names: set[str]) -> set[int]:
+    """模块级被豁免常量里的字符串节点 id（``CLICHES`` 的每条规则也算在内）。"""
+    exempt: set[int] = set()
+    for node in tree.body:
+        if isinstance(node, ast.Assign):
+            targets, value = node.targets, node.value
+        elif isinstance(node, ast.AnnAssign) and node.value is not None:
+            targets, value = [node.target], node.value
+        else:
+            continue
+        if not any(isinstance(target, ast.Name) and target.id in names for target in targets):
+            continue
+        exempt.update(id(sub) for sub in ast.walk(value)
+                      if isinstance(sub, ast.Constant) and isinstance(sub.value, str))
+    return exempt
+
+
 def _module_strings(path: pathlib.Path) -> list[tuple[int, str]]:
     """模块里所有**非 docstring** 的字符串常量（含 f-string 的常量片段）。
 
     docstring 是写给人看的注释，不是要喂给模型或打在画面上的文案；把提示词
-    与模板都写成普通字符串，正是为了让这条扫描看得见它们。
+    与模板都写成普通字符串，正是为了让这条扫描看得见它们。被豁免的只有清单
+    常量本身（``EXEMPT_CONSTANTS``）——它们必须写着被禁的词。
     """
     tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
     docstrings: set[int] = set()
@@ -99,9 +172,22 @@ def _module_strings(path: pathlib.Path) -> list[tuple[int, str]]:
             if body and isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Constant) \
                     and isinstance(body[0].value.value, str):
                 docstrings.add(id(body[0].value))
+    exempt = _exempt_constant_strings(tree, EXEMPT_CONSTANTS.get(path.name, set()))
     return [(node.lineno, node.value) for node in ast.walk(tree)
             if isinstance(node, ast.Constant) and isinstance(node.value, str)
-            and id(node) not in docstrings]
+            and id(node) not in docstrings and id(node) not in exempt]
+
+
+def test_only_the_list_constants_are_exempt_inside_copy_guard(tmp_path: pathlib.Path) -> None:
+    """豁免收窄到清单常量本身：文件其它地方的字符串照样被扫（2026-11-02 WAN-28）。"""
+    source = ('CLICHES = ("先说清这门生意",)\n'
+              '\n'
+              'def prompt():\n'
+              '    return "先把这门生意讲清楚，再往下说。"\n')
+    path = tmp_path / "copy_guard.py"
+    path.write_text(source, encoding="utf-8")
+    offenders = [text for _, text in _module_strings(path) if copy_guard.source_violations(text)]
+    assert offenders == ["先把这门生意讲清楚，再往下说。"]
 
 
 @pytest.mark.parametrize("path", sorted(ROOT.rglob("*.py")), ids=lambda p: p.name)
@@ -109,10 +195,9 @@ def test_no_banned_phrase_is_hardcoded_anywhere_in_the_package(path: pathlib.Pat
     """往任何模块的正文文案里新写一句套话，这条测试就红。
 
     这是"可维护"的关键：新增套话不需要有人记得回来登记清单，扫描器自己会
-    发现——包括以后新加的模块、新的模板池、新的画面文案。
+    发现——包括以后新加的模块、新的模板池、新的画面文案。清单常量本身是唯一
+    的例外（``EXEMPT_CONSTANTS``）。
     """
-    if path.name in EXEMPT_FILES:
-        return
     offenders = []
     for lineno, text in _module_strings(path):
         hits = copy_guard.source_violations(text)

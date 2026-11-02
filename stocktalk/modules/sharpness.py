@@ -24,16 +24,31 @@ sharp_close  片尾预告「等下一份财报」，把结论推给未来
 口径是启发式的（正则 + 计数），刻意保守：宁可漏报也不要误杀——一条把合格
 台词判成不合格的规则，最后一定会被人关掉。
 
-**已知局限（2026-10-27 实测）**：``refutable`` 在 600519 的三份真实样本上是
-33% / 33% / 42%，都没到 50% 的门槛。两个原因都写在明处，不靠调低门槛来"通过"：
+**``refutable`` 的口径重设（2026-11-02 WAN-28）**：原口径要求「≥50% 的轮次
+带具体数字/环节」，与 ``episode_plan`` 的数字纪律正面冲突——全片 anchor ≤4、
+且任意连续两轮不得都有新数字，12 轮片子的合法上限就是 33%（19 轮才勉强 53%）。
+它实际测的是「模型有没有违反数字纪律」，不是「论点可不可反驳」；而且唯一能
+合法过线的路子是往半数轮次塞「占比/现金流/存货」这类裸词骗过词表，那正是
+数字纪律要禁止的事。一条永远红的灯最后一定会被整列关掉，所以改的是口径，
+不是门槛。
 
-1. 词表法对中文口语的"论点"识别不稳——「一旦渠道不进货，周转立刻卡顿」是典型
-   可反驳论点，却不含任何固定判断词；
-2. 更根本的是**与既有数字纪律的张力**：``episode_plan`` 规定全片 anchor ≤4、
-   且任意连续两轮不得都出现新数字，而本条要求过半轮次都带数字锚点。两条规则
-   同时按字面执行是不可能的，模型实际会绕开数字——所以这条判定要么改口径
-   （按论证段落而不是按轮次计），要么把 anchor 额度一起放宽。这是留给下一轮
-   的议题，不是本次能用改词表解决的。
+现在的分母换成**出现数字的轮次**，判定落在「报了数字就要讲出含义」：
+
+* 一处数字要么被翻译成含义（因果/反差/反问/直接推翻），要么就是裸报——裸报
+  不进 ``judged``，因此直接拉低覆盖率；
+* 过线要求覆盖率 ≥75% 且至少两处带论证的数字论点（ANOMALY 之外的另一条底线：
+  整片只有一处论断仍然可能在报流水账）。
+
+12 轮 4 个 anchor 的片子只要 4 处都讲清含义就是 100%，与 anchor 额度**同向**
+而不是对冲；「往轮次里塞裸数字」只会增加裸报、把判定踩红，骗不过去。
+``JUDGEMENT_WORDS`` 对中文口语的识别不全是已知局限（宁可漏报也不要误杀），
+所以留了一处余量（75% 而不是 100%），而不是把裸报硬判成 0 容忍。
+
+**两条"容易绿"的判定（记账，2026-11-02 WAN-28）**：``anomaly`` 在
+``spotlight.value`` 非空时即为真，而生产提示词强制产出 spotlight——它实际
+检查的是「画面字段有没有配齐」，与台词质量无关；``opposing`` 的反驳词表含
+高频词「可是」，两边互相客套、各说两个「可是」也能过。两条都还能被单独踩红
+（不是永真项），所以暂不改判定，但读分数时别把它们当成可信的质量信号。
 """
 
 from __future__ import annotations
@@ -71,10 +86,11 @@ JUDGEMENT_WORDS: tuple[str, ...] = (
 # 口播里的中文分级（"四成四""十二个点""五百亿"）必须认得出来，否则最会讲数字的
 # 那种台词反而被判成"没依据"——清单判错一次，就会被人直接关掉。
 _NUM = r"[0-9０-９][0-9０-９.,]*|[一二三四五六七八九十百千万亿两半]{1,}"
-_ANCHOR = re.compile(
-    rf"{_NUM}\s*(?:%|％|亿|万|元|倍|家|天|年|月|日|人|吨|个点|个百分点|成|次)"
-    r"|同行家数|占比|毛利率|净利率|现金流|应收|存货"
-)
+_WITH_UNIT = rf"{_NUM}\s*(?:%|％|亿|万|元|倍|家|天|年|月|日|人|吨|个点|个百分点|成|次)"
+# 真数了一遍的数：有值、有量纲。``refutable`` 只用这个——「存货」「占比」这种
+# 裸指标名给不出论点，只能说明"提到了这一项"。
+_NUMBER = re.compile(_WITH_UNIT)
+_ANCHOR = re.compile(_WITH_UNIT + r"|同行家数|占比|毛利率|净利率|现金流|应收|存货")
 
 HOOK_MAX_CHARS = 25
 
@@ -93,6 +109,11 @@ def _hit(text: str, words: Sequence[str]) -> list[str]:
 
 def _has_anchor(text: str) -> bool:
     return bool(_ANCHOR.search(text or ""))
+
+
+def _has_number(text: str) -> bool:
+    """有没有一个**带量纲的数**（不是"提到了存货"）。"""
+    return bool(_NUMBER.search(text or ""))
 
 
 def _opening_sentences(lines: Sequence[str], limit: int = 2) -> list[str]:
@@ -155,21 +176,30 @@ def checks(script: Mapping[str, Any]) -> list[dict[str, Any]]:
         f"推翻/质疑 {rebuttals} 处、情绪标注 {emotions} 处",
         f"多方：{bull or '—'} / 空方：{bear or '—'}"))
 
-    # 4. refutable：可被反驳的具体论点——带锚点，并且**不是一个纯报数**。
+    # 4. refutable：报了数字就要说清含义（2026-11-02 WAN-28 口径重设）。
+    #    分母是**出现数字的轮次**，不是全部轮次：anchor ≤4 的配额决定了大多数
+    #    轮次本来就不该有数字，拿全片轮次做分母，等于要求模型违反数字纪律——
+    #    这正是旧口径「过半轮次带数字」永远红、并诱导人塞裸词的原因。
     #    "纯报数"的反面不止因果/判断词：反问、反差、直接推翻同样把它变成论点。
-    #    第一版只认一小组判断词，把「一旦渠道不进货，周转立刻卡顿」这种最典型的
-    #    可反驳论点也判成流水账——判错一次就会被人直接关掉这条清单。
     def _is_argument(line: str) -> bool:
         return (_hit(line, JUDGEMENT_WORDS) or _hit(line, CONTRAST_WORDS)
                 or _hit(line, REBUTTAL_WORDS) or line.rstrip().endswith(("？", "?")))
 
-    judged = [line for line in lines if _has_anchor(line) and _is_argument(line)]
-    ratio = round(len(judged) / len(lines), 2) if lines else 0.0
-    refutable_ok = bool(lines) and ratio >= 0.5
+    numeric = [line for line in lines if _has_number(line)]
+    judged = [line for line in numeric if _is_argument(line)]
+    bare = [line for line in numeric if not _is_argument(line)]
+    coverage = round(len(judged) / len(numeric), 2) if numeric else 0.0
+    # 下限两处：整片只有一处论断的片子照样可能在报流水账。余量 75%：词表对中文
+    # 口语的识别不全是已知局限，宁可漏报也不要误杀（留一处裸报不被判死）。
+    refutable_ok = len(judged) >= 2 and coverage >= 0.75
+    if numeric:
+        detail = (f"{len(judged)}/{len(numeric)} 处数字给了依据（{coverage:.0%}）"
+                  + (f"，{len(bare)} 处是裸报" if bare else "，没有裸报"))
+    else:
+        detail = "全片没有一处上场的数字——论点没有可被反驳的依据"
     result.append(_check(
-        "refutable", "过半台词是可被反驳的具体论点", refutable_ok,
-        f"{len(judged)}/{len(lines)} 轮（{ratio:.0%}）有具体数字/环节，且不是纯报数",
-        judged[0] if judged else ""))
+        "refutable", "上场的数字都讲成了可被反驳的论点", refutable_ok, detail,
+        judged[0] if judged else (bare[0] if bare else "")))
 
     # 5. anomaly：至少一处反常识或数字锚点。
     spotlight = script.get("spotlight") if isinstance(script.get("spotlight"), Mapping) else {}
@@ -182,8 +212,12 @@ def checks(script: Mapping[str, Any]) -> list[dict[str, Any]]:
         contrast[0] if contrast else ""))
 
     # 6. no_rerun：套话与跨轮复读（copy_guard 是同一份清单，两处口径一致）。
+    #    上屏文字（封面标题、首帧大卡）与台词同等对待：它们同样是观众看到的文案，
+    #    只是不进配音（2026-11-02 WAN-28）。
     quality = script.get("quality") if isinstance(script.get("quality"), Mapping) else {}
     hits = list(quality.get("cliche_hits") or ())
+    hits += [str(hit.get("phrase") or "") for hit in (quality.get("on_screen_hits") or ())
+             if isinstance(hit, Mapping) and str(hit.get("phrase") or "")]
     repeated = list(quality.get("repeated_phrases") or ())
     result.append(_check(
         "no_rerun", "没有套话、没有跨轮复读", not hits and not repeated,
