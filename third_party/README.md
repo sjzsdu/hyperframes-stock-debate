@@ -143,6 +143,32 @@ patches here so they survive an upgrade and can be sent upstream later:
   - 验证：`sau kuaishou check` / `sau baijiahao check` 均 `valid`，扫码登录页的二维码
     也都能取到（快手 `div.qr-login img[alt="qrcode"]`、百度 passport 二维码 URL）。
     另外两家原有 cookie 本来就有效，之前日志里的「失效」是网络失败导致的假阴性。
+- `patches/0011-sau-douyin-upload-plain-playwright.patch` (2026-11-07)
+  - 现象：2026-11-05 起抖音上传全部失败，其余四平台正常。日志里进得了发布页、标题话题
+    都填好了，随后页面挂「上传失败」，sau 自己重传，每轮 ~60s 无限循环，被外层 900s
+    砍掉后只剩一句 `upload timed out`（11-05 ×4、11-06 ×2、11-07 ×1 全中）。
+  - 根因：**patchright**（sau 依赖的反检测 Playwright 分支）与抖音 11-05 前后调整的
+    上传风控冲突。A/B 对照（同 cookie、同 mp4、同页面交互、同 headless + stealth）：
+    patchright 32s 翻「上传失败」；原生 playwright 0 秒传完。文件/账号/代理/网络均已排除
+    （强制走 Clash `127.0.0.1:7897` 也照样 10s 传完）。
+  - 修复：`DouYinVideo.douyin_upload_video()` 的上传会话改用原生 playwright，扫码/快捷
+    登录继续用 patchright；`SAU_DOUYIN_ENGINE=patchright` 可退回旧行为复现问题。
+  - 验证：`tangulunjin 601066 --republish` 抖音发布成功。
+
+- `patches/0012-sau-douyin-cover-slot-by-step.patch` (2026-11-07)
+  - 现象：`--republish` 发出去的抖音，封面只剩中间一条——品牌、股票名、价格和底部
+    标题行全被裁掉；11-03/11-04 的片子正常。
+  - 根因：抖音 11-05 前后把封面拆成「横封面 4:3」「竖封面 3:4」两个槽，弹窗打开时
+    **默认停在横封面**，而步骤条在 AI 封面「生成中」期间点不动（实测普通 click /
+    原生事件都被吞）。sau 旧逻辑固定「先点设置竖封面，再把 3:4 竖图塞进第一个上传
+    input」，实际把竖图送进了 4:3 横槽 → 平台按 4:3 上下裁切。跟 `--republish` 无关：
+    11-05 起抖音上传全失败，直到 0011 修好才第一次真正发出去，于是刚好在补发时暴露。
+  - 修复：`set_thumbnail()` 读弹窗当前步骤（`横封面预览（4:3）` / `竖封面预览（3:4）`），
+    横槽只喂 `--thumbnail-landscape`、竖槽只喂 `--thumbnail`；比例对不上就跳过并告警
+    （宁可让平台退回视频帧，也不传一张会被裁的图）。判定抽成纯函数
+    `pick_cover_for_step()`，测试 `tests/test_douyin_cover_slot.py`。
+  - 验证：真实上传（不发布）截图确认横封面是完整 4:3 版式，抖音据此自动生成竖封面，
+    且封面步骤从卡 46s 缩到 2s。
 
 Re-apply after an upgrade (all patches are diffed against `0012d2c` and
 verified with `git apply --check`; apply in numeric order):
@@ -158,6 +184,8 @@ git apply ../patches/0006-sau-tencent-cover-dialog-visible.patch
 git apply ../patches/0007-sau-tencent-keepalive.patch
 git apply ../patches/0008-sau-tencent-quick-login.patch
 git apply ../patches/0010-sau-cn-direct-connection.patch
+git apply ../patches/0011-sau-douyin-upload-plain-playwright.patch
+git apply ../patches/0012-sau-douyin-cover-slot-by-step.patch
 ```
 
 注意补丁里的路径是 **vendored 目录相对**（`sau_cli.py`、`uploader/...`），所以上面这套

@@ -1,0 +1,32 @@
+diff --git a/uploader/douyin_uploader/main.py b/uploader/douyin_uploader/main.py
+index 536ebd2..009b765 100644
+--- a/uploader/douyin_uploader/main.py
++++ b/uploader/douyin_uploader/main.py
+@@ -10,6 +10,13 @@ from pathlib import Path
+ from patchright.async_api import Page
+ from patchright.async_api import Playwright
+ from patchright.async_api import async_playwright
++# 2026-11-07: 上传会话必须用原生 Playwright，不能用 patchright。
++# 同一份 cookie、同一个 mp4、同一套页面交互，patchright 下抖音的上传数据阶段
++# 必定翻成「上传失败」（实测 32s 翻脸，sau 自己重传，每轮 ~60s，无限循环），
++# 换回原生 playwright 后 0 秒传完。2026-09-16 起一直接着这个分支，抖音 11-05
++# 前后改了上传侧的风控口径，与 patchright 的 CDP 补丁（跳过 Runtime.enable 等）
++# 冲突。登录（扫码/快捷）继续走 patchright —— 那里才是它有用的地方。
++from playwright.async_api import async_playwright as async_playwright_plain
+ 
+ from conf import BASE_DIR, DEBUG_MODE, LOCAL_CHROME_HEADLESS, LOCAL_CHROME_PATH
+ from uploader.base_video import BaseVideoUploader
+@@ -1137,7 +1144,12 @@ class DouYinVideo(DouYinBaseUploader):
+         await browser.close()
+ 
+     async def douyin_upload_video(self):
+-        async with async_playwright() as playwright:
++        # 上传走原生 playwright；想退回 patchright 只用于复现问题时设 SAU_DOUYIN_ENGINE=patchright。
++        if os.environ.get("SAU_DOUYIN_ENGINE", "").strip().lower() == "patchright":
++            async with async_playwright() as playwright:
++                await self.upload(playwright)
++            return
++        async with async_playwright_plain() as playwright:
+             await self.upload(playwright)
+ 
+     async def main(self):

@@ -1461,3 +1461,53 @@ def test_auto_login_gives_up_when_wechat_never_listens(monkeypatch: pytest.Monke
     assert verdict["attempted"] is False and verdict["ok"] is False
     assert "仍未监听" in verdict["detail"]
     assert commands == []
+
+
+# ---------------------------------------------------------------------------
+# 抖音上传死循环：连续「上传失败」要早停，超时要留下现场（2026-11-06 事故驱动）
+# ---------------------------------------------------------------------------
+
+def test_upload_failure_guard_stops_the_endless_reupload(tmp_path: Path) -> None:
+    """sau 重传没有上限，每个循环约 60s —— 第三次就必须中止。
+
+    2026-11-06 实测：抖音在上传数据阶段每 60s 报一次「上传失败」并自己重传，
+    一直循环到外层 900s 超时，报告里只剩一句 timed out。
+    """
+    guard = publisher_module.UploadFailureGuard(max_failures=3)
+
+    assert guard.feed("INFO | 检测到上传失败，小人准备重试") is None
+    assert guard.feed("INFO | 检测到上传失败，小人准备重试") is None
+    reason = guard.feed("INFO | 检测到上传失败，小人准备重试")
+
+    assert reason is not None
+    assert "连续 3 次" in reason and "上传失败" in reason
+    # 无关日志不能推进计数
+    assert guard.feed("INFO | 小人正在努力上传视频") is None
+
+
+def test_guard_chain_prefers_the_first_verdict(tmp_path: Path) -> None:
+    """短信守卫与上传失败守卫串在一条流上，任一触发即中止。"""
+    chain = publisher_module.GuardChain(
+        publisher_module.UploadFailureGuard(max_failures=1),
+        publisher_module.SmsChallengeGuard(tmp_path / "code.txt", wait_seconds=30))
+
+    assert chain.feed("INFO | 检测到上传失败，小人准备重试") is not None
+
+
+def test_timeout_detail_keeps_the_last_streamed_lines(tmp_path: Path) -> None:
+    """超时的 detail 必须带现场：是卡死还是死循环，全看这几行。"""
+
+    def timing_out_runner(command, cwd):
+        raise subprocess.TimeoutExpired(cmd=list(command), timeout=900,
+                                        output="INFO | 检测到上传失败，小人准备重试\n")
+
+    publisher = SauPublisher(
+        {"publish": {"platforms": ["douyin"], "preflight": False,
+                     "sau_dir": str(tmp_path / "nonexistent"), "timeout_seconds": 900}},
+        runner=timing_out_runner, sau_bin="sau")
+
+    result = publisher._execute_upload("douyin", ["sau", "douyin", "upload-video"])
+
+    assert result.ok is False
+    assert "upload timed out after 900s" in result.detail
+    assert "检测到上传失败" in result.detail

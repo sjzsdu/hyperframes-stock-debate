@@ -222,6 +222,15 @@ def wechat_desktop_reachable(ports: Sequence[int] = WECHAT_CLIENT_PORTS, timeout
 SMS_CHALLENGE_MARKERS: tuple[str, ...] = ("检测到短信验证码弹窗", "已点击「获取验证码」", "等待验证码输入")
 SMS_RESOLVED_MARKERS: tuple[str, ...] = ("已获取验证码", "验证码已填入", "验证码处理完成", "发布成功")
 
+# Douyin has a second endless loop: when the data upload itself fails, the page
+# prints 「上传失败」, sau re-feeds the same file into the input and tries again —
+# with no attempt cap.  Observed 2026-11-06: one failure every ~60s for 15
+# minutes straight, then our outer timeout killed it and the report said only
+# "upload timed out".  Counting sau's own retries lets the run stop in ~3
+# minutes and say what actually failed.
+UPLOAD_FAILURE_MARKERS: tuple[str, ...] = ("检测到上传失败",)
+UPLOAD_FAILURE_ABORT_AFTER = 3
+
 # Bilibili uploads through biliup, which refuses bursts with
 # ``upload rate limit (code: 601): 您上传视频过快``.  The cooldown is minutes
 # long, so honouring the ordinary 30s retry backoff only burns the retry budget
@@ -480,6 +489,43 @@ class SmsChallengeGuard:
 
 def _default_prompt_emit(text: str, end: str = "\n") -> None:
     print(text, end=end, flush=True)
+
+
+class UploadFailureGuard:
+    """Stop after sau's own re-upload loop has failed a few times in a row.
+
+    The marker is sau's own log line, so this needs no page access: each retry
+    starts a fresh upload that dies ~60s later, and the count is the only thing
+    that distinguishes "one blip" from "the pipe is broken".
+    """
+
+    def __init__(self, max_failures: int = UPLOAD_FAILURE_ABORT_AFTER) -> None:
+        self.max_failures = max(1, int(max_failures))
+        self.failures = 0
+
+    def feed(self, line: str) -> str | None:
+        if not any(marker in line for marker in UPLOAD_FAILURE_MARKERS):
+            return None
+        self.failures += 1
+        if self.failures < self.max_failures:
+            return None
+        return (f"上传数据阶段连续 {self.failures} 次报「上传失败」（sau 内部会无限重传），已中止。"
+                f"这不是登录或文案问题，先确认本机网络/代理能稳定传大文件，"
+                f"再用 `tangulunjin <股票代码> --republish` 补发")
+
+
+class GuardChain:
+    """Feed one output stream to several guards; the first verdict wins."""
+
+    def __init__(self, *guards: Any) -> None:
+        self.guards = [guard for guard in guards if guard is not None]
+
+    def feed(self, line: str) -> str | None:
+        for guard in self.guards:
+            reason = guard.feed(line)
+            if reason:
+                return reason
+        return None
 
 
 class VerificationCodePrompt:
@@ -1337,9 +1383,16 @@ class SauPublisher:
         except StreamAbort as exc:
             return PlatformResult(platform=platform, ok=False, command=command, detail=str(exc),
                                   retryable=False)
-        except subprocess.TimeoutExpired:
-            return PlatformResult(platform=platform, ok=False, command=command,
-                                  detail=f"upload timed out after {self.timeout:g}s")
+        except subprocess.TimeoutExpired as exc:
+            # The streamed output is the only clue about *where* it hung — sau's
+            # own retry lines ("检测到上传失败") vs total silence mean completely
+            # different things.  Dropping it left the report saying just
+            # "upload timed out after 900s", which is undiagnosable.
+            tail = str(getattr(exc, "output", "") or "").strip()
+            detail = f"upload timed out after {self.timeout:g}s"
+            if tail:
+                detail += f"\n最后输出: …{tail[-600:]}"
+            return PlatformResult(platform=platform, ok=False, command=command, detail=detail)
         except (OSError, subprocess.SubprocessError) as exc:
             return PlatformResult(platform=platform, ok=False, command=command, detail=str(exc))
         ok = completed.returncode == 0
@@ -1446,15 +1499,18 @@ class SauPublisher:
             raise StreamAbort(abort_reason)
         return subprocess.CompletedProcess(list(command), returncode, output, "")
 
-    def _make_guard(self, command: Sequence[str]) -> SmsChallengeGuard | None:
-        """Attach the SMS guard to video uploads only (never to ``check``)."""
-        if self.verify_code_wait <= 0 or "upload-video" not in command:
+    def _make_guard(self, command: Sequence[str]) -> GuardChain | None:
+        """Attach the stream guards to video uploads only (never to ``check``)."""
+        if "upload-video" not in command:
             return None
-        base = self.sau_dir if self.sau_dir.is_dir() else self.workdir
-        platform = command[1] if len(command) > 1 else ""
-        label = PLATFORM_LABELS.get(platform, platform) or "抖音"
-        return SmsChallengeGuard(base / "verify_code.txt", self.verify_code_wait,
-                                 on_arm=lambda: self._ask_for_code(label))
+        guards: list[Any] = [UploadFailureGuard()]
+        if self.verify_code_wait > 0:
+            base = self.sau_dir if self.sau_dir.is_dir() else self.workdir
+            platform = command[1] if len(command) > 1 else ""
+            label = PLATFORM_LABELS.get(platform, platform) or "抖音"
+            guards.append(SmsChallengeGuard(base / "verify_code.txt", self.verify_code_wait,
+                                           on_arm=lambda: self._ask_for_code(label)))
+        return GuardChain(*guards)
 
 
 def publish_video(video_path: str | Path, script: Mapping[str, Any], stock_name: str, stock_code: str,

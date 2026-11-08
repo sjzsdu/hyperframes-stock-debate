@@ -1,0 +1,81 @@
+diff --git a/uploader/douyin_uploader/main.py b/uploader/douyin_uploader/main.py
+index 009b765..e48dc7a 100644
+--- a/uploader/douyin_uploader/main.py
++++ b/uploader/douyin_uploader/main.py
+@@ -96,6 +96,24 @@ async def _native_click(page, locator) -> bool:
+         return False
+ 
+ 
++def pick_cover_for_step(step: str, portrait: str | None,
++                        landscape: str | None) -> tuple[str | None, str]:
++    """抖音封面弹窗改版后有两个槽：按**当前步骤**决定喂哪张图。
++
++    横槽是 4:3、竖槽是 3:4，比例必须对齐。老逻辑固定先点「设置竖封面」再把
++    3:4 竖图塞进第一个上传 input，可弹窗打开时默认停在「设置横封面」，而步骤条
++    在 AI 封面「生成中」期间点不动（实测 click 被吞）——于是竖图进了 4:3 横槽，
++    抖音按 4:3 裁掉上下，封面只剩中间一条（2026-11-07 用户报「抖音封面有瑕疵」）。
++
++    ``step`` 为 "vertical" / "landscape"；其它值表示旧版单槽弹窗（只有竖封面）。
++    """
++    if step == "vertical":
++        return portrait, "竖版封面"
++    if step == "landscape":
++        return landscape, "横版封面"
++    return (portrait or landscape), "竖版封面"
++
++
+ async def _emit_qrcode_callback(qrcode_callback, payload: dict):
+     if not qrcode_callback:
+         return
+@@ -912,25 +930,32 @@ class DouYinVideo(DouYinBaseUploader):
+         if await cover_upload.count() == 0:
+             cover_upload = cover_locator.locator("input.semi-upload-hidden-input").last
+ 
+-        if self.thumbnail_portrait_path:
+-            # 弹窗默认就在“设置竖封面”页；防御性点一下 tab（已激活则忽略）
+-            try:
+-                await cover_locator.get_by_text("设置竖封面", exact=True).first.click(timeout=3000)
+-                await page.wait_for_timeout(800)
+-            except Exception:
+-                pass
+-            await cover_upload.set_input_files(self.thumbnail_portrait_path)
+-            await page.wait_for_timeout(3000)
+-            douyin_logger.info(_msg("🖼️", "竖版封面已上传到预览"))
+-        elif self.thumbnail_landscape_path:
+-            try:
+-                await cover_locator.get_by_text("设置横封面", exact=True).first.click(timeout=3000)
+-                await page.wait_for_timeout(800)
+-            except Exception:
+-                pass
+-            await cover_upload.set_input_files(self.thumbnail_landscape_path)
+-            await page.wait_for_timeout(3000)
+-            douyin_logger.info(_msg("🖼️", "横版封面已上传到预览"))
++        # 抖音 2026-11 改版把封面拆成「横封面 4:3」「竖封面 3:4」两个槽，弹窗打开时
++        # 默认停在横封面；AI 封面「生成中」期间步骤条点不动（实测点击被吞）。所以不能
++        # 靠"先点竖封面 tab"再传图，必须按弹窗**当前步骤**选图，否则 3:4 竖图会被
++        # 塞进 4:3 横槽、上下裁掉（2026-11-07 用户报「抖音封面有瑕疵」）。
++        modal_text = ""
++        try:
++            modal_text = await cover_locator.inner_text(timeout=3000)
++        except Exception:
++            pass
++        if "竖封面预览" in modal_text:
++            step = "vertical"
++        elif "横封面预览" in modal_text:
++            step = "landscape"
++        else:
++            step = "legacy"  # 旧版单槽弹窗，只有 3:4 竖封面
++        cover_path, cover_label = pick_cover_for_step(
++            step, self.thumbnail_portrait_path, self.thumbnail_landscape_path)
++        if not cover_path:
++            douyin_logger.warning(_msg(
++                "⚠️", f"当前是{cover_label}步骤，但没有对应比例的封面图，"
++                       f"跳过自定义封面（平台会退回视频帧）"))
++            return
++
++        await cover_upload.set_input_files(cover_path)
++        await page.wait_for_timeout(3000)
++        douyin_logger.info(_msg("🖼️", f"{cover_label}已上传到预览（步骤={step}）"))
+ 
+         # ── 等"完成"按钮解禁：封面图处理完成前，"完成"是 semi-button-disabled，点了无效 ──
+         def _finish_btn():
