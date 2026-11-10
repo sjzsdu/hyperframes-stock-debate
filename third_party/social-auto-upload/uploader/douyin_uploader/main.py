@@ -96,6 +96,25 @@ async def _native_click(page, locator) -> bool:
         return False
 
 
+COVER_MODAL_SELECTOR = "div.dy-creator-content-modal"
+COVER_SLOT_SELECTOR = 'div[class*="coverControl"]'  # 发布页「设置封面」的两个槽（横 4:3 / 竖 3:4）
+
+
+def cover_slot_plan(portrait: str | None,
+                    landscape: str | None) -> list[tuple[int, str, str, str]]:
+    """两个封面槽的设置计划：``[(槽位, 图片, 标签, 期望步骤)]``。
+
+    槽位顺序是 0=横封面 4:3、1=竖封面 3:4（发布页 DOM 顺序）。**横必须排在竖之前**：
+    后设横封面会让抖音用横图重新生成竖封面，把手工设好的竖版冲掉。
+    """
+    plan: list[tuple[int, str, str, str]] = []
+    if landscape:
+        plan.append((0, landscape, "横版封面", "landscape"))
+    if portrait:
+        plan.append((1, portrait, "竖版封面", "vertical"))
+    return plan
+
+
 def pick_cover_for_step(step: str, portrait: str | None,
                         landscape: str | None) -> tuple[str | None, str]:
     """抖音封面弹窗改版后有两个槽：按**当前步骤**决定喂哪张图。
@@ -860,11 +879,196 @@ class DouYinVideo(DouYinBaseUploader):
         return False
 
     async def set_thumbnail(self, page: Page):
+        """设置视频封面：横槽 + 竖槽都要显式设。
+
+        抖音 2026-11 改版把封面拆成两个**独立槽**：「横封面 4:3」「竖封面 3:4」，
+        各自带自己的「选择封面」入口。只设横槽时平台会拿横图自动生成竖封面，
+        手机端信息流/主页网格显示的就是那张被裁过的横图 —— 2026-11-08 用户报
+        「抖音封面变成桌面版了，应该是移动版」就是这个原因。
+
+        因此两槽都设，且**先横后竖**：后设横封面会把已设的竖封面重新生成掉。
+        """
         if not self.thumbnail_landscape_path and not self.thumbnail_portrait_path:
             return
 
         douyin_logger.info(_msg("🏃", "小人正在设置视频封面"))
-        # 先清掉 shepherd 新手引导浮层，否则它会拦截封面点击导致弹窗打不开
+        await page.evaluate(
+            "() => document.querySelectorAll('.shepherd-element,.shepherd-modal-overlay-container')"
+            ".forEach(e=>e.remove())"
+        )
+
+        plan = cover_slot_plan(self.thumbnail_portrait_path, self.thumbnail_landscape_path)
+
+        if await page.locator(COVER_SLOT_SELECTOR).count() >= 2:
+            for slot_index, path, label, want_step in plan:
+                await self._apply_cover_slot(page, slot_index, path, label, want_step)
+                if await page.locator(COVER_MODAL_SELECTOR).count():
+                    douyin_logger.warning(_msg("⚠️", "封面对话框没关掉，停止设置后续槽位"))
+                    break
+            return
+
+        # 账号还没灰度到双槽版式时的兜底：旧版单槽弹窗
+        await self._set_cover_legacy(page)
+
+    async def _open_cover_slot_modal(self, page: Page, slot_index: int):
+        """点第 slot_index 个封面槽的「选择封面」，返回弹窗 locator（失败返回 None）。"""
+        slot = page.locator(COVER_SLOT_SELECTOR).nth(slot_index)
+        try:
+            await slot.scroll_into_view_if_needed(timeout=5000)
+        except Exception:
+            pass
+        await page.wait_for_timeout(500)
+        for attempt in range(4):
+            try:
+                await slot.hover(force=True)
+                await page.wait_for_timeout(700)
+            except Exception:
+                pass
+            trigger = slot.get_by_text("选择封面", exact=True).first
+            if not await trigger.count():
+                trigger = slot.locator("div[class*='cover-']").first
+            # 抖音自定义组件对普通 click 常静默失效，统一派发原生事件序列
+            await _native_click(page, trigger)
+            douyin_logger.info(_msg("🖼️", f"已点第{slot_index + 1}个封面槽「选择封面」(第{attempt + 1}次)"))
+            try:
+                await page.wait_for_selector(COVER_MODAL_SELECTOR, timeout=6000)
+                await page.wait_for_timeout(1500)
+                return page.locator(COVER_MODAL_SELECTOR).first
+            except Exception:
+                continue
+        return None
+
+    async def _cover_modal_step(self, cover_locator) -> str:
+        """弹窗当前停在哪个步骤：landscape / vertical / legacy（旧版单槽）。"""
+        try:
+            modal_text = await cover_locator.inner_text(timeout=3000)
+        except Exception:
+            return "legacy"
+        if "竖封面预览" in modal_text:
+            return "vertical"
+        if "横封面预览" in modal_text:
+            return "landscape"
+        return "legacy"
+
+    async def _apply_cover_slot(self, page: Page, slot_index: int, path: str,
+                                label: str, want_step: str) -> bool:
+        """给单个封面槽设图，设完回读缩略图比例做校验。"""
+        cover_locator = await self._open_cover_slot_modal(page, slot_index)
+        if cover_locator is None:
+            douyin_logger.warning(_msg("⚠️", f"{label}弹窗打不开，跳过该槽（平台会用视频帧兜底）"))
+            return False
+
+        step = await self._cover_modal_step(cover_locator)
+        if step != want_step and step != "legacy":
+            tab_text = "设置竖封面" if want_step == "vertical" else "设置横封面"
+            tab = cover_locator.get_by_text(tab_text, exact=True).first
+            if await tab.count():
+                await _native_click(page, tab)
+                await page.wait_for_timeout(2500)
+                step = await self._cover_modal_step(cover_locator)
+        if step != want_step and step != "legacy":
+            # 比例对不上宁可不设：把 3:4 塞进 4:3 正是 11-07 封面被裁切的原因
+            douyin_logger.warning(_msg(
+                "⚠️", f"{label}：弹窗停在 {step} 步骤，与图片比例不符，跳过该槽"))
+            await self._close_cover_modal(page, cover_locator)
+            return False
+
+        cover_upload = cover_locator.locator(
+            '.semi-upload:has(.semi-upload-drag-area-main-text) input.semi-upload-hidden-input'
+        ).first
+        if await cover_upload.count() == 0:
+            cover_upload = cover_locator.locator("input.semi-upload-hidden-input").last
+        if await cover_upload.count() == 0:
+            douyin_logger.warning(_msg("⚠️", f"{label}：找不到上传控件，跳过该槽"))
+            await self._close_cover_modal(page, cover_locator)
+            return False
+
+        await cover_upload.set_input_files(path)
+        await page.wait_for_timeout(3000)
+        douyin_logger.info(_msg("🖼️", f"{label}已上传到预览（步骤={step}）"))
+
+        closed = await self._close_cover_modal(page, cover_locator)
+        if closed:
+            douyin_logger.info(_msg("🥳", f"{label}设置完成，弹窗已关闭"))
+        await self._check_cover_slot_ratio(page, slot_index, want_step, label)
+        return closed
+
+    async def _check_cover_slot_ratio(self, page: Page, slot_index: int,
+                                      want_step: str, label: str) -> None:
+        """回读缩略图真实像素比例 —— 用户最终看到的就是这个槽里的图。"""
+        try:
+            info = await page.locator(COVER_SLOT_SELECTOR).nth(slot_index).locator("img").first.evaluate(
+                "el => ({w: el.naturalWidth, h: el.naturalHeight})")
+        except Exception:
+            return
+        w, h = int(info.get("w") or 0), int(info.get("h") or 0)
+        if not w or not h:
+            return
+        want = 4 / 3 if want_step == "landscape" else 3 / 4
+        ratio = w / h
+        if abs(ratio - want) / want > 0.06:
+            douyin_logger.warning(_msg(
+                "⚠️", f"{label}槽里实际是 {w}x{h}（比例 {ratio:.2f}，期望 {want:.2f}），可能有裁切"))
+        else:
+            douyin_logger.info(_msg("✅", f"{label}槽校验通过（{w}x{h}）"))
+
+    async def _close_cover_modal(self, page: Page, cover_locator) -> bool:
+        """点「完成」并确认弹窗真的消失（抖音组件点击可能不抛异常也不生效）。"""
+        def _finish_btn():
+            return cover_locator.get_by_role("button", name="完成", exact=True).first
+
+        for _ in range(40):  # 最多 ~20s 等图片处理完、按钮解禁
+            try:
+                b = _finish_btn()
+                if await b.count():
+                    cls = await b.get_attribute("class") or ""
+                    if "semi-button-disabled" not in cls:
+                        break
+            except Exception:
+                pass
+            await page.wait_for_timeout(500)
+
+        for _ in range(4):
+            btn = _finish_btn()
+            if not await btn.count():
+                btn = cover_locator.locator("button.semi-button").filter(has_text="完成").first
+            if await btn.count() and await btn.is_visible():
+                try:
+                    await btn.click(timeout=4000)
+                except Exception:
+                    pass
+                await page.wait_for_timeout(1500)
+                if await cover_locator.count() == 0:
+                    return True
+                await _native_click(page, btn)
+                await page.wait_for_timeout(1500)
+                if await cover_locator.count() == 0:
+                    return True
+
+            # 未设另一槽时抖音可能弹二次确认
+            for cname in ["确定", "确认", "仍然完成", "仍要完成", "继续"]:
+                confirm = page.locator(".semi-modal-content").get_by_role(
+                    "button", name=cname, exact=True).first
+                if await confirm.count() and await confirm.is_visible():
+                    await _native_click(page, confirm)
+                    await page.wait_for_timeout(1500)
+                    break
+            if await cover_locator.count() == 0:
+                return True
+
+            await page.keyboard.press("Escape")
+            await page.wait_for_timeout(1000)
+            if await cover_locator.count() == 0:
+                return True
+        return False
+
+    async def _set_cover_legacy(self, page: Page):
+        """旧版单槽弹窗的兜底路径（账号未灰度到「横/竖双封面」时）。"""
+        if not self.thumbnail_landscape_path and not self.thumbnail_portrait_path:
+            return
+
+        # 调用方（set_thumbnail）已经打过日志、清过浮层
+        # 清掉 shepherd 新手引导浮层，否则它会拦截封面点击导致弹窗打不开
         await page.evaluate(
             "() => document.querySelectorAll('.shepherd-element,.shepherd-modal-overlay-container').forEach(e=>e.remove())"
         )

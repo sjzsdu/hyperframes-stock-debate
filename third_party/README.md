@@ -170,6 +170,21 @@ patches here so they survive an upgrade and can be sent upstream later:
   - 验证：真实上传（不发布）截图确认横封面是完整 4:3 版式，抖音据此自动生成竖封面，
     且封面步骤从卡 46s 缩到 2s。
 
+- `patches/0013-sau-douyin-dual-cover-slots.patch` (2026-11-09)
+  - 现象：0012 之后抖音**手机端**封面变成桌面版——只设了横槽，竖封面是平台拿横图
+    自动生成的，手机端信息流/主页网格用的正是这张。
+  - 根因：0012 只保证「比例不错位」，没有把竖槽也设上；发布页其实是两个独立控件
+    （`div[class*="coverControl"]`，横 4:3 / 竖 3:4），各有各的「选择封面」，点哪个
+    槽的入口，弹窗就停在哪个步骤（不需要点 tab，而 tab 在 AI 封面生成中时点不动）。
+  - 修复：`set_thumbnail()` 拆成「按槽位逐个设」——`cover_slot_plan()` 生成
+    `[(0,landscape), (1,portrait)]`，**横必须在前**（后设横封面会让抖音重新生成竖封面、
+    冲掉手工设的竖版）；每个槽设完回读缩略图 `naturalWidth/Height` 校验比例
+    （`_check_cover_slot_ratio`），异常就告警。旧版单槽弹窗走 `_set_cover_legacy()`。
+  - 验证：真实上传（不发布）→ 日志 `横版封面槽校验通过（1080x809）` /
+    `竖版封面槽校验通过（1078x1440）`；把两个槽的图下载回来与本地原图比 MAE：
+    竖槽 vs 竖版原图 **1.24**、vs 横图裁 3:4 **25.45**（横槽同理 1.14 / 21.80），
+    确认手机端拿到的是竖版专属排版。测试 `tests/test_douyin_cover_slot.py`（9 passed）。
+
 Re-apply after an upgrade (all patches are diffed against `0012d2c` and
 verified with `git apply --check`; apply in numeric order):
 
@@ -186,6 +201,7 @@ git apply ../patches/0008-sau-tencent-quick-login.patch
 git apply ../patches/0010-sau-cn-direct-connection.patch
 git apply ../patches/0011-sau-douyin-upload-plain-playwright.patch
 git apply ../patches/0012-sau-douyin-cover-slot-by-step.patch
+git apply ../patches/0013-sau-douyin-dual-cover-slots.patch
 ```
 
 注意补丁里的路径是 **vendored 目录相对**（`sau_cli.py`、`uploader/...`），所以上面这套
