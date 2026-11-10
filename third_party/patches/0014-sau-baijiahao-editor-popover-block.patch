@@ -1,0 +1,217 @@
+diff --git a/tests/test_baijiahao_fill_title.py b/tests/test_baijiahao_fill_title.py
+new file mode 100644
+index 0000000..c100749
+--- /dev/null
++++ b/tests/test_baijiahao_fill_title.py
+@@ -0,0 +1,114 @@
++# Language: 中文
++"""百家号标题填写：编辑区被引导浮层遮挡时的降级路径（2026-11-10 事故驱动）。
++
++现象：发布在 `_fill_title` 的 `title_field.click()` 卡死，报
++`<div role="tooltip" class="cheetah-popover-inner"> … intercepts pointer events`，
++两次尝试共计 ~4 分钟后判失败；日志里连「标题已填写」都没有。
++
++根因：百家号 2026-11 上线的「智能文案」气泡 + AI 助手引导浮层压在标题编辑区上，
++Escape 关不掉。修复要点：先摘浮层 → 点不中就 JS 聚焦 → 用 fill() 写入
++（fill 不依赖鼠标命中，且会整体替换编辑器自带的文件名）。
++"""
++import unittest
++from types import SimpleNamespace
++
++from playwright.async_api import TimeoutError as PWTimeoutError
++
++from uploader.baijiahao_uploader.main import BaiJiaHaoVideo
++
++TITLE = "药明康德（603259）：研发外包的溢价与账本博弈"
++
++
++class _FakeLocator:
++    def __init__(self, click_blocked: bool):
++        self.click_blocked = click_blocked
++        self.clicked = False
++        self.focused = False
++        self.value = "603259_20261110_162203"  # 编辑器默认带上文件名
++
++    async def wait_for(self, **kwargs):
++        return None
++
++    async def click(self, **kwargs):
++        if self.click_blocked:
++            raise PWTimeoutError("cheetah-popover-inner intercepts pointer events")
++        self.clicked = True
++
++    async def evaluate(self, script):
++        self.focused = True
++
++    async def fill(self, value):
++        self.value = value  # fill 是整体替换
++
++    async def inner_text(self):
++        return self.value
++
++
++class _FakePage:
++    def __init__(self, locator, popovers=3):
++        self._locator = locator
++        self._popovers = popovers
++        self.removed_script = None
++
++    def locator(self, selector):
++        return SimpleNamespace(first=self._locator)
++
++    async def evaluate(self, script):
++        self.removed_script = script
++        return self._popovers
++
++    async def wait_for_timeout(self, ms):
++        return None
++
++    async def keyboard(self):
++        raise AssertionError("不应再依赖 Ctrl+A/Backspace 清空内容")
++
++
++def _video():
++    return BaiJiaHaoVideo(TITLE, "/tmp/x.mp4", [], "/tmp/cookie.json",
++                          thumbnail_path="/tmp/cover.png", headless=True)
++
++
++class BaiJiaHaoFillTitleTests(unittest.IsolatedAsyncioTestCase):
++    async def test_fills_title_even_when_click_is_blocked(self):
++        loc = _FakeLocator(click_blocked=True)
++        page = _FakePage(loc)
++
++        await _video()._fill_title(page)
++
++        self.assertTrue(loc.focused, "点不中时应退回 JS 聚焦")
++        self.assertEqual(loc.value, TITLE, "fill 应整体替换编辑器里的文件名")
++
++    async def test_clears_popovers_before_clicking(self):
++        loc = _FakeLocator(click_blocked=False)
++        page = _FakePage(loc, popovers=3)
++
++        await _video()._fill_title(page)
++
++        self.assertTrue(loc.clicked)
++        self.assertIn("cheetah-popover", page.removed_script)
++        self.assertIn("creating-brain-guider", page.removed_script)
++
++    async def test_short_title_is_padded_to_the_platform_minimum(self):
++        video = BaiJiaHaoVideo("短标题", "/tmp/x.mp4", [], "/tmp/cookie.json",
++                               thumbnail_path="/tmp/cover.png", headless=True)
++        loc = _FakeLocator(click_blocked=False)
++
++        await video._fill_title(_FakePage(loc))
++
++        self.assertGreater(len(loc.value), 8)
++        self.assertTrue(loc.value.startswith("短标题"))
++
++    async def test_title_is_clipped_to_30_chars(self):
++        long_title = "药明康德" * 12
++        video = BaiJiaHaoVideo(long_title, "/tmp/x.mp4", [], "/tmp/cookie.json",
++                               thumbnail_path="/tmp/cover.png", headless=True)
++        loc = _FakeLocator(click_blocked=False)
++
++        await video._fill_title(_FakePage(loc))
++
++        self.assertEqual(len(loc.value), video.max_title_length)
++
++
++if __name__ == "__main__":
++    unittest.main()
+diff --git a/uploader/baijiahao_uploader/main.py b/uploader/baijiahao_uploader/main.py
+index ca34427..ed087ef 100644
+--- a/uploader/baijiahao_uploader/main.py
++++ b/uploader/baijiahao_uploader/main.py
+@@ -403,6 +403,27 @@ class BaiJiaHaoVideo(BaseVideoUploader):
+             await context.close()
+             await browser.close()
+ 
++    async def _clear_editor_popovers(self, page: Page) -> int:
++        """摘掉盖住编辑区的引导浮层（百家号 2026-11 上线）。
++
++        「智能文案」气泡（`.cheetah-popover` / `role=tooltip`）和 AI 助手引导
++        （`.creating-brain-guider`）会压在标题编辑区上，Playwright 点标题时持续报
++        `<div role="tooltip" class="cheetah-popover-inner"> … intercepts pointer events`
++        直到超时，整条发布链就断在这里（2026-11-10 两次尝试均失败于 `_fill_title`）。
++
++        实测 Escape 关不掉（7 个浮层节点一个不少），只能摘节点；它们是纯提示层，
++        摘掉不影响表单提交（摘掉后 click 立刻成功，标题也能正常写入）。
++        """
++        try:
++            return await page.evaluate("""() => {
++                const nodes = [...document.querySelectorAll(
++                    '.cheetah-popover, [role="tooltip"], .creating-brain-guider')];
++                nodes.forEach(n => n.remove());
++                return nodes.length;
++            }""")
++        except Exception:
++            return 0
++
+     async def _fill_title(self, page: Page) -> None:
+         title_field = page.locator('div[class*="contentEditable"]').first
+         await title_field.wait_for(state="visible", timeout=15000)
+@@ -411,11 +432,24 @@ class BaiJiaHaoVideo(BaseVideoUploader):
+         if len(title) <= 8:
+             title += " 你不知道的"
+         title = title[: self.max_title_length]
+-        # 清空原有内容（可能自动填了文件名），再输入标题
+-        await title_field.click()
+-        await page.keyboard.press("Control+a")
+-        await page.keyboard.press("Backspace")
++
++        removed = await self._clear_editor_popovers(page)
++        if removed:
++            baijiahao_logger.info(_msg("🧹", f"已清掉 {removed} 个遮挡编辑区的引导浮层"))
++        try:
++            await title_field.click(timeout=4000)
++        except PWTimeoutError:
++            # 还有别的浮层挡着（首次使用引导等）→ 退回 JS 聚焦，fill 不依赖鼠标命中
++            baijiahao_logger.warning(_msg(
++                "⚠️", "标题编辑区仍被浮层遮挡，改用 JS 聚焦（fill 不依赖鼠标命中）"))
++            await title_field.evaluate("el => el.focus()")
++        await page.wait_for_timeout(300)
++        # fill() 会整体替换已有内容（编辑器默认带文件名），无需先全选删除
+         await title_field.fill(title)
++        filled = (await title_field.inner_text()).strip()
++        if filled != title:
++            baijiahao_logger.warning(_msg(
++                "⚠️", f"标题回读不一致（{filled[:24]!r}），可能被编辑器改写"))
+         baijiahao_logger.info(_msg("🏷️", f"标题已填写: {title}"))
+ 
+     async def _set_title_via_panel(self, page: Page) -> None:
+@@ -428,7 +462,8 @@ class BaiJiaHaoVideo(BaseVideoUploader):
+         try:
+             btn = page.locator('button:has-text("封面/标题板")').first
+             if not await btn.count():
+-                baijiahao_logger.warning(_msg("⚠️", "未找到「封面/标题板」入口，标题将用文件名兜底"))
++                baijiahao_logger.info(_msg(
++                    "🧾", "新版没有「封面/标题板」入口（标题已在作品描述框填好），跳过"))
+                 return
+             deadline = time.monotonic() + 45
+             enabled = False
+@@ -541,6 +576,9 @@ class BaiJiaHaoVideo(BaseVideoUploader):
+             await self._wait_cover_ready(page)
+             return
+ 
++        # 先摘掉盖在编辑区的「智能文案」气泡，否则后面点封面/声明会被判遮挡
++        await self._clear_editor_popovers(page)
++
+         # 改版新增的「视频新增一键填写功能」公告弹层：不关也不挡封面流程的
+         # 按钮，但留着可能挡后续步骤（AI 声明/发布），尽力而为关掉。
+         try:
+@@ -617,6 +655,7 @@ class BaiJiaHaoVideo(BaseVideoUploader):
+         写入成功；重试耗尽直接抛错阻断百家号发布，宁可失败也不裸发。
+         """
+         trigger = page.locator('input[placeholder="请选择创作声明"]').first
++        await self._clear_editor_popovers(page)
+         last_error: Exception | None = None
+         for attempt in range(1, 4):
+             try:
+@@ -726,6 +765,7 @@ class BaiJiaHaoVideo(BaseVideoUploader):
+         if await modal.count():
+             await page.keyboard.press("Escape")
+             await page.wait_for_timeout(1000)
++        await self._clear_editor_popovers(page)
+ 
+         # 百家号发布按钮有 data-testid="publish-btn"
+         publish_btn = page.locator('[data-testid="publish-btn"]').first

@@ -185,6 +185,23 @@ patches here so they survive an upgrade and can be sent upstream later:
     竖槽 vs 竖版原图 **1.24**、vs 横图裁 3:4 **25.45**（横槽同理 1.14 / 21.80），
     确认手机端拿到的是竖版专属排版。测试 `tests/test_douyin_cover_slot.py`（9 passed）。
 
+- `patches/0014-sau-baijiahao-editor-popover-block.patch` (2026-11-10)
+  - 现象：百家号发布两次尝试共 ~4 分钟后失败，报
+    `<div role="tooltip" class="cheetah-popover-inner"> … intercepts pointer events`；
+    sau 日志里连「标题已填写」都没有（说明卡在 `_fill_title` 的第一下点击）。
+  - 根因：百家号 2026-11 上线「智能文案」气泡（`.cheetah-popover` / `role=tooltip`）
+    和 AI 助手引导（`.creating-brain-guider`），正压在标题编辑区上；Escape 关不掉
+    （实测 7 个浮层节点一个不少）。Playwright 的 click 会一直重试到超时为止。
+  - 修复：新增 `_clear_editor_popovers()` 摘掉这三类提示层，并在 `_fill_title` /
+    `_upload_thumbnail` / `_check_ai_declaration` / `_submit_publish` 前各清一次；
+    `_fill_title` 改为「点不中就 JS 聚焦 + `fill()`」（fill 不依赖鼠标命中，且整体
+    替换编辑器自带的文件名），并回读标题校验。顺手把「封面/标题板入口不存在」的
+    WARNING 降为 INFO（标题早已填好，那句「将用文件名兜底」是误导）。
+  - 验证：真实链路跑到发布前（不点发布）——日志 `🧹 已清掉 3 个遮挡编辑区的引导浮层`
+    → `🏷️ 标题已填写` → `🥳 视频上传完毕` → `🖼️ 封面已上传` →
+    `🏷️ 已选择创作声明: 含AI生成内容`，截图确认标题/封面/声明都对、发布按钮可点。
+    测试 `tests/test_baijiahao_fill_title.py`（4 passed）。
+
 Re-apply after an upgrade (all patches are diffed against `0012d2c` and
 verified with `git apply --check`; apply in numeric order):
 
@@ -202,6 +219,7 @@ git apply ../patches/0010-sau-cn-direct-connection.patch
 git apply ../patches/0011-sau-douyin-upload-plain-playwright.patch
 git apply ../patches/0012-sau-douyin-cover-slot-by-step.patch
 git apply ../patches/0013-sau-douyin-dual-cover-slots.patch
+git apply ../patches/0014-sau-baijiahao-editor-popover-block.patch
 ```
 
 注意补丁里的路径是 **vendored 目录相对**（`sau_cli.py`、`uploader/...`），所以上面这套

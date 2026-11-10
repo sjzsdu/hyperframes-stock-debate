@@ -982,6 +982,36 @@ def _ensure_covers(pipeline: Pipeline, covers: Mapping[str, str], script: Mappin
         return {}
 
 
+def _merge_publish_records(previous: Mapping[str, Any] | None,
+                           report: Mapping[str, Any]) -> dict:
+    """Merge a 补发 report into the recorded one; the newer result wins per platform.
+
+    ``--republish`` only retries the platforms that failed, so overwriting the
+    record would erase the evidence that the rest already went out: 2026-11-10
+    after 补发百家号, 603259's sidecar listed **only** baijiahao — the four
+    platforms published hours earlier had vanished from the record.
+    """
+    if not isinstance(previous, Mapping) or not previous.get("platforms"):
+        return dict(report)
+    order: list[str] = []
+    latest: dict[str, Mapping[str, Any]] = {}
+    for item in list(previous.get("platforms") or []) + list(report.get("platforms") or []):
+        name = item.get("platform") if isinstance(item, Mapping) else None
+        if not name:
+            continue
+        name = str(name)
+        if name not in latest:
+            order.append(name)
+        latest[name] = item
+    platforms = [dict(latest[name]) for name in order]
+    merged = dict(report)
+    merged["platforms"] = platforms
+    merged["succeeded"] = [p["platform"] for p in platforms if p.get("ok")]
+    merged["failed"] = [{"platform": p["platform"], "detail": p.get("detail", "")}
+                        for p in platforms if not p.get("ok")]
+    return merged
+
+
 def _record_publish(video: Path, report: Mapping[str, Any], covers: Mapping[str, str]) -> None:
     """Write the result back next to the MP4 so `--republish` knows what failed."""
     sidecar = video.with_suffix(".json")
@@ -989,7 +1019,7 @@ def _record_publish(video: Path, report: Mapping[str, Any], covers: Mapping[str,
         return
     try:
         data = json.loads(sidecar.read_text(encoding="utf-8"))
-        data["publish"] = dict(report)
+        data["publish"] = _merge_publish_records(data.get("publish"), dict(report))
         if covers:
             data["covers"] = dict(covers)
         sidecar.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
