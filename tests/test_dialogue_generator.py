@@ -2,7 +2,8 @@ import json
 import unittest
 from unittest.mock import patch
 
-from stocktalk.modules.dialogue_generator import DialogueGenerationError, DialogueGenerator
+from stocktalk.modules.dialogue_generator import (SPOTLIGHT_VALUE_LIMIT, DialogueGenerationError,
+                                                 DialogueGenerator, clip_spotlight_value)
 
 
 class DialogueGeneratorTests(unittest.TestCase):
@@ -770,6 +771,26 @@ if __name__ == "__main__":
         with patch("stocktalk.modules.providers.bailian_chat.shutil.which", return_value="bl"):
             script2 = empty.generate({"code": "000001", "quote": {"name": "平安银行"}})
         self.assertIsNone(script2["spotlight"])
+
+    def test_spotlight_is_never_cut_inside_a_number(self):
+        """2026-11-11 603083：`净利润7.61亿→现金流-16.5亿` 被硬切成「现金流-16.」，
+        封面与首帧印着一个断掉的负号。裁字可以，切数字不行。"""
+        clipped = clip_spotlight_value("净利润7.61亿→现金流-16.5亿")
+
+        self.assertEqual(clipped, "7.61亿→现金流-16.5亿")
+        self.assertLessEqual(len(clipped), SPOTLIGHT_VALUE_LIMIT)
+        # 箭头后的对比数字必须完整（含符号与单位）
+        self.assertTrue(clipped.endswith("现金流-16.5亿"))
+
+    def test_spotlight_short_value_is_left_alone(self):
+        self.assertEqual(clip_spotlight_value("毛利率38%→31%"), "毛利率38%→31%")
+        self.assertEqual(clip_spotlight_value("净利率47.07%"), "净利率47.07%")
+
+    def test_spotlight_without_arrow_still_avoids_splitting_numbers(self):
+        clipped = clip_spotlight_value("存货512亿相当于半年的存货周转天数")
+        self.assertLessEqual(len(clipped), SPOTLIGHT_VALUE_LIMIT)
+        self.assertFalse(clipped.endswith("."))     # 不能停在「512.」这种半截数字上
+        self.assertTrue(clipped.startswith("存货512亿"))
 
     def test_prompt_declares_the_spotlight_field(self):
         generator = DialogueGenerator(runner=lambda argv, timeout: self._response())

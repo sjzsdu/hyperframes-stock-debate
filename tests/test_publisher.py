@@ -1511,3 +1511,13 @@ def test_timeout_detail_keeps_the_last_streamed_lines(tmp_path: Path) -> None:
     assert result.ok is False
     assert "upload timed out after 900s" in result.detail
     assert "检测到上传失败" in result.detail
+
+
+def test_missing_portrait_names_the_platforms_that_will_show_the_wrong_cover() -> None:
+    """缺 3:4 不是「没有封面」，而是抖音/快手/视频号拿横图自动生成一张（2026-11-11）。"""
+    platforms = ["douyin", "bilibili", "kuaishou", "tencent", "baijiahao"]
+
+    assert publisher_module.platforms_needing_cover(platforms, "portrait") == [
+        "douyin", "kuaishou", "tencent"]
+    assert publisher_module.platforms_needing_cover(platforms, "landscape") == ["douyin", "tencent"]
+    assert publisher_module.platforms_needing_cover(platforms, "wide") == ["bilibili", "baijiahao"]

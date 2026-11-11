@@ -41,6 +41,7 @@ from stocktalk.modules.publisher import (
     SauPublisher,
     ScheduleError,
     check_environment,
+    cover_sizes_for,
     parse_publish_at,
 )
 from stocktalk.modules.review import COVER_LABELS, video_inventory
@@ -972,14 +973,39 @@ def _sidecar(video: Path) -> dict:
 
 def _ensure_covers(pipeline: Pipeline, covers: Mapping[str, str], script: Mapping[str, Any],
                    stock_code: str, tag: str, stock_name: str) -> dict[str, str]:
-    """Make cover art when the original run never got as far as publishing."""
-    if covers:
-        return dict(covers)
+    """Make cover art for whichever presets are missing before a send.
+
+    原意只是「上一轮没走到发布、一张封面都没有」。但 2026-11-11 的 603083 是
+    **半缺**：竖版截图失败被静默跳过，侧记里只有 landscape/wide，抖音于是拿横图
+    自动生成竖封面，手机端整屏都是桌面版版式。所以这里按平台真正需要的档位逐档
+    比对（文件还在不在也一起查），缺哪档补哪档。
+    """
+    platforms = [p for p in (getattr(pipeline, "config", {}) or {}).get("publish", {}).get("platforms", ())
+                 if p in PLATFORM_SPECS]
+    wanted = cover_sizes_for(platforms)
+    present = {size: path for size, path in covers.items() if Path(str(path or "")).is_file()}
+    if wanted:
+        missing: list[str] | None = [size for size in wanted if size not in present]
+        if not missing:
+            return dict(covers)
+    else:
+        # 平台未知（自定义配置/测试桩）：退回老语义——一张都没有才全画一遍。
+        if present:
+            return dict(covers)
+        missing = None
+    print(f"  补齐缺失封面: {', '.join(missing) if missing else '全部'}")
     try:
-        return pipeline.render_covers(script, stock_code, tag, stock_name=stock_name)
+        filled = pipeline.render_covers(script, stock_code, tag,
+                                        stock_name=stock_name, sizes=missing)
     except Exception as exc:  # A cover is a nice-to-have; never block the upload.
-        print(f"  封面图生成失败，将不带封面发布: {exc}")
-        return {}
+        print(f"  封面图补渲染失败（{exc}），缺的档位仍将缺席")
+        return dict(covers)
+    merged = dict(covers)
+    merged.update(filled)
+    still = [size for size in wanted if size not in merged]
+    if still:
+        print(f"  仍缺封面: {', '.join(still)}（相关平台会拿其它比例的图裁切）")
+    return merged
 
 
 def _merge_publish_records(previous: Mapping[str, Any] | None,

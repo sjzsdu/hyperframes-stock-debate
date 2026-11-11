@@ -39,6 +39,11 @@ COVER_PRESETS: dict[str, tuple[int, int]] = {
     "wide": (1440, 810),
 }
 
+# 单档封面的渲染次数与重试间隔。Chrome 偶发启动失败（并发渲染收尾、进程残留）
+# 重试一次即可，见 CoverGenerator.generate 的注释。
+_RENDER_ATTEMPTS = 2
+_RENDER_RETRY_DELAY = 1.0
+
 # Chrome 常见安装位置；macOS 排前面，其次 Linux/Windows，最后 PATH。
 CHROME_CANDIDATES: tuple[str, ...] = (
     "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
@@ -124,6 +129,9 @@ class CoverGenerator:
                                 autoescape=select_autoescape(["html", "j2"]))
         self._screenshotter = screenshotter or self._chrome_screenshot
         self._chrome = chrome
+        # 每档失败原因（size → "类型: 消息"）。缺一张封面不等于可以假装成功：
+        # 抖音/快手/视频号只拿到横版时，手机端显示的就是桌面版封面（2026-11-11）。
+        self.last_errors: dict[str, str] = {}
         # cover.style: auto（默认）跟着剧本形态走；写死 debate/monologue 则强制。
         self.style_config = str(cover.get("style") or "auto").strip().lower()
         self.compliance = ComplianceAgent(self.config)
@@ -168,10 +176,16 @@ class CoverGenerator:
     def generate(self, stock_data: Mapping[str, Any], script: Mapping[str, Any],
                  stock_code: str, sizes: Sequence[str], out_dir: str | Path,
                  tag: str) -> dict[str, Path]:
-        """Render every requested size; individual failures are skipped.
+        """Render every requested size; a size that keeps failing is reported.
 
-        Returns ``{size: png_path}``.  A size that cannot be rendered is simply
-        absent — the caller publishes that platform without a cover.
+        Returns ``{size: png_path}``.  A size that cannot be rendered is absent
+        from the mapping — the caller publishes that platform without a cover —
+        but the reason lands in ``last_errors`` instead of being swallowed by a
+        bare ``continue``.
+
+        每档默认重试一次（2026-11-11）：603083 那期竖版截图在 90s 内没落盘，
+        旧代码静默跳过，抖音只收到横版封面，手机端整片都是桌面版版式。Chrome
+        偶发启动失败重试一次就好，成本 2 秒；真失败也要留下能查的原因。
         """
         if not self.enabled or not sizes:
             return {}
@@ -181,15 +195,21 @@ class CoverGenerator:
         directory = Path(out_dir)
         directory.mkdir(parents=True, exist_ok=True)
         rendered: dict[str, Path] = {}
+        self.last_errors = {}
         for size in dict.fromkeys(sizes):
             preset = COVER_PRESETS.get(size)
             if preset is None:
                 continue
-            try:
-                rendered[size] = self._render_one(chrome, stock_data, script, stock_code,
-                                                  size, preset, directory, tag)
-            except Exception:  # A cover is a nice-to-have; never break the publish.
-                continue
+            for attempt in range(1, _RENDER_ATTEMPTS + 1):
+                try:
+                    rendered[size] = self._render_one(chrome, stock_data, script, stock_code,
+                                                      size, preset, directory, tag)
+                    break
+                except Exception as exc:  # A cover is a nice-to-have; never break the publish.
+                    if attempt == _RENDER_ATTEMPTS:
+                        self.last_errors[size] = f"{type(exc).__name__}: {exc}"
+                    else:
+                        time.sleep(_RENDER_RETRY_DELAY)
         return rendered
 
     # ------------------------------------------------------------------

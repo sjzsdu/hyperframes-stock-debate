@@ -7,7 +7,7 @@ import argparse
 import json
 import sys
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Mapping, TypeVar
@@ -23,7 +23,8 @@ from stocktalk.modules.dialogue_generator import (create_dialogue_generator,
                                                   ensure_narrator_character)
 from stocktalk.modules.episode_planner import EpisodePlanner
 from stocktalk.modules.hyperframes_builder import HyperFramesBuilder
-from stocktalk.modules.publisher import PLATFORM_LABELS, SauPublisher, cover_sizes_for
+from stocktalk.modules.publisher import (PLATFORM_LABELS, SauPublisher, cover_sizes_for,
+                                         platforms_needing_cover)
 from stocktalk.modules.review import write_review_page
 from stocktalk.modules.sharpness import summary as sharpness_summary
 from stocktalk.modules.stock_data import StockDataClient, StockDataConfig, StockDataIncompleteError
@@ -98,17 +99,20 @@ class Pipeline:
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
     def _render_covers(self, stock_data: Mapping[str, Any], script: Mapping[str, Any],
-                       stock_code: str, tag: str, progress=None, task=None) -> dict[str, str]:
+                       stock_code: str, tag: str, progress=None, task=None,
+                       sizes: Sequence[str] | None = None) -> dict[str, str]:
         """Render the cover presets the configured platforms consume.
 
         Cover art is the one part of the run that is genuinely optional, so a
         missing Chrome or a failed screenshot degrades to publishing without a
         cover instead of throwing away a finished MP4.
+
+        ``sizes`` 只给补发用：缺哪档补哪档，别把已经渲染好的重画一遍。
         """
         if not self.config.get("cover", {}).get("enabled", True):
             return {}
         platforms = [p for p in self.config.get("publish", {}).get("platforms", ()) if p in PLATFORM_LABELS]
-        sizes = cover_sizes_for(platforms)
+        sizes = list(sizes) if sizes else cover_sizes_for(platforms)
         if not sizes:
             return {}
         if progress is not None and task is not None:
@@ -124,8 +128,25 @@ class Pipeline:
             self.console.print(f"[yellow]{self.covers.ai.last_error}，已回落为纯模板封面[/yellow]")
         missing = [size for size in sizes if size not in rendered]
         if missing:
-            self.console.print(f"[yellow]封面图缺失（{', '.join(missing)}），相关平台将不带封面发布[/yellow]")
+            self._warn_missing_covers(missing, platforms)
         return {size: str(path) for size, path in rendered.items()}
+
+    def _warn_missing_covers(self, missing: Sequence[str], platforms: Sequence[str]) -> None:
+        """缺封面必须喊出来：它不会让发布失败，只会让手机端看到错的版式。
+
+        2026-11-11 603083：竖版截图静默失败，抖音只收到横版，平台自动用横图生成
+        竖封面 → 手机端整屏都是桌面版排版。旧提示「封面图缺失（portrait）」被
+        当成噪音忽略掉了，这里把「谁受影响、后果是什么、为什么失败」一次讲清。
+        """
+        for size in missing:
+            reason = (getattr(self.covers, "last_errors", {}) or {}).get(size) or "未知原因"
+            victims = [PLATFORM_LABELS.get(p, p) for p in platforms_needing_cover(platforms, size)]
+            consequence = "，手机端会显示横图裁出来的封面" if size == "portrait" else ""
+            self.console.print(
+                f"[bold red]封面 {size} 未生成{consequence}[/bold red]"
+                f"\n  原因: {reason}"
+                f"\n  受影响: {'、'.join(victims) or '无'}"
+            )
 
     def _warn_if_over_budget(self, script: Mapping[str, Any]) -> None:
         """脚本估算时长明显超出上限时提前提醒。
@@ -174,7 +195,7 @@ class Pipeline:
             return None
 
     def render_covers(self, script: Mapping[str, Any], stock_code: str, tag: str,
-                      stock_name: str = "") -> dict[str, str]:
+                      stock_name: str = "", sizes: Sequence[str] | None = None) -> dict[str, str]:
         """Render cover art on its own, without a full generation run.
 
         ``--publish-only`` / ``--republish`` may fire on a video that was
@@ -210,7 +231,7 @@ class Pipeline:
                     break
         quote.setdefault("name", stock_name)
         stock_data = {"quote": quote, "technical": technical}
-        return self._render_covers(stock_data, script, stock_code, tag)
+        return self._render_covers(stock_data, script, stock_code, tag, sizes=sizes)
 
     def _retry(self, stage: str, operation: Callable[[], T]) -> T:
         """Retry a remote LLM/TTS operation with capped exponential backoff."""

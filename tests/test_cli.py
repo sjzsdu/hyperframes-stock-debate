@@ -432,7 +432,7 @@ class FakeRepublishPipeline:
             return report
         self.publisher = type("P", (), {"publish": staticmethod(publish)})()
 
-    def render_covers(self, script, stock_code, tag, stock_name="") -> dict[str, str]:
+    def render_covers(self, script, stock_code, tag, stock_name="", sizes=None) -> dict[str, str]:
         self.render_calls.append(stock_code)
         return dict(self.rendered)
 
@@ -1160,3 +1160,56 @@ def test_tongstock_executable_resolution() -> None:
     assert cli._tongstock_executable({"topics": {"executable": "/opt/bin/tongstock"}}) == "/opt/bin/tongstock"
     with patch.object(cli.shutil, "which", lambda name: f"/resolved/{name}"):
         assert cli._tongstock_executable({}) == "/resolved/tongstock"
+
+
+# ---------------------------------------------------------------------------
+# 补发前的封面补齐：缺哪档补哪档（2026-11-11 603083 竖版静默缺席）
+# ---------------------------------------------------------------------------
+
+class _FakeCoverPipeline:
+    """只实现 _ensure_covers 用到的那两个接口。"""
+
+    def __init__(self, platforms: list[str]) -> None:
+        self.config = {"publish": {"platforms": platforms}}
+        self.asked: list[str] | None = None
+
+    def render_covers(self, script, stock_code, tag, stock_name="", sizes=None):
+        self.asked = list(sizes or [])
+        return {size: f"/tmp/{tag}.cover-{size}.png" for size in self.asked}
+
+
+def test_ensure_covers_fills_only_the_missing_preset(tmp_path: Path) -> None:
+    """603083 那期侧记里只有 landscape/wide，补发时要把竖版补出来。"""
+    landscape = tmp_path / "x.cover-landscape.png"
+    landscape.write_bytes(b"png")
+    pipeline = _FakeCoverPipeline(["douyin"])
+
+    covers = cli._ensure_covers(pipeline, {"landscape": str(landscape)}, {}, "603083", "x", "剑桥科技")
+
+    assert pipeline.asked == ["portrait"]
+    assert set(covers) == {"landscape", "portrait"}
+
+
+def test_ensure_covers_skips_rendering_when_nothing_is_missing(tmp_path: Path) -> None:
+    paths = {}
+    for size in ("portrait", "landscape", "wide"):
+        path = tmp_path / f"x.cover-{size}.png"
+        path.write_bytes(b"png")
+        paths[size] = str(path)
+    pipeline = _FakeCoverPipeline(["douyin", "bilibili", "baijiahao"])
+
+    covers = cli._ensure_covers(pipeline, paths, {}, "603083", "x", "剑桥科技")
+
+    assert pipeline.asked is None          # 没有白花一次渲染
+    assert set(covers) == {"portrait", "landscape", "wide"}
+
+
+def test_ensure_covers_treats_a_deleted_file_as_missing(tmp_path: Path) -> None:
+    """侧记里记了路径、文件却被清掉（换机器/清 output）时也要补。"""
+    pipeline = _FakeCoverPipeline(["douyin"])
+
+    covers = cli._ensure_covers(pipeline, {"portrait": str(tmp_path / "gone.png")},
+                                {}, "603083", "x", "剑桥科技")
+
+    assert pipeline.asked == ["portrait", "landscape"]   # 抖音要的档位都补
+    assert covers["portrait"].endswith(".cover-portrait.png")

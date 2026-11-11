@@ -18,7 +18,7 @@ from stocktalk.modules.episode_planner import (NUMBER_CAP_ANALOGY,
 from stocktalk.modules.arcs import (Arc, ArcChoice, Beat, MONOLOGUE_SPEAKER,
                                     beats_by_key, resolve_speakers, select_arc)
 from stocktalk.modules.hyperframes_builder import short_business_label
-from stocktalk.modules.numbers import repair_spoken_numbers, to_display
+from stocktalk.modules.numbers import repair_spoken_numbers, to_display, unbreakable_spans
 from stocktalk.modules.providers import ProviderError, create_llm_client
 from stocktalk.modules.providers.bailian_chat import BailianChatClient
 from stocktalk.modules.risk_exchange import build as build_risk_exchange
@@ -112,6 +112,50 @@ EMOTION_DIRECTIVES = {
     "坚守": "这一句用笃定沉稳的语气，立场坚定不被说服",
     "平述": "",
 }
+
+# 首帧/封面冲突数字的版面上限（字）。超了必须裁，但**不能切在数字中间**。
+SPOTLIGHT_VALUE_LIMIT = 16
+
+
+def _cut_outside_numbers(text: str, limit: int) -> str:
+    """截到 ``limit`` 字，且绝不落在数字内部（「-16.5亿」不能变成「-16.」）。"""
+    if len(text) <= limit:
+        return text
+    cut = limit
+    for start, end in unbreakable_spans(text):
+        if start < cut < end:
+            cut = start
+            break
+    if 0 < cut < len(text) and text[cut - 1] in "-−+":
+        cut -= 1          # 别把负号留在句尾
+    return text[:cut]
+
+
+def clip_spotlight_value(value: str, limit: int = SPOTLIGHT_VALUE_LIMIT) -> str:
+    """把 spotlight 的冲突数字裁到上屏长度，优先保住「→ 之后」的对比数字。
+
+    2026-11-11 603083：``净利润7.61亿→现金流-16.5亿`` 被 ``[:16]`` 硬切，封面与
+    首帧印成「净利润7.61亿→现金流-16.」——单位、数值全丢，读者只看到一个断掉的
+    负号。箭头后的数字才是这一行的信息点，所以规则是：先整段保住箭头后的部分，
+    余下额度从前面补；开头那些纯标签字（「净利润」）整段去掉也不要紧，标签位
+    本来就单独占一行。永远不把数字切成两半。
+    """
+    value = re.sub(r"\s+", "", str(value or ""))
+    if len(value) <= limit:
+        return value
+    head, arrow, tail = value.rpartition("→")
+    if arrow and len(tail) <= limit - 2:
+        budget = limit - 1 - len(tail)
+        # 去掉开头的纯标签字（不含数字的部分），余下的数字整体搬过来
+        labels_stripped = re.sub(r"^[^0-9０-９]*", "", head)
+        if labels_stripped and len(labels_stripped) <= budget:
+            return f"{labels_stripped}{arrow}{tail}"
+        kept = _cut_outside_numbers(head, budget).strip(" -−+—~,，、:：/≈%")
+        if kept:
+            return f"{kept}{arrow}{tail}"
+        return tail
+    clipped = _cut_outside_numbers(value, limit).strip(" -−+—~,，、:：/≈%")
+    return clipped or tail or value[:limit]
 
 # 套话清单已集中到 ``copy_guard``（2026-10-27 WAN-27：用户点名「这门生意」
 # 「把…聊透了」）。清单必须**只有一份**：模板池扫描（谁往片尾模板里写了套话）、
@@ -1058,7 +1102,7 @@ class DialogueGenerator:
         if not isinstance(raw, Mapping):
             return None
         label = re.sub(r"\s+", "", str(raw.get("label") or ""))[:8]
-        value = re.sub(r"\s+", "", str(raw.get("value") or ""))[:16]
+        value = clip_spotlight_value(str(raw.get("value") or ""))
         if not label or not value:
             return None
         return {"label": label, "value": to_display(value)}

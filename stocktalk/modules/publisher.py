@@ -316,6 +316,17 @@ def cover_sizes_for(platforms: Sequence[str]) -> list[str]:
     return sizes
 
 
+def platforms_needing_cover(platforms: Sequence[str], size: str) -> list[str]:
+    """哪些平台会用到某一档封面——缺图时要把受害者指名道姓说出来。
+
+    「封面图缺失」这句话太轻：抖音/快手/视频号缺 3:4 时并不会没有封面，而是
+    拿横图自动生成一张，手机端显示的就是桌面版版式（2026-11-11 603083）。
+    """
+    return [platform for platform in platforms
+            if size in [preset for _, preset in
+                        PLATFORM_SPECS.get(platform, DEFAULT_SPEC).get("covers", ())]]
+
+
 # The local toolchain each stage depends on.  Only ``required`` entries decide
 # the exit code of the preflight command: a missing npx (render) or Chrome
 # (cover) degrades gracefully, a missing sau CLI does not publish anything.

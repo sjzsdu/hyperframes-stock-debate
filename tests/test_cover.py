@@ -100,6 +100,34 @@ def test_one_failed_size_does_not_block_the_others(tmp_path: Path) -> None:
     assert set(out) == {"wide"}
 
 
+def test_transient_failure_is_retried_once(tmp_path: Path) -> None:
+    """Chrome 偶发启动失败不该让一档封面永久缺席（2026-11-11 603083 竖版）。"""
+    calls = {"portrait": 0}
+
+    def shooter(chrome, html_path, png, size, timeout):
+        if size == (1080, 1440):
+            calls["portrait"] += 1
+            if calls["portrait"] == 1:
+                return False       # 第一次：什么都没落盘
+        return fake_shooter({})(chrome, html_path, png, size, timeout)
+
+    gen = make_generator(tmp_path, screenshotter=shooter)
+    out = gen.generate(STOCK, SCRIPT, "601689", ["portrait"], tmp_path, "601689_1")
+    assert set(out) == {"portrait"}
+    assert calls["portrait"] == 2
+    assert gen.last_errors == {}
+
+
+def test_failed_size_keeps_the_reason_instead_of_silence(tmp_path: Path) -> None:
+    """重试也失败时必须留下原因——旧代码 `continue` 一句日志都没有。"""
+    gen = make_generator(tmp_path, screenshotter=lambda chrome, html_path, png, size, timeout: False)
+    out = gen.generate(STOCK, SCRIPT, "601689", ["portrait", "wide"], tmp_path, "601689_1")
+
+    assert out == {}
+    assert set(gen.last_errors) == {"portrait", "wide"}
+    assert "封面截图失败" in gen.last_errors["portrait"]
+
+
 def test_wrong_dimensions_are_rejected(tmp_path: Path) -> None:
     def shooter(chrome, html_path, png, size, timeout):
         return fake_shooter({})(chrome, html_path, png, (800, 600), timeout)
