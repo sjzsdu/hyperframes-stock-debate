@@ -344,5 +344,45 @@ class BrowserCliDispatchTests(unittest.TestCase):
         self.assertEqual(len(request.image_files), 2)
 
 
+class DefaultAccountParserTests(unittest.TestCase):
+    """`--account` is optional and falls back to "default"."""
+
+    def test_default_account_name_constant(self):
+        self.assertEqual(sau_cli.DEFAULT_ACCOUNT_NAME, "default")
+
+    def test_tencent_login_omits_account(self):
+        args = sau_cli.build_parser().parse_args(["tencent", "login"])
+        self.assertEqual(args.account, "default")
+
+    def test_tencent_check_and_keepalive_omit_account(self):
+        parser = sau_cli.build_parser()
+        for action in ("check", "keepalive"):
+            with self.subTest(action=action):
+                args = parser.parse_args(["tencent", action])
+                self.assertEqual(args.account, "default")
+
+    def test_explicit_account_still_wins(self):
+        args = sau_cli.build_parser().parse_args(
+            ["tencent", "login", "--account", "creator"])
+        self.assertEqual(args.account, "creator")
+
+    def test_every_platform_login_omits_account(self):
+        parser = sau_cli.build_parser()
+        for platform in ("douyin", "kuaishou", "xiaohongshu", "bilibili",
+                         "tencent", "alipay", "weibo", "hupu", "youtube",
+                         "baijiahao"):
+            with self.subTest(platform=platform):
+                args = parser.parse_args([platform, "login"])
+                self.assertEqual(args.account, "default")
+
+    def test_upload_video_omits_account(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            video_path = Path(tmp_dir) / "demo.mp4"
+            video_path.write_bytes(b"video")
+            args = sau_cli.build_parser().parse_args(
+                ["douyin", "upload-video", "--file", str(video_path), "--title", "标题"])
+        self.assertEqual(args.account, "default")
+
+
 if __name__ == "__main__":
     unittest.main()

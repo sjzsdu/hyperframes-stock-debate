@@ -248,7 +248,8 @@ topics:
 
 # 多平台自动发布（基于 social-auto-upload 的浏览器自动化）。
 # 首次使用需逐平台人工扫码登录一次（cookie 会保存）:
-#   cd third_party/social-auto-upload && uv run sau <platform> login --account default
+#   cd third_party/social-auto-upload && uv run sau <platform> login
+# --account 可省略（默认 default）；多账号才需要显式传 --account <名字>。
 # accounts 里每个平台对应一个账号名；headless=true 时上传在后台浏览器执行。
 publish:
   # 已开通的发布渠道。未登录或 cookie 失效的平台会在发布前预检时被跳过并提示。

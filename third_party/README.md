@@ -202,6 +202,18 @@ patches here so they survive an upgrade and can be sent upstream later:
     `🏷️ 已选择创作声明: 含AI生成内容`，截图确认标题/封面/声明都对、发布按钮可点。
     测试 `tests/test_baijiahao_fill_title.py`（4 passed）。
 
+- `patches/0015-sau-default-account.patch` (2026-11-12)
+  - 动机：单账号（`default`）场景下每条命令都要手打 `--account default`，
+    `sau tencent login --account default` 这类命令又长又容易打错。
+  - 修复：`--account` 全部由 `required=True` 改为 `default=DEFAULT_ACCOUNT_NAME`
+    （`sau_cli.DEFAULT_ACCOUNT_NAME = "default"`，23 处：login/check/keepalive/
+    upload-video/upload-note 覆盖全部 10 个平台）。显式传 `--account main`
+    仍然生效，cookie 文件名规则不变（`cookies/<platform>_<account>.json`）。
+  - 验证：`sau tencent login` / `check` / `keepalive` 解析出的 `account` 均为
+    `default`；`sau tencent login --account main` 仍为 `main`；
+    `--help` 显示 `(default: default)`。测试 `tests/test_sau_browser_cli.py`
+    新增 `DefaultAccountParserTests`（6 passed）。
+
 Re-apply after an upgrade (all patches are diffed against `0012d2c` and
 verified with `git apply --check`; apply in numeric order):
 
@@ -220,6 +232,7 @@ git apply ../patches/0011-sau-douyin-upload-plain-playwright.patch
 git apply ../patches/0012-sau-douyin-cover-slot-by-step.patch
 git apply ../patches/0013-sau-douyin-dual-cover-slots.patch
 git apply ../patches/0014-sau-baijiahao-editor-popover-block.patch
+git apply ../patches/0015-sau-default-account.patch
 ```
 
 注意补丁里的路径是 **vendored 目录相对**（`sau_cli.py`、`uploader/...`），所以上面这套

@@ -70,6 +70,10 @@ from uploader.youtube_uploader.main import (
 
 SCHEDULE_FORMAT = "%Y-%m-%d %H:%M"
 
+# Every `--account` flag defaults to this name, so single-account setups can drop it:
+# `sau tencent login` == `sau tencent login --account default`.
+DEFAULT_ACCOUNT_NAME = "default"
+
 
 @dataclass(slots=True)
 class DouyinVideoUploadRequest:
@@ -818,12 +822,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     for action_name in ("login", "check"):
         action_parser = douyin_actions.add_parser(action_name, help=f"Douyin {action_name}")
-        action_parser.add_argument("--account", required=True, help="Douyin user-defined account_name")
+        action_parser.add_argument("--account", default=DEFAULT_ACCOUNT_NAME, help="Douyin user-defined account_name (default: default)")
         if action_name == "login":
             add_runtime_flags(action_parser)
 
     upload_video_parser = douyin_actions.add_parser("upload-video", help="Upload one video to Douyin")
-    upload_video_parser.add_argument("--account", required=True, help="Douyin user-defined account_name")
+    upload_video_parser.add_argument("--account", default=DEFAULT_ACCOUNT_NAME, help="Douyin user-defined account_name (default: default)")
     upload_video_parser.add_argument("--file", required=True, type=existing_file_path, help="Video file path")
     upload_video_parser.add_argument("--title", required=True, help="Video title")
     upload_video_parser.add_argument("--desc", default="", help="Optional video description")
@@ -842,7 +846,7 @@ def build_parser() -> argparse.ArgumentParser:
     add_runtime_flags(upload_video_parser)
 
     upload_note_parser = douyin_actions.add_parser("upload-note", help="Upload one note to Douyin")
-    upload_note_parser.add_argument("--account", required=True, help="Douyin user-defined account_name")
+    upload_note_parser.add_argument("--account", default=DEFAULT_ACCOUNT_NAME, help="Douyin user-defined account_name (default: default)")
     upload_note_parser.add_argument("--images", required=True, nargs="+", type=existing_file_path, help="Image file paths")
     upload_note_parser.add_argument("--title", required=True, help="Note title")
     upload_note_parser.add_argument("--note", default="", help="Optional note content")
@@ -857,12 +861,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     for action_name in ("login", "check"):
         action_parser = kuaishou_actions.add_parser(action_name, help=f"Kuaishou {action_name}")
-        action_parser.add_argument("--account", required=True, help="Kuaishou user-defined account_name")
+        action_parser.add_argument("--account", default=DEFAULT_ACCOUNT_NAME, help="Kuaishou user-defined account_name (default: default)")
         if action_name == "login":
             add_runtime_flags(action_parser)
 
     kuaishou_upload_video_parser = kuaishou_actions.add_parser("upload-video", help="Upload one video to Kuaishou")
-    kuaishou_upload_video_parser.add_argument("--account", required=True, help="Kuaishou user-defined account_name")
+    kuaishou_upload_video_parser.add_argument("--account", default=DEFAULT_ACCOUNT_NAME, help="Kuaishou user-defined account_name (default: default)")
     kuaishou_upload_video_parser.add_argument("--file", required=True, type=existing_file_path, help="Video file path")
     kuaishou_upload_video_parser.add_argument("--title", required=True, help="Video title")
     kuaishou_upload_video_parser.add_argument("--desc", default="", help="Optional video description")
@@ -875,7 +879,7 @@ def build_parser() -> argparse.ArgumentParser:
     add_runtime_flags(kuaishou_upload_video_parser)
 
     kuaishou_upload_note_parser = kuaishou_actions.add_parser("upload-note", help="Upload one note to Kuaishou")
-    kuaishou_upload_note_parser.add_argument("--account", required=True, help="Kuaishou user-defined account_name")
+    kuaishou_upload_note_parser.add_argument("--account", default=DEFAULT_ACCOUNT_NAME, help="Kuaishou user-defined account_name (default: default)")
     kuaishou_upload_note_parser.add_argument("--images", required=True, nargs="+", type=existing_file_path, help="Image file paths")
     kuaishou_upload_note_parser.add_argument("--title", required=True, help="Note title")
     kuaishou_upload_note_parser.add_argument("--note", default="", help="Optional note content")
@@ -888,12 +892,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     for action_name in ("login", "check"):
         action_parser = xiaohongshu_actions.add_parser(action_name, help=f"Xiaohongshu {action_name}")
-        action_parser.add_argument("--account", required=True, help="Xiaohongshu user-defined account_name")
+        action_parser.add_argument("--account", default=DEFAULT_ACCOUNT_NAME, help="Xiaohongshu user-defined account_name (default: default)")
         if action_name == "login":
             add_runtime_flags(action_parser)
 
     xiaohongshu_upload_video_parser = xiaohongshu_actions.add_parser("upload-video", help="Upload one video to Xiaohongshu")
-    xiaohongshu_upload_video_parser.add_argument("--account", required=True, help="Xiaohongshu user-defined account_name")
+    xiaohongshu_upload_video_parser.add_argument("--account", default=DEFAULT_ACCOUNT_NAME, help="Xiaohongshu user-defined account_name (default: default)")
     xiaohongshu_upload_video_parser.add_argument("--file", required=True, type=existing_file_path, help="Video file path")
     xiaohongshu_upload_video_parser.add_argument("--title", required=True, help="Video title")
     xiaohongshu_upload_video_parser.add_argument("--desc", default="", help="Optional video description")
@@ -905,7 +909,7 @@ def build_parser() -> argparse.ArgumentParser:
     add_runtime_flags(xiaohongshu_upload_video_parser)
 
     xiaohongshu_upload_note_parser = xiaohongshu_actions.add_parser("upload-note", help="Upload one note to Xiaohongshu")
-    xiaohongshu_upload_note_parser.add_argument("--account", required=True, help="Xiaohongshu user-defined account_name")
+    xiaohongshu_upload_note_parser.add_argument("--account", default=DEFAULT_ACCOUNT_NAME, help="Xiaohongshu user-defined account_name (default: default)")
     xiaohongshu_upload_note_parser.add_argument("--images", required=True, nargs="+", type=existing_file_path, help="Image file paths")
     xiaohongshu_upload_note_parser.add_argument("--title", required=True, help="Note title")
     xiaohongshu_upload_note_parser.add_argument("--note", default="", help="Optional note content")
@@ -918,10 +922,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     for action_name in ("login", "check"):
         action_parser = bilibili_actions.add_parser(action_name, help=f"Bilibili {action_name}")
-        action_parser.add_argument("--account", required=True, help="Bilibili user-defined account_name")
+        action_parser.add_argument("--account", default=DEFAULT_ACCOUNT_NAME, help="Bilibili user-defined account_name (default: default)")
 
     bilibili_upload_video_parser = bilibili_actions.add_parser("upload-video", help="Upload one video to Bilibili")
-    bilibili_upload_video_parser.add_argument("--account", required=True, help="Bilibili user-defined account_name")
+    bilibili_upload_video_parser.add_argument("--account", default=DEFAULT_ACCOUNT_NAME, help="Bilibili user-defined account_name (default: default)")
     bilibili_upload_video_parser.add_argument("--file", required=True, type=existing_file_path, help="Video file path")
     bilibili_upload_video_parser.add_argument("--title", required=True, help="Video title")
     bilibili_upload_video_parser.add_argument("--desc", required=True, help="Video description")
@@ -938,7 +942,7 @@ def build_parser() -> argparse.ArgumentParser:
                        if action_name == "keepalive" else action_name)
         action_parser = tencent_actions.add_parser(
             action_name, help=f"Tencent/WeChat Channels {action_help}")
-        action_parser.add_argument("--account", required=True, help="Tencent user-defined account_name")
+        action_parser.add_argument("--account", default=DEFAULT_ACCOUNT_NAME, help="Tencent user-defined account_name (default: default)")
         if action_name == "login":
             add_runtime_flags(action_parser)
         if action_name == "keepalive":
@@ -947,7 +951,7 @@ def build_parser() -> argparse.ArgumentParser:
                                        help="Extra re-checks before declaring the cookie dead (default 1)")
 
     tencent_upload_video_parser = tencent_actions.add_parser("upload-video", help="Upload one video to WeChat Channels")
-    tencent_upload_video_parser.add_argument("--account", required=True, help="Tencent user-defined account_name")
+    tencent_upload_video_parser.add_argument("--account", default=DEFAULT_ACCOUNT_NAME, help="Tencent user-defined account_name (default: default)")
     tencent_upload_video_parser.add_argument("--file", required=True, type=existing_file_path, help="Video file path")
     tencent_upload_video_parser.add_argument("--title", required=True, help="Video title")
     tencent_upload_video_parser.add_argument("--desc", default="", help="Optional video description")
@@ -967,12 +971,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     for action_name in ("login", "check"):
         action_parser = alipay_actions.add_parser(action_name, help=f"Alipay {action_name}")
-        action_parser.add_argument("--account", required=True, help="Alipay user-defined account_name")
+        action_parser.add_argument("--account", default=DEFAULT_ACCOUNT_NAME, help="Alipay user-defined account_name (default: default)")
         if action_name == "login":
             add_runtime_flags(action_parser)
 
     alipay_upload_video_parser = alipay_actions.add_parser("upload-video", help="Upload one video to Alipay")
-    alipay_upload_video_parser.add_argument("--account", required=True, help="Alipay user-defined account_name")
+    alipay_upload_video_parser.add_argument("--account", default=DEFAULT_ACCOUNT_NAME, help="Alipay user-defined account_name (default: default)")
     alipay_upload_video_parser.add_argument("--file", required=True, type=existing_file_path, help="Video file path")
     alipay_upload_video_parser.add_argument("--title", required=True, help="Video title")
     alipay_upload_video_parser.add_argument("--desc", default="", help="Optional video description")
@@ -987,12 +991,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     for action_name in ("login", "check"):
         action_parser = weibo_actions.add_parser(action_name, help=f"Weibo {action_name}")
-        action_parser.add_argument("--account", required=True, help="Weibo user-defined account_name")
+        action_parser.add_argument("--account", default=DEFAULT_ACCOUNT_NAME, help="Weibo user-defined account_name (default: default)")
         if action_name == "login":
             add_runtime_flags(action_parser)
 
     weibo_upload_video_parser = weibo_actions.add_parser("upload-video", help="Upload one video to Weibo")
-    weibo_upload_video_parser.add_argument("--account", required=True, help="Weibo user-defined account_name")
+    weibo_upload_video_parser.add_argument("--account", default=DEFAULT_ACCOUNT_NAME, help="Weibo user-defined account_name (default: default)")
     weibo_upload_video_parser.add_argument("--file", required=True, type=existing_file_path, help="Video file path")
     weibo_upload_video_parser.add_argument("--title", required=True, help="Video title (max 30 chars)")
     weibo_upload_video_parser.add_argument("--desc", default="", help="Optional video description")
@@ -1007,12 +1011,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     for action_name in ("login", "check"):
         action_parser = hupu_actions.add_parser(action_name, help=f"Hupu {action_name}")
-        action_parser.add_argument("--account", required=True, help="Hupu user-defined account_name")
+        action_parser.add_argument("--account", default=DEFAULT_ACCOUNT_NAME, help="Hupu user-defined account_name (default: default)")
         if action_name == "login":
             add_runtime_flags(action_parser)
 
     hupu_upload_video_parser = hupu_actions.add_parser("upload-video", help="Upload one video to Hupu")
-    hupu_upload_video_parser.add_argument("--account", required=True, help="Hupu user-defined account_name")
+    hupu_upload_video_parser.add_argument("--account", default=DEFAULT_ACCOUNT_NAME, help="Hupu user-defined account_name (default: default)")
     hupu_upload_video_parser.add_argument("--file", required=True, type=existing_file_path, help="Video file path")
     hupu_upload_video_parser.add_argument("--title", required=True, help="Video title (4-40 chars)")
     hupu_upload_video_parser.add_argument("--desc", default="", help="Optional video description")
@@ -1025,12 +1029,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     for action_name in ("login", "check"):
         action_parser = youtube_actions.add_parser(action_name, help=f"YouTube {action_name}")
-        action_parser.add_argument("--account", required=True, help="YouTube user-defined account_name")
+        action_parser.add_argument("--account", default=DEFAULT_ACCOUNT_NAME, help="YouTube user-defined account_name (default: default)")
         if action_name == "login":
             add_runtime_flags(action_parser)
 
     youtube_upload_video_parser = youtube_actions.add_parser("upload-video", help="Upload one video to YouTube")
-    youtube_upload_video_parser.add_argument("--account", required=True, help="YouTube user-defined account_name")
+    youtube_upload_video_parser.add_argument("--account", default=DEFAULT_ACCOUNT_NAME, help="YouTube user-defined account_name (default: default)")
     youtube_upload_video_parser.add_argument("--file", required=True, type=existing_file_path, help="Video file path")
     youtube_upload_video_parser.add_argument("--title", required=True, help="Video title (<=100 chars)")
     youtube_upload_video_parser.add_argument("--desc", default="", help="Optional video description")
@@ -1046,12 +1050,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     for action_name in ("login", "check"):
         action_parser = baijiahao_actions.add_parser(action_name, help=f"Baijiahao {action_name}")
-        action_parser.add_argument("--account", required=True, help="Baijiahao user-defined account_name")
+        action_parser.add_argument("--account", default=DEFAULT_ACCOUNT_NAME, help="Baijiahao user-defined account_name (default: default)")
         if action_name == "login":
             add_runtime_flags(action_parser)
 
     baijiahao_upload_video_parser = baijiahao_actions.add_parser("upload-video", help="Upload one video to Baijiahao")
-    baijiahao_upload_video_parser.add_argument("--account", required=True, help="Baijiahao user-defined account_name")
+    baijiahao_upload_video_parser.add_argument("--account", default=DEFAULT_ACCOUNT_NAME, help="Baijiahao user-defined account_name (default: default)")
     baijiahao_upload_video_parser.add_argument("--file", required=True, type=existing_file_path, help="Video file path")
     baijiahao_upload_video_parser.add_argument("--title", required=True, help="Video title")
     baijiahao_upload_video_parser.add_argument("--desc", default="", help="Optional video description")
