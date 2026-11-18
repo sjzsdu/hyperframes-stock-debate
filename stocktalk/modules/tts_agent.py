@@ -24,6 +24,24 @@ from stocktalk.modules.numbers import to_display
 from stocktalk.modules.providers import TTSJob, TTSProviderError, create_tts_provider
 
 
+# 按轮情绪 → 语速/音调微调（2026-11-15 音色漂移事故后新通道）。
+#
+# 根因：豆包 2.0 的 context_texts 是**全演绎风格**控制——逐轮换「惊讶难以置信/
+# 恍然大悟/笃定沉稳」指令，声线跟着整体重演，同一角色每轮听起来像换了人
+# （603880 实测女声各轮 F0 中位 240→264 Hz）。情绪从此只走数值韵律：
+# 只动语速/音调（speech_rate / post_process.pitch），**绝不碰音色**。
+# 幅度对齐 prosody_*_delta 的克制哲学——大跳本身也会让一人多声。
+EMOTION_PROSODY: dict[str, tuple[float, float]] = {
+    # emotion: (rate_delta, pitch_delta)  比率增量，加在基础 speed/pitch 上
+    "反驳": (+0.03, +0.03),   # 更快更扬：锋芒毕露、寸步不让
+    "质疑": (-0.02, +0.03),   # 放慢上扬：怀疑审视、追问感
+    "惊叹": (+0.02, +0.05),   # 提亮：刚看到意外数字
+    "顿悟": (-0.02, 0.00),    # 落定：刚刚想通一件事
+    "坚守": (-0.03, -0.03),   # 放慢压低：笃定沉稳、立场不移
+    "平述": (0.0, 0.0),
+}
+
+
 class TTSSynthesisError(RuntimeError):
     """Raised when the TTS provider cannot produce a usable audio segment."""
 
@@ -100,20 +118,26 @@ class TTSAgent:
         return result
 
     def _line_instruction(self, character: str, emotion: str) -> str | None:
-        """本句的演绎指令：角色基础指令 + 按轮情绪短语（2026-10-07）。
+        """本句的演绎指令：**同一角色恒定不变**（声线锚定，2026-11-15）。
 
         通道开关语义与旧版一致：CLI 路径要 ``supports_instruction`` 显式开启
         （系统 _v3 音色传 instruction 会 428）；WebSocket 设计音色的
-        ``voice_direction`` 一直直传、无需开关。情绪短语只在
-        ``supports_instruction`` 通道激活时叠加——豆包 context_texts 每次调用
-        独立传，逐句合成的架构正好一句一个情绪。
+        ``voice_direction`` 一直直传、无需开关。
+
+        音色漂移事故（603880：同角色逐轮换声）的根因是逐轮把
+        EMOTION_DIRECTIVES 拼进 context_texts——豆包把指令当全演绎风格重演，
+        声线跟着情绪一起改写。默认（tts.emotion_in_instruction: false）指令只含
+        角色基础演绎、每轮完全一致，情绪改走韵律数值（EMOTION_PROSODY）；
+        要旧的强表演风格须显式开 emotion_in_instruction，并加声线锚句兜底。
         """
         cfg = self.characters.get(character, {}) or {}
         if cfg.get("supports_instruction"):
             parts = [str(cfg.get("instruction") or "").strip()]
-            directive = EMOTION_DIRECTIVES.get(emotion, "")
-            if directive:
-                parts.append(directive)
+            if self.tts_config.get("emotion_in_instruction", False):
+                directive = EMOTION_DIRECTIVES.get(emotion, "")
+                if directive:
+                    parts.append("无论情绪如何变化，音色和声线保持完全一致")
+                    parts.append(directive)
         else:
             parts = [str(cfg.get("voice_direction") or "").strip()]
         merged = "；".join(p for p in parts if p)
@@ -174,14 +198,18 @@ class TTSAgent:
     def _clamp(value: float, low: float, high: float) -> float:
         return max(low, min(high, value))
 
-    def _apply_prosody(self, line: str, character_config: Mapping[str, Any]) -> tuple[str, float, float, bool]:
+    def _apply_prosody(self, line: str, character_config: Mapping[str, Any],
+                       emotion: str = "") -> tuple[str, float, float, bool]:
         """Return (synth_text, speed, pitch, use_ssml) for one spoken line.
 
         System voices (cosyvoice-v3-flash) reject SSML emphasis/prosody tags,
         but accept <break>.  So cadence comes from two levers: per-line
-        pitch/rate derived from punctuation and intent, plus a couple of
-        rhetorical pauses at clause boundaries.  The original line is returned
-        untouched to the caller for subtitles.
+        pitch/rate derived from punctuation, emotion (EMOTION_PROSODY) and
+        intent, plus a couple of rhetorical pauses at clause boundaries.  The
+        original line is returned untouched to the caller for subtitles.
+
+        情绪只走这里的语速/音调数值（2026-11-15 起）：逐轮换演绎指令会让豆包
+        重演整段声线、同一角色听着像换了人；数值通道可复现、不碰音色。
         """
         base_pitch = float(character_config.get("pitch", self.tts_config.get("pitch", 1.0)))
         base_rate = float(character_config.get("speed", self.tts_config.get("speed", 1.0)))
@@ -204,6 +232,10 @@ class TTSAgent:
         # 台词里出现它是缺陷、不会再出现在成片里，也就不必为它单独放慢语速。
         if any(word in line for word in ("你看", "打个比方", "也就是说", "举个例子")):
             rate_delta -= min(speed_limit, 0.02)  # explanatory asides ease off
+        # 按轮情绪的数值微调（无匹配词表时为 0，行为与旧版一致）。
+        em_rate, em_pitch = EMOTION_PROSODY.get(emotion, (0.0, 0.0))
+        rate_delta += em_rate
+        pitch_delta += em_pitch
         pitch = round(self._clamp(base_pitch + pitch_delta, 0.82, 1.22), 3)
         speed = round(self._clamp(base_rate + rate_delta, 0.92, 1.18), 3)
         synth_text, use_ssml = self._with_breaks(line)
@@ -251,7 +283,7 @@ class TTSAgent:
         # Per-line prosody: questions lift, exclamations push, risk lines slow
         # down; strategic <break> tags add rhetorical rhythm.  The original line
         # is kept untouched for subtitles.
-        synth_text, speed, pitch, use_ssml = self._apply_prosody(line, character_config)
+        synth_text, speed, pitch, use_ssml = self._apply_prosody(line, character_config, emotion)
         job = TTSJob(
             text=synth_text, voice=str(voice_id), out_path=output_path,
             audio_format=self._audio_format,

@@ -683,36 +683,66 @@ class PublishMetadataGenerator:
         return base
 
     def _description(self, script: Mapping[str, Any], stock_name: str) -> str:
-        """First bull + bear lines as a hook summary, compliance-safe."""
+        """发布简介（2026-11-15 P0-3 重写）：悬念问题 + 看点数字 + 合规尾。
+
+        旧实现取前两轮台词用「；」硬拼——那是转录稿不是简介，还会被平台截断在
+        半句话上（「40%收…」2026-11-14 实锤）。简介的任务是把评论区点起来：
+        问题给分歧、看点数字给理由，结尾留合规话；平台截断时保尾（见
+        ``_fit_description``），所以合规句永远在最后一行。
+        """
+        question = to_display(str(script.get("question") or "").strip())
+        hook = to_display(str(script.get("hook") or "").strip())
         lines: list[str] = []
-        for turn in script.get("turns", ()):
-            if not isinstance(turn, Mapping):
-                continue
-            line = to_display(str(turn.get("line", "")).strip())
-            if line and line not in lines:
-                lines.append(line)
-            if len(lines) == 2:
-                break
-        hook = "；".join(lines) if lines else f"一起聊聊{stock_name}的生意本质。"
-        return f"{hook}\n观点仅代表个人学习交流，欢迎评论区聊聊你的看法。"
+        lead = question or hook
+        if lead:
+            lines.append(lead)
+        spot = script.get("spotlight") if isinstance(script.get("spotlight"), Mapping) else {}
+        label = to_display(str(spot.get("label") or "").strip())
+        value = to_display(str(spot.get("value") or "").strip())
+        if label or value:
+            lines.append(f"本期看点：{label} {value}".strip())
+        series = str(script.get("series") or "").strip()
+        if series:
+            lines.append(f"合集·{series}")
+        if not lines:
+            lines.append(f"一起聊聊{stock_name}的生意本质。")
+        lines.append("观点仅代表个人学习交流，欢迎评论区聊聊你的看法。")
+        return "\n".join(lines)
+
+    # 标签要「能被搜出来」：辩论比喻词（垫资搬砖/铺路水管）没人搜，还拉低专业感
+    # （2026-11-15 P0-4）。宁缺勿滥——砍掉的词退回 DEFAULT_TAGS 兜底。
+    _TAG_METAPHOR = re.compile(
+        r"搬砖|水管|上车|撑盘|拉锯|博弈|变局|大考|错位|阵痛|突围|盘子|铺路|换血|切走|填平|赌局|顶替")
 
     def _tags(self, script: Mapping[str, Any], stock_name: str = "") -> tuple[str, ...]:
-        """平台标签：只要可检索的话题词，不要数字碎片。
+        """平台标签（2026-11-15 P0-4 白名单化）。
 
-        visual 关键词是写给画面的（「毛利率18.29」「应收账款4.51亿」），直接搬上
-        平台没人会搜（2026-09-26 003040 实锤）；这里过滤带数字成分的词，股票名
-        置顶——观众和平台搜索的第一入口都是它。
+        优先级：股票名 > 合集名 > 概念板块 > 行业 > 台词关键词——前四类是
+        交易所/TDX 的真实分类，是观众和平台搜索的第一入口；台词关键词兜底，
+        但滤掉数字碎片与辩论比喻词。
         """
         tags: list[str] = []
-        if stock_name and 2 <= len(stock_name) <= 8:
-            tags.append(stock_name)
+
+        def push(word: str) -> None:
+            word = str(word).strip()
+            if 2 <= len(word) <= 8 and word not in tags and not has_digit(word) \
+                    and not self._TAG_METAPHOR.search(word):
+                tags.append(word)
+
+        if stock_name:
+            push(stock_name)
+        series = str(script.get("series") or "").strip()
+        if series:
+            push(series)
+        concepts = script.get("concepts") if isinstance(script.get("concepts"), Sequence) else ()
+        for word in concepts:
+            push(str(word))
+        push(str(script.get("industry") or ""))
         for turn in script.get("turns", ()):
             if not isinstance(turn, Mapping):
                 continue
             for keyword in turn.get("visual", ()) or ():
-                word = str(keyword).strip()
-                if 2 <= len(word) <= 8 and word not in tags and not has_digit(word):
-                    tags.append(word)
+                push(str(keyword))
         for tag in (*tags, *self.extra_tags, *DEFAULT_TAGS):
             if tag and tag not in tags:
                 tags.append(tag)

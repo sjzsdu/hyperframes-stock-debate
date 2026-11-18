@@ -27,6 +27,7 @@ from stocktalk.modules.publisher import (PLATFORM_LABELS, SauPublisher, cover_si
                                          platforms_needing_cover)
 from stocktalk.modules.review import write_review_page
 from stocktalk.modules.sharpness import summary as sharpness_summary
+from stocktalk.modules.short_cut import build_short_cut
 from stocktalk.modules.stock_data import StockDataClient, StockDataConfig, StockDataIncompleteError
 from stocktalk.modules.tts_agent import TTSAgent
 
@@ -286,6 +287,55 @@ class Pipeline:
                 cuts[platform] = str(path)
         return cuts
 
+    def _render_short_form(self, stock_data: Mapping[str, Any], script: Mapping[str, Any],
+                           audio: Mapping[str, Any], project_dir: Path, tag: str,
+                           progress: Progress, task) -> dict[str, str]:
+        """Render the 60-90s 快评版 for the short-form platform (douyin).
+
+        抖音信息流的完播率是推流第一杠杆，而正片中段的铺垫（背景展开、行业
+        介绍）在陌生人眼里全是划走点（2026-11-15 涨粉复盘）。快评版只留开场
+        钩子 + 最狠交锋 + 收束风险轮：台词一字不改，逐轮 wav 直接复用（时间轴
+        按轮次子集重归零），画面走同一条 HyperFrames 管线——不是第二条内容线，
+        是同一期的「完播版」。正片照常发其余平台。
+
+        只对「比预算长」的正片动刀：正片本来就在预算内（无可删轮次）时抖音
+        直接发正片/画幅版，不重复渲染。剪辑或渲染失败一律降级正片，绝不连累
+        主片与其它平台。
+        """
+        cfg = dict(self.config.get("publish", {}).get("short_form", {}) or {})
+        if not cfg.get("enabled", False):
+            return {}
+        platform = str(cfg.get("platform") or "douyin")
+        try:
+            max_seconds = float(cfg.get("max_seconds") or 88)
+        except (TypeError, ValueError):
+            max_seconds = 88.0
+        pause = float((self.config.get("tts", {}) or {}).get("pause_between_segments", 0.12) or 0.0)
+        try:
+            cut = build_short_cut(script, audio, max_seconds=max_seconds, pause=pause)
+        except Exception as exc:
+            self.console.print(f"[yellow]快评版剪辑失败，{platform} 将使用正片发布: {exc}[/yellow]")
+            return {}
+        # 无可删轮次（正片已在预算内）或时间轴没对上任何段 → 不另出片。
+        if cut["dropped"] <= 0 or not (cut.get("timeline", {}) or {}).get("segments"):
+            return {}
+        canvas_map = dict(self.config.get("publish", {}).get("platform_canvas", {}) or {})
+        main_canvas = str((self.config.get("video", {}) or {}).get("canvas", "vertical"))
+        canvas = str(canvas_map.get(platform, main_canvas))
+        progress.update(task, description=f"Rendering {float(cut['estimated_seconds']):.0f}s short cut for {platform}")
+        video_cfg = dict(self.config.get("video", {}) or {})
+        video_cfg.update({"canvas": canvas, "project_dir": str(project_dir / f"{platform}-short")})
+        builder = HyperFramesBuilder({**self.config, "video": video_cfg})
+        try:
+            variant = builder.build(stock_data, cut["script"], cut["timeline"])
+            path = builder.render_mp4(variant, self.output_dir / f"{tag}.{platform}-short.mp4")
+        except Exception as exc:
+            self.console.print(f"[yellow]快评版渲染失败，{platform} 将使用正片发布: {exc}[/yellow]")
+            return {}
+        self.console.print(f"[green]快评版:[/green] {platform} {cut['kept']}/{cut['kept'] + cut['dropped']} 轮 "
+                           f"≈{float(cut['estimated_seconds']):.0f}s → {path}")
+        return {platform: str(path)}
+
     def _silent_timeline(self, script: Mapping[str, Any], srt_path: Path) -> dict[str, Any]:
         """Create subtitle timing for a silent render when TTS is unavailable.
 
@@ -407,6 +457,10 @@ class Pipeline:
                 except Exception as exc:
                     raise PipelineError(f"MP4 render failed: {exc}") from exc
                 platform_videos = self._render_platform_cuts(stock_data, approved, audio, project_dir, tag, progress, task)
+                # 快评版在画幅版之后合并：同平台两者都有时短版优先（完播版
+                # 才是抖音要的那条），失败降级为已有的正片/画幅版。
+                platform_videos.update(
+                    self._render_short_form(stock_data, approved, audio, project_dir, tag, progress, task))
                 # 封面与成片一起产出，而不是只在发布时才渲：审查的人要能同时
                 # 看到画面和信息流里的缩略图（2026-09-20 用户要求）。封面失败
                 # 只降级为「无封面」，绝不连累已经渲好的 MP4。

@@ -189,7 +189,7 @@ class EpisodePlannerTests(unittest.TestCase):
 
 
 class TurnMetadataTests(unittest.TestCase):
-    """turn 流 → 五章的分配：比例切段、单调不回退、末章留给片尾两轮。"""
+    """turn 流 → 五章的分配：比例切段、单调不回退、末章留给片尾收束段。"""
 
     def _gen(self) -> DialogueGenerator:
         return DialogueGenerator({"dialogue": {"model": "m", "risk_exchange": True}}, llm=object())
@@ -445,7 +445,7 @@ class SplitAwareChapterTests(unittest.TestCase):
     """章节分配必须走 ``_normalize_script`` 的真实拆行路径。
 
     直接喂 ``_turn_metadata`` 会绕过 ``_split_line``：轮数基准一旦按拆分前的轮数
-    算，片尾两轮的 index 就溢出 total，末章的 ``{total, total-1}`` 匹配不上——
+    算，片尾轮的 index 就溢出 total，末章的 ``{total, total-1}`` 匹配不上——
     收尾两句落进 R4 章，R5 全片 0 轮，规划好的 timeline 图一次都不出现。
     """
 
@@ -465,13 +465,14 @@ class SplitAwareChapterTests(unittest.TestCase):
     def test_final_two_turns_hold_the_last_chapter_whatever_the_split_count(self) -> None:
         for long_count in (0, 1, 2, 5, 10):
             turns = self._turns(long_count)
-            # 10 轮正文 + long_count 次拆行产生的续轮 + 片尾风险提示两轮
-            self.assertEqual(len(turns), 12 + long_count, long_count)
+            # 10 轮正文 + long_count 次拆行产生的续轮 + 片尾风险提示一轮
+            # （2026-11-15 第三版一轮制；它插在内容收束之前，末两轮 = 风险轮 + 收束）
+            self.assertEqual(len(turns), 11 + long_count, long_count)
             order = [turn["round_id"] for turn in turns]
             self.assertEqual(order[-2:], ["r5_open_verdict"] * 2, (long_count, order))
             self.assertEqual([turn["visual_id"] for turn in turns[-2:]],
                              ["vis.r5_open_verdict"] * 2, (long_count, order))
-            # 末章只归片尾两轮；正文按位置单调不回退，五章一章不少
+            # 末章只归片尾收束段（风险轮 + 内容收束轮）；正文按位置单调不回退，五章一章不少
             body = order[:-2]
             self.assertNotIn("r5_open_verdict", body, (long_count, order))
             self.assertEqual(body, sorted(body, key=lambda rid: ["r1_hook", "r2_mechanism",

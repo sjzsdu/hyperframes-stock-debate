@@ -21,11 +21,14 @@ class DialogueGeneratorTests(unittest.TestCase):
         with patch("stocktalk.modules.providers.bailian_chat.shutil.which", return_value="bl"):
             script = generator.generate({"code": "000001", "quote": {"name": "平安银行", "price": 10.5}})
         self.assertNotIn("rounds", script)
-        # 末尾两轮是程序追加的风险提示交换（2026-10-08）：一人一句接力
+        # 片尾风险提示轮（2026-11-15 第三版）：一轮一句、插在内容收束之前——
+        # 风险轮在倒二位（说话人与最后一轮对调），最后一轮是模型的内容收束
         self.assertEqual([turn["speaker"] for turn in script["turns"]],
-                         ["bull", "bear", "bull", "bear", "bull"])
-        self.assertIn("股市有风险", script["turns"][-2]["line"])
-        self.assertIn("投资需谨慎", script["turns"][-1]["line"])
+                         ["bull", "bear", "bear", "bull"])
+        risk_turn = script["turns"][-2]
+        self.assertIn("股市有风险", risk_turn["line"])
+        self.assertIn("投资需谨慎", risk_turn["line"])
+        self.assertIn("这点我认同", script["turns"][-1]["line"])  # 最后一句话是内容收束，不是免责声明
         self.assertEqual(script["turns"][0]["character_name"], "新手")
         self.assertTrue(all(len(turn["line"]) <= 80 for turn in script["turns"]))
         self.assertIn("不要编号、不要 Round", calls[0][0][calls[0][0].index("--message") + 1])
@@ -107,9 +110,10 @@ class DialogueGeneratorTests(unittest.TestCase):
         self.assertIn("9-24 轮", message)
         # 长片要的是深度，prompt 必须点明这一点
         self.assertIn("这是一条长视频", message)
-        # 节奏导向：多轮短交锋，但每轮仍要有新信息
+        # 节奏导向：多轮短交锋，但每轮仍要有新信息（2026-11-17 起这条规则归
+        # 系统提示的「态度与交锋/风格要求」管，用户提示不再整段重复）
         self.assertIn("多轮短交锋", message)
-        self.assertIn("严禁把同一个意思换句话再说一遍", message)
+        self.assertIn("按系统提示里的「态度与交锋」写", message)
 
     def test_fixed_duration_reads_as_a_single_minute_span(self):
         """--duration-minutes 4 会把上下限压成同一个值，prompt 别写成「约 4-4 分钟」。"""
@@ -141,7 +145,8 @@ class DialogueGeneratorTests(unittest.TestCase):
                                       runner=lambda argv, timeout: response)
         with patch("stocktalk.modules.providers.bailian_chat.shutil.which", return_value="bl"):
             script = generator.generate({"code": "000001", "quote": {"name": "平安银行"}})
-        turns = script["turns"][:-2]   # 末尾两轮是固定风险提示交换，不参与拆分断言
+        # 剔除程序追加的风险提示轮（一轮、插在内容收束之前），不参与拆分断言
+        turns = [t for t in script["turns"] if "股市有风险" not in t["line"]]
         self.assertGreater(len(turns), 1, "超长台词必须拆成多轮")
         self.assertTrue(all(turn["speaker"] == "bull" for turn in turns))
         self.assertTrue(all(len(turn["line"]) <= 80 for turn in turns))
@@ -266,7 +271,9 @@ class DialogueGeneratorTests(unittest.TestCase):
         }, ensure_ascii=False)
 
     def _annual_generator(self, response=None):
-        return DialogueGenerator({"dialogue": {"arc": "annual", "max_line_chars": 80},
+        # opening_gate: False —— 这些用例验的是骨架/互动字段的确定性回放，
+        # 门禁会把 canned 开场判不合格并追加 arc_notes（2026-11-15），与被测行为无关。
+        return DialogueGenerator({"dialogue": {"arc": "annual", "max_line_chars": 80, "opening_gate": False},
                                   "characters": {"bull": {"name": "新手"}, "bear": {"name": "老手"}}},
                                  runner=lambda argv, timeout: response or self._arc_response())
 
@@ -344,8 +351,9 @@ class DialogueGeneratorTests(unittest.TestCase):
         ]}, ensure_ascii=False)
         with patch("stocktalk.modules.providers.bailian_chat.shutil.which", return_value="bl"):
             script = self._annual_generator(response=response).generate(self._full_data())
-        # 末尾两轮是固定风险提示交换（closing），不参与 beat 断言
-        self.assertEqual([turn["beat"] for turn in script["turns"][:-2]], ["revenue", "revenue"])
+        # 剔除程序追加的风险提示轮（closing），不参与 beat 断言
+        body = [turn["beat"] for turn in script["turns"] if "股市有风险" not in turn["line"]]
+        self.assertEqual(body, ["revenue", "revenue"])
         self.assertTrue(any("不在本期骨架内" in note for note in script["arc_notes"]))
 
     def test_beat_cannot_rewind_the_arc_order(self):
@@ -355,8 +363,9 @@ class DialogueGeneratorTests(unittest.TestCase):
         ]}, ensure_ascii=False)
         with patch("stocktalk.modules.providers.bailian_chat.shutil.which", return_value="bl"):
             script = self._annual_generator(response=response).generate(self._full_data())
-        # 末尾两轮是固定风险提示交换（closing），不参与 beat 断言
-        self.assertEqual([turn["beat"] for turn in script["turns"][:-2]], ["cash", "cash"])
+        # 剔除程序追加的风险提示轮（closing），不参与 beat 断言
+        body = [turn["beat"] for turn in script["turns"] if "股市有风险" not in turn["line"]]
+        self.assertEqual(body, ["cash", "cash"])
         self.assertTrue(any("回退了骨架顺序" in note for note in script["arc_notes"]))
 
     def test_short_reply_is_flagged_and_tolerated(self):
@@ -507,8 +516,10 @@ class DebateTensionTests(unittest.TestCase):
         self.assertIn("态度与交锋", system)
         self.assertIn("兴冲冲", system)
         self.assertIn("情绪先于论证", system)
-        # 动作先于论证：给的是他自己的动作，不是结论
-        self.assertIn("这价我先上车", system)
+        # 动作先于论证：给的是他自己的动作，不是结论；口头禅整句是禁用反例（2026-11-15）
+        self.assertIn("措辞每期必须换新的", system)
+        self.assertIn("禁止整句口头禅复读", system)
+        self.assertNotIn("这价我先上车", system)
         # 被打断时不许立刻认同
         self.assertIn("找补或嘴硬", system)
         self.assertIn("认输只留给片尾那一处反转", system)
@@ -548,7 +559,8 @@ class DebateTensionTests(unittest.TestCase):
         system = DialogueGenerator()._system_prompt()
 
         self.assertIn("开场要求：", system)
-        self.assertIn("看到本期那个好消息之后的反应 + 想上车的动作", system)
+        self.assertIn("看到本期那个好消息之后的反应 + 当场要有的动作", system)
+        self.assertIn("禁止「先上车/先跟/先认」式整句口头禅", system)
         self.assertIn("不许在第一句讲", system)
         # 首拍 intent 也不许再是陈述式的"说清…用占比当骨架"
         self.assertIn("紧跟开场那个反应把生意讲清", system)
@@ -567,11 +579,8 @@ class DebateTensionTests(unittest.TestCase):
         self.assertIn("营收 12.3 亿，同比增长 18%", system)   # 被点名的反面样板
         self.assertIn("挂在动作、判断或情绪上", system)
         self.assertIn("某一轮一个数字都没有是允许的", system)
-        # 系统提示与用户提示同口径：数字不再按轮计
+        # 数字规则归系统提示管，用户提示不再整段重复（2026-11-17 去重）
         self.assertIn("数字不是每轮的义务", system)
-        self.assertIn("数字不再按轮计", message)
-        self.assertIn("允许某一轮一个数字都没有", message)
-        self.assertIn("营收 12.3 亿，同比增长 18%", message)
 
     def test_head_to_head_exchange_is_required(self):
         """必须引用对方原话/数字再反驳，并且禁止平行独白式的各说各话。"""
@@ -633,28 +642,31 @@ class DebateTensionTests(unittest.TestCase):
         self.assertIn("根本没人拦", system)
 
     def test_user_prompt_repeats_the_tension_spec_next_to_the_data(self):
-        """系统提示写过一遍，用户提示里紧贴数据再收一次口。
+        """用户提示在数据旁收一次口，但细节交给系统提示、不整段重复。
 
-        例外（开场轮 / 几个字的短回应）必须一起带过来：只改系统提示、用户提示
-        还留着全称量词，等于没改——模型读到的是那半句。
+        2026-11-17：user 与 system 大段重复同一批禁令，是「工业流水线感」的来源
+        之一——模型读到两遍一模一样的「不许/必须」，只会更死板。现在 user 只留
+        一句收口（点名引用系统提示的「态度与交锋」），机制细节全在 system 里。
         """
         message = DialogueGenerator()._user_prompt({"code": "1"})
 
-        self.assertIn("态度要分家", message)
-        self.assertIn("先接住对方刚说的原话或数字再反驳", message)
-        self.assertIn("必须有一次由具体数字掰过来的观点反转", message)
-        # 与系统提示同口径：例外明写在这里，且不许留全称量词
-        self.assertIn("除开场轮和几个字的短回应之外", message)
-        self.assertIn("每次实质发言", message)
-        self.assertNotIn("每一轮都先接住", message)
+        self.assertIn("态度与交锋", message)          # 点名引用，不是复制粘贴
+        self.assertIn("态度分家", message)
+        self.assertIn("由具体数字掰过来的观点反转", message)
+        self.assertIn("分歧留到片尾", message)
+        # 机制细节不再在 user 里整段重复——它们归 system 的「态度与交锋」
+        self.assertNotIn("先接住对方刚说的原话或数字再反驳", message)
+        self.assertNotIn("必须有一次由具体数字掰过来的观点反转", message)
+        self.assertNotIn("除开场轮和几个字的短回应之外", message)
 
 
 class RiskExchangeTests(unittest.TestCase):
-    """片尾风险提示交换（2026-10-08 第二版）：一人一句、按个股特征变化。
+    """片尾风险提示轮（2026-11-15 第三版）：一轮一句、插在内容收束之前。
 
-    ①「股市有风险」「投资需谨慎」拆给两位角色接力；②措辞按个股特征
-    （行业/主营/股名）从模板池挑，按 (代码, 日期) 稳定分散——同票同日可复现、
-    不同票不撞形，消除 AI 味。
+    ①两个锚点同轮保留、一位角色说完——不再是「一人一句接力」（2026-11-15
+    用户反馈「听多了有点反感这个结尾」，两轮接力形态退役）；②风险轮在倒二位，
+    节目的最后一句话是内容收束，不是免责声明；③措辞按个股特征（行业/主营/
+    股名）从模板池挑，按 (代码, 日期) 稳定分散——同票同日可复现、不同票不撞形。
     """
 
     def _generator(self, dialogue_config=None):
@@ -665,22 +677,21 @@ class RiskExchangeTests(unittest.TestCase):
                                      {"speaker": "bear", "beat": "margin", "line": "客户集中就是命门。"}]},
                                      ensure_ascii=False))
 
-    def test_exchange_is_two_alternating_short_turns_with_both_anchors(self):
+    def test_exchange_is_one_short_turn_before_the_content_close(self):
         with patch("stocktalk.modules.providers.bailian_chat.shutil.which", return_value="bl"):
             script = self._generator().generate({"code": "000001", "quote": {"name": "平安银行"}})
-        a, b = script["turns"][-2], script["turns"][-1]
-        # 锚点一人一句：先「股市有风险」，后「投资需谨慎」
-        self.assertIn("股市有风险", a["line"])
-        self.assertIn("投资需谨慎", b["line"])
-        # 说话人与最后一轮（bear）对调交替：bull 先说、bear 接
-        self.assertEqual(a["speaker"], "bull")
-        self.assertEqual(b["speaker"], "bear")
-        for turn in (a, b):
-            self.assertEqual(turn["beat"], "closing")
-            self.assertTrue(turn["short"], "两句话的提示不该重画图板")
-            self.assertEqual(turn["emotion"], "平述")
-        self.assertEqual(script["risk_exchange"]["a"], a["line"])
-        self.assertEqual(script["risk_exchange"]["b"], b["line"])
+        risk_turn, closing = script["turns"][-2], script["turns"][-1]
+        # 一轮一句、双锚点同轮；最后一轮是内容收束，不是免责声明
+        self.assertIn("股市有风险", risk_turn["line"])
+        self.assertIn("投资需谨慎", risk_turn["line"])
+        self.assertIn("客户集中就是命门", closing["line"])
+        # 说话人与最后一轮（bear 的收束）对调：提醒风险的换人说
+        self.assertEqual(risk_turn["speaker"], "bull")
+        self.assertEqual(closing["speaker"], "bear")
+        self.assertEqual(risk_turn["beat"], "closing")
+        self.assertTrue(risk_turn["short"], "一句话的提示不该重画图板")
+        self.assertEqual(risk_turn["emotion"], "平述")
+        self.assertEqual(script["risk_exchange"]["line"], risk_turn["line"])
         self.assertEqual(script["char_count"], sum(len(t["line"]) for t in script["turns"]))
 
     def test_exchange_can_be_disabled_by_config(self):
@@ -689,7 +700,7 @@ class RiskExchangeTests(unittest.TestCase):
                 {"code": "000001", "quote": {"name": "平安银行"}})
         self.assertEqual(script["turns"][-1]["line"], "客户集中就是命门。")
         self.assertNotIn("risk_exchange", script)
-        self.assertNotIn("股市有风险", [turn["line"] for turn in script["turns"]])
+        self.assertFalse(any("股市有风险" in turn["line"] for turn in script["turns"]))
 
     def test_exchange_varies_with_stock_traits(self):
         """有行业/主营数据时特征模板够格上场；没有数据就退回通用池。"""
@@ -699,9 +710,9 @@ class RiskExchangeTests(unittest.TestCase):
                                  "主营构成": {"明细": [{"项目": "色釉陶瓷(产品)", "收入占比(%)": "90.56"}]}}}
         chosen = build(with_industry, code="001216", day="2026-10-08")
         self.assertIn(chosen["id"], {"industry", "item", "name",
-                                     "generic-signoff", "generic-numbers", "generic-stance"})
-        self.assertIn("股市有风险", chosen["a"])
-        self.assertIn("投资需谨慎", chosen["b"])
+                                     "generic-ledger", "generic-numbers", "generic-fork"})
+        self.assertIn("股市有风险", chosen["line"])
+        self.assertIn("投资需谨慎", chosen["line"])
         # 同票同日可复现
         self.assertEqual(chosen, build(with_industry, code="001216", day="2026-10-08"))
         # 裸数据（连股名都没有）也能兜底出一条
@@ -718,7 +729,7 @@ class RiskExchangeTests(unittest.TestCase):
         self.assertIn("公司价值", message)
         self.assertIn("至少覆盖两类", message)
         # 风险提示是程序追加的，模型写进台词就会撞车
-        self.assertIn("由程序在收尾之后", message)
+        self.assertIn("插在收尾之前", message)
 
 
 if __name__ == "__main__":

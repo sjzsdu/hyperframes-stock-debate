@@ -83,6 +83,18 @@ def test_target_duration_is_two_to_five_minutes() -> None:
     assert dialogue["max_duration_seconds"] > dialogue["min_duration_seconds"]
 
 
+def test_short_form_keeps_the_one_minute_monetisation_floor() -> None:
+    """抖音快评版必须 ≥1 分钟：中视频分成硬性要求「原创横屏 ≥1 分钟」。
+
+    max_seconds 是完播率与分成时长的权衡点（88s）——调短能提完播，但 60 以下
+    等于把抖音的播放分成通道关掉，和 test_master_canvas_is_landscape 同一条红线。
+    """
+    short = _config()["publish"]["short_form"]
+    assert short["enabled"] is True
+    assert short["platform"] == "douyin"
+    assert short["max_seconds"] >= 60
+
+
 def test_long_script_budget_gets_headroom_for_tokens_and_timeouts() -> None:
     """长片要一次性吐完 1400+ 字 JSON：token 上限和 LLM 超时必须跟着放大。"""
     dialogue = _config()["dialogue"]

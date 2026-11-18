@@ -25,7 +25,10 @@ ROOT = pathlib.Path(__file__).resolve().parents[1] / "stocktalk"
 # 清单本体当然写着这些词；但只豁免**这几个常量里的字符串**，文件其余部分照常扫
 # （2026-11-02 WAN-28）。整体豁免一个文件，等于给 copy_guard.py 的其它文案开了
 # 一个永久后门——套话写进那里的提示词或样板句，扫描永远看不见。
-EXEMPT_CONSTANTS = {"copy_guard.py": {"CLICHES", "IDIOMS", "TEACHING_MARKERS"}}
+# SENTENCE_BLACKLIST 同属「清单常量」（2026-11-15）：它存的就是被判死的整句反例，
+# 里面的套话是标本不是用法；豁免范围只到这个常量，dialogue_generator 其余照常扫。
+EXEMPT_CONSTANTS = {"copy_guard.py": {"CLICHES", "IDIOMS", "TEACHING_MARKERS"},
+                    "dialogue_generator.py": {"SENTENCE_BLACKLIST"}}
 
 
 def _live_template_sentences() -> list[str]:
@@ -33,11 +36,10 @@ def _live_template_sentences() -> list[str]:
     fill = {"industry": "食品饮料与酿酒", "item": "其他系列酒产品", "name": "贵州茅台"}
     sentences: list[str] = []
     for exchange in EXCHANGES:
-        for text in (exchange.a, exchange.b):
-            rendered = text
-            for key, _ in TRAITS:
-                rendered = rendered.replace(f"{{{key}}}", fill.get(key, ""))
-            sentences.append(rendered)
+        rendered = exchange.line
+        for key, _ in TRAITS:
+            rendered = rendered.replace(f"{{{key}}}", fill.get(key, ""))
+        sentences.append(rendered)
     return sentences
 
 

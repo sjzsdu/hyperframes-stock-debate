@@ -501,9 +501,13 @@ def test_volcengine_tts_skips_metadata_lines(tmp_path):
     provider.synthesize_lines([_tts_job(tmp_path)])
     assert (tmp_path / "01_bull.wav").read_bytes() == b"audio"
 
-def test_tts_agent_merges_per_turn_emotion_into_instruction(tmp_path, monkeypatch):
-    """按轮情绪：基础指令 + EMOTION_DIRECTIVES 短语合成单句 instruction；
-    缺省情绪只有基础指令；未开 supports_instruction 的角色整个通道关闭。"""
+def test_tts_agent_keeps_instruction_constant_across_emotions(tmp_path, monkeypatch):
+    """声线锚定（2026-11-15 音色漂移修复）：默认逐轮指令恒定，情绪不进指令。
+
+    根因：豆包 2.0 的 context_texts 是全演绎风格控制，逐轮拼 EMOTION_DIRECTIVES
+    会把声线一起重演（603880 同角色每轮像换了人）。缺省情绪、有情绪都只发
+    角色基础指令；未开 supports_instruction 的角色整个通道关闭。
+    """
     config = {
         "output": {"dir": str(tmp_path)},
         "characters": {"bull": {"name": "多头", "voice_id": "v_bull",
@@ -516,12 +520,60 @@ def test_tts_agent_merges_per_turn_emotion_into_instruction(tmp_path, monkeypatc
     monkeypatch.setattr(agent, "_audio_duration", lambda _path: 1.0)
     agent.synthesize({"turns": [
         {"speaker": "bull", "line": "第一句。", "emotion": "惊叹"},
-        {"speaker": "bull", "line": "第二句。"},
-        {"speaker": "bear", "line": "第三句。", "emotion": "反驳"},
+        {"speaker": "bull", "line": "第二句。", "emotion": "坚守"},
+        {"speaker": "bull", "line": "第三句。"},
+        {"speaker": "bear", "line": "第四句。", "emotion": "反驳"},
     ]})
 
     jobs = agent._provider.jobs
-    assert jobs[0].instruction == ("基础演绎指令；这一句用惊讶、难以置信的语气，"
-                                   "像刚看到一个意外的数字")
-    assert jobs[1].instruction == "基础演绎指令"
-    assert jobs[2].instruction is None  # bear 未开 supports_instruction，通道关闭
+    assert jobs[0].instruction == jobs[1].instruction == jobs[2].instruction == "基础演绎指令"
+    assert jobs[3].instruction is None  # bear 未开 supports_instruction，通道关闭
+
+
+def test_tts_agent_emotion_directives_are_opt_in(tmp_path, monkeypatch):
+    """旧强表演风格（情绪短语进指令）改为显式 opt-in，且带声线锚句兜底。"""
+    config = {
+        "output": {"dir": str(tmp_path)},
+        "characters": {"bull": {"name": "多头", "voice_id": "v_bull",
+                                 "supports_instruction": True,
+                                 "instruction": "基础演绎指令"}},
+        "tts": {"trim_silence": False, "emotion_in_instruction": True},
+    }
+    agent = TTSAgent(config, tts_provider=_RecordingProvider())
+    monkeypatch.setattr(agent, "_audio_duration", lambda _path: 1.0)
+    agent.synthesize({"turns": [
+        {"speaker": "bull", "line": "第一句。", "emotion": "惊叹"},
+        {"speaker": "bull", "line": "第二句。"},
+    ]})
+
+    jobs = agent._provider.jobs
+    assert jobs[0].instruction == ("基础演绎指令；无论情绪如何变化，音色和声线保持完全一致；"
+                                   "这一句用惊讶、难以置信的语气，像刚看到一个意外的数字")
+    assert jobs[1].instruction == "基础演绎指令"   # 无情绪不加短语
+
+
+def test_tts_agent_emotion_modulates_prosody_not_instruction(tmp_path, monkeypatch):
+    """情绪默认走语速/音调数值（EMOTION_PROSODY）：只动节奏，不碰声线。"""
+    config = {
+        "output": {"dir": str(tmp_path)},
+        "characters": {"bull": {"name": "多头", "voice_id": "v_bull",
+                                 "supports_instruction": True,
+                                 "instruction": "基础演绎指令",
+                                 "speed": 1.0, "pitch": 1.0}},
+        "tts": {"trim_silence": False},
+    }
+    agent = TTSAgent(config, tts_provider=_RecordingProvider())
+    monkeypatch.setattr(agent, "_audio_duration", lambda _path: 1.0)
+    agent.synthesize({"turns": [
+        {"speaker": "bull", "line": "一句平实的陈述。", "emotion": "平述"},
+        {"speaker": "bull", "line": "一句惊讶的发现。", "emotion": "惊叹"},
+        {"speaker": "bull", "line": "一句笃定的判断。", "emotion": "坚守"},
+        {"speaker": "bull", "line": "一句锋利的反驳。", "emotion": "反驳"},
+    ]})
+
+    plain, marvel, firm, rebut = agent._provider.jobs
+    # 声线锚定：四句指令一字不差
+    assert marvel.instruction == firm.instruction == rebut.instruction == plain.instruction
+    # 情绪只体现在数值上：惊叹提亮、坚守压低放慢、反驳更快更扬
+    assert marvel.pitch > plain.pitch > firm.pitch
+    assert rebut.speed > plain.speed > firm.speed

@@ -231,7 +231,7 @@ class DebateOnlyTensionGuardTests(unittest.TestCase):
         shared = (
             "内容要求（重要）",                       # _content_rules
             "每轮输出一个 emotion 字段",              # _content_rules 8b
-            "**“这门生意”这四个字全片都不许出现**",   # _shared_opening_rules
+            "不要用「XX 这门生意」这种把公司缩成一个名词的说法",  # _shared_opening_rules
             "开场三秒（重要）",                       # _shared_opening_rules
             "叙事铺排（重要）",                       # _shared_opening_rules
         )
@@ -395,7 +395,11 @@ class MonologuePublishTests(unittest.TestCase):
     def test_metadata_generation_works_for_monologue_script(self):
         meta = PublishMetadataGenerator().generate(self._script(), "平安银行", "000001")
         self.assertEqual(meta.title, "平安银行（000001）：靠息差吃饭的生意")
-        self.assertIn("赚中间的息差", meta.description)
+        # 简介是三段式悬念（2026-11-15 P0-3），不是台词「；」硬拼——
+        # 旧断言锁的「赚中间的息差」正是被截断在半句上的转录稿。
+        self.assertIn("低成本存款还能守多久", meta.description)
+        self.assertIn("欢迎评论区聊聊你的看法", meta.description)
+        self.assertNotIn("赚中间的息差", meta.description)
         self.assertIn("息差", meta.tags)
         self.assertIn("不构成投资建议", meta.full_description)
 

@@ -10,9 +10,10 @@ import json
 import re
 from dataclasses import dataclass
 from datetime import date
+from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
-from stocktalk.modules import copy_guard, sharpness
+from stocktalk.modules import copy_guard, opening_guard, sharpness
 from stocktalk.modules.episode_planner import (NUMBER_CAP_ANALOGY,
                                                NUMBER_CAP_ANCHOR)
 from stocktalk.modules.arcs import (Arc, ArcChoice, Beat, MONOLOGUE_SPEAKER,
@@ -39,9 +40,10 @@ Runner = Callable[[Sequence[str], float], str]
 # asking a model for "a 90-second dialogue" reliably overshoots.
 SPEECH_CHARS_PER_SECOND = 4.8
 
-# 片尾风险提示交换轮（2026-10-08 第二版）：一人一句、按个股特征变化。
-# 模板池与挑选逻辑见 stocktalk/modules/risk_exchange.py——有数据才用特征模板，
-# 合格候选按 (代码, 日期) 稳定分散，同一只票同一天可复现、不同票不撞形。
+# 片尾风险提示轮（2026-11-15 第三版）：一轮一句、插在内容收束之前（详见
+# risk_exchange.py docstring 的版本沿革）。模板池与挑选逻辑见
+# stocktalk/modules/risk_exchange.py——有数据才用特征模板，合格候选按
+# (代码, 日期) 稳定分散，同一只票同一天可复现、不同票不撞形。
 # dialogue.risk_exchange: false 可整体关闭。
 RISK_A = "股市有风险"
 RISK_B = "投资需谨慎"
@@ -184,6 +186,12 @@ SENTENCE_BLACKLIST: tuple[tuple[str, str], ...] = (
      "用会计科目开场、一句话报两个数——这是 2026-10-19 真机那期的原话，正是最该消失的开场；改用看得见的东西（产品/渠道/场景）起头"),
     ("批价守住了，再看下一季预收款能不能回流",
      "固定「等下一个信号」的收尾，每期都长成这个形状——收尾按本期叙事线的那条动作收，不预告数据"),
+    ("这价我先上车，这个数我认",
+     "2026-11-15 涨粉复盘：15/20 期开场照抄这句口头禅——上头要靠动作和惊叹表达，"
+     "措辞每期不重样；整句复读第二期就被划走，连「先跟/先接」换皮也不行"),
+    ("先别急着看纸面",
+     "同上：高频开场套式（2/20 命中），它已经从「让观众慢下来」变成了报幕腔——"
+     "想泼冷水就直接用一个具体问题拍过去"),
 )
 
 # 成片时长目标 2-5 分钟（2026-09-20 用户反馈"内容太短、得不到有效启示"）。
@@ -208,11 +216,16 @@ class DialogueConfig:
     # prompt 的**选材与侧重参考**——「这期多讲点什么」。它是提示而非新约束：
     # 合规红线、数据真实性、骨架节拍与字数额度都照旧有效（见 _message_section）。
     message: str = ""
-    # 片尾风险提示交换轮（2026-10-08 第二版）：false = 关闭。
+    # 片尾风险提示轮（2026-11-15 第三版）：false = 关闭。
     risk_exchange: bool = True
     # 内容形态（2026-10-24）。debate 走 DialogueGenerator，monologue 走
     # MonologueGenerator——形态决定 prompt、说话人数、片尾风险提示与画面。
     format: str = FORMAT_DEBATE
+    # 开场门禁（2026-11-15 P0-1/P0-5）：口头禅命中 / hook 未过 / 与近几期开场
+    # 同款时重生成一次。false 关闭（省 LLM 调试时用）。见 opening_guard。
+    opening_gate: bool = True
+    # 开场轮转记忆落盘位置；空 = <output.dir>/.opening_rotation.json。
+    opening_ledger: str = ""
 
 
 # 独白形态的默认额度（2026-10-24 用户决策：独白 120-240 秒）。
@@ -220,7 +233,8 @@ class DialogueConfig:
 #   1. 单轮上限 220 字（≈46 秒）。对辩的 80 字是"短交锋"节奏，独白没有对手，
 #      一轮 80 字会变成十几段没人接话的短句，讲不透一件事；220 字正落在
 #      "段落 150-300 字"的中段，超了仍由 _split_line 按句号拆成续轮。
-#   2. risk_exchange 关掉：它是"一人一句接力"的双人机制，独白里没有对方可接，
+#   2. risk_exchange 关掉：它是「与对方对调」的收束二连（风险轮说话人取
+#      最后一轮的对方），独白形态下没有第二个人可接，
 #      硬拼只会让同一个人念两句免责声明。片尾画面的合规提示照常打在 outro 卡上。
 MONOLOGUE_DEFAULTS = {
     "min_duration_seconds": 120,
@@ -264,6 +278,8 @@ class DialogueGenerator:
                                      source.get("risk_exchange", source.get("risk_line", True)))
                           not in (False, "", None, "false", "0"),
             format=self.format,
+            opening_gate=str(source.get("opening_gate", True)).lower() not in ("false", "0", "no", ""),
+            opening_ledger=str(source.get("opening_ledger") or "").strip(),
         )
         # 单轮上限随形态变：独白允许长段落（220），对辩仍卡在 150 以内
         # （"一人一口气 27 秒太闷"是 2026-09-22 的实测结论，不随独白放宽）。
@@ -284,6 +300,17 @@ class DialogueGenerator:
         self.speakers = ((MONOLOGUE_SPEAKER,) if self.format == FORMAT_MONOLOGUE
                          else resolve_speakers(self.characters))
         self._active: ArcChoice | None = None
+        # 开场轮转记忆（2026-11-15）：只在显式配置了 opening_ledger 时启用，
+        # 相对路径挂到 output.dir 下。不配置 = 只做单期门禁（口头禅/hook），
+        # 不做跨期防复读——测试与一次性脚本不落盘。
+        ledger = str(source.get("opening_ledger") or "").strip()
+        if ledger:
+            ledger_path = Path(ledger)
+            if not ledger_path.is_absolute():
+                ledger_path = Path(str((config or {}).get("output", {}).get("dir") or ".")) / ledger_path
+            self._opening_ledger = str(ledger_path)
+        else:
+            self._opening_ledger = ""
         # LLM 传输层：显式注入 > 旧 runner 契约（包成百炼 client，测试无需改动）
         # > 按配置走工厂（dialogue.provider，默认 bailian-cli）。
         if llm is not None:
@@ -325,15 +352,44 @@ class DialogueGenerator:
         if episode_plan:
             payload["episode_plan"] = episode_plan
         choice = self.select_arc(payload)
-        try:
-            raw = self._llm.chat(self._system_prompt(choice.arc),
-                                 self._user_prompt(payload, choice.arc),
-                                 max_tokens=self.config.max_tokens,
-                                 temperature=self.config.temperature,
-                                 timeout=self.config.timeout_seconds)
-        except ProviderError as exc:
-            raise DialogueGenerationError(str(exc)) from exc
-        return self._normalize_script(self._decode_response(raw), payload, choice, episode_plan)
+        # 开场门禁（2026-11-15 P0-1/P0-5）：口头禅/hook/同款开场不合格就重生成
+        # 一次；第二次仍不合格带警告放行——闸提概率，不把生成变成偶发失败点。
+        attempts = 2 if self.config.opening_gate else 1
+        rotation = (opening_guard.recent_openings(self._opening_ledger)
+                    if (self.config.opening_gate and self._opening_ledger) else [])
+        base_feedback = (("最近几期的开场如下，句式、措辞、口头禅都不许再重复："
+                          + "；".join(f"「{line[:24]}」" for line in rotation)) if rotation else "")
+        feedback, issues, script = base_feedback, [], None
+        for attempt in range(attempts):
+            try:
+                raw = self._llm.chat(self._system_prompt(choice.arc),
+                                     self._user_prompt(payload, choice.arc, feedback=feedback),
+                                     max_tokens=self.config.max_tokens,
+                                     temperature=self.config.temperature,
+                                     timeout=self.config.timeout_seconds)
+            except ProviderError as exc:
+                raise DialogueGenerationError(str(exc)) from exc
+            script = self._normalize_script(self._decode_response(raw), payload, choice, episode_plan)
+            if not self.config.opening_gate:
+                break
+            issues = opening_guard.problems(script, rotation)
+            if not issues:
+                break
+            if attempt + 1 < attempts:
+                feedback = base_feedback + ("；" if base_feedback else "") + \
+                    "上一次生成的开场不合格（这次必须换写法避开）：" + "；".join(issues)
+        if script is None:  # pragma: no cover - attempts >= 1 恒成立，留给未来改动
+            raise DialogueGenerationError("no script generated")
+        if issues:
+            script.setdefault("arc_notes", []).append(
+                "[开场门禁] 两次生成仍未达标（已放行）：" + "；".join(issues))
+        if self.config.opening_gate and self._opening_ledger:
+            first_line = next((str(t.get("line") or "").strip()
+                               for t in script.get("turns", ())
+                               if isinstance(t, Mapping) and str(t.get("line") or "").strip()), "")
+            opening_guard.remember(self._opening_ledger, code=str(script.get("stock_code") or ""),
+                                   opening=first_line, day=date.today().isoformat())
+        return script
 
     def _system_prompt(self, arc: Arc | None = None) -> str:
         """对辩形态的系统提示（单人独白见 MonologueGenerator）。
@@ -379,7 +435,7 @@ class DialogueGenerator:
         return (
             "\n态度与交锋（重要）：这是两个人在争一件事，不是两个人轮流念稿。\n"
             "· 多头「兴冲冲」——**情绪先于论证**：看到积极信息先有反应，忍不住当场下判断、给动作"
-            "（「这价我先上车」「这个数我认」），而不是先把账念一遍再慢慢推理；"
+            "（拍板、坐不住、当场要跟这类动作，措辞每期必须换新的），而不是先把账念一遍再慢慢推理；"
             "被打断、被泼冷水时先找补或嘴硬（「你先等我说完」「可这块才刚起来啊」），"
             "不是每次被问就点头——认输只留给片尾那一处反转。允许抢话，允许半句话被打断"
             "（「这个毛利——」「你先听我说完」）。\n"
@@ -403,12 +459,14 @@ class DialogueGenerator:
             "全片至少两次这样「引用→反驳→回击」的往返还手，不要出现两人各讲一个话题、"
             "谁也没搭理谁的局面。\n"
             "· 必须有一个激变点：全片至少一处真实的**观点反转或立场激变**——"
-            "一方被对方摆出的具体数字说服而改口（「……这我认，我上一句得收回来」），"
-            "或被逼到立场升级（「好，那我更要问一句……」）。反转必须由**具体的数字或事实**掰过来，"
-            "并且让观众听得出是哪一个数字掰的；不许用一句「你说得对」敷衍过去了事。\n"
+            "一方被对方摆出的具体数字说服而改口，或被逼到立场升级。反转必须由**具体的数字或事实**掰过来，"
+            "并且让观众听得出是哪一个数字掰的；改口、让步的说法每期都要换新，"
+            "不许用「这我认，我上一句得收回来」「你说得对」这类整句套话敷衍（2026-11-17 复盘："
+            "「这我认，我上一句得收回来」被模型当成模板连用了好几期）。\n"
             "· 矛盾感留到片尾：允许僵持、话不投机、被打断后抢回话头；争到最后可以仍不完全一致，"
             "把分歧钉在最后一个具体问题上，不要收在共识上。\n"
-            "· 热情不等于吹票：上头是**他自己的动作**（「我先上车」），不是叫观众买——"
+            "· 热情不等于吹票：上头是**他自己的动作**（拍板、坐不住、当场要跟——说法每期换，"
+            "禁止整句口头禅复读），不是叫观众买——"
             "不许承诺收益、不许预测涨跌、不许喊别人买；动作只用口语说法，"
             "不要用「加仓／减仓／清仓／建仓」这类仓位词——它们会被合规层换成「调整关注重点」这种说法，"
             "句子直接散掉；也不要用「满仓／锁仓／底仓／梭哈」——这几个在台词层**根本没人拦**，"
@@ -493,9 +551,9 @@ class DialogueGenerator:
         return (
             "\n反套话（重要）：每一期的开场都必须是新的。禁止把这些当开场套式——"
             "“咱们先看……”整个句式（不管宾语换成什么，2026-09-27 实锤：“咱们先看谁在给XX掏钱”只换了宾语、骨架照旧）、"
-            "“说白了”“这家公司靠什么赚钱”式的设问、“XX 这门生意”式的名词解释。"
-            "**“这门生意”这四个字全片都不许出现**：它是把公司抽象成一个名词摆上台面，"
-            "观众记住的是这个说法而不是这家公司；要讲生意就直接说是谁在掏钱、钱卡在哪一环、谁替谁垫钱。"
+            "“说白了”“这家公司靠什么赚钱”式的设问、把公司抽象成一个名词摆上台面的解释。"
+            "**不要用「XX 这门生意」这种把公司缩成一个名词的说法**——观众记住的会变成这个说法，"
+            "而不是这家公司；要讲就直接说是谁在掏钱、钱卡在哪一环、谁替谁垫钱。"
             "同样禁止“把某某聊透了”“讲透了”“今天就聊到这里”这类对节目自己的总结——"
             "它们一旦出现在片尾，等于把最后一轮让给自夸，观众拿到的是零信息。"
             "这些意思可以在正文里讲，但第一句必须从具体事实、具体数字或一个反直觉的判断切入，"
@@ -657,6 +715,47 @@ class DialogueGenerator:
             f"知识点要长在{where}自然讲出来，禁止开科普小课堂（「我们来了解一下」这类句式一律不要）。"
         )
 
+    def _voice_rules(self) -> str:
+        """话术风格锚点（2026-11-17）：从「禁令」改「示范」，治口水词同质化。
+
+        用户反馈「这门生意」「辛苦钱」经常出现、产出像工业流水线没有灵魂。根因
+        不在约束太多，而是约束全是**机制类**（数字/结构/套话禁令），从没给过
+        **用词品味**的正向参照——模型在机制之外自由发挥，就掉进它最顺手的
+        财经口水词库（辛苦钱、赚血汗钱、这门生意、摆在这儿）。
+
+        这里不新增禁令（再加一条「禁止辛苦钱」只会越禁越硬），而是给一组
+        正反对照，让模型照着「有灵魂」的写法去写，而不是被「不许」牵着走。
+        """
+        return (
+            "\n话术风格（重要）：像两个真懂行的人聊天，不要像财经号念稿。"
+            "宁可说「这活儿的钱全压在应收账款里，账上好看兜里是空的」，"
+            "也不要说「这生意赚的是辛苦钱」——后者是全网财经号的通用口水词，"
+            "换个公司、换一期都能套，观众一听就知道是套模板。"
+            "少用「辛苦钱/血汗钱」「说穿了」「摆在这儿」「老生常谈」这类"
+            "放哪家公司都能套的空词；多讲这家公司独有的事实：谁替谁垫钱、钱卡在哪个"
+            "环节、哪一批货压在库里、哪一个客户占了一半应收。"
+            "具体的坏话比正确的空话有灵魂——「毛利率三年掉十七个点」比「毛利率承压」"
+            "能让人记住一百倍。\n"
+        )
+
+    def _title_rules(self) -> str:
+        """发布标题的写法规则（2026-11-15 P0-2：研报体标题没人点）。
+
+        旧 schema 要求「点出看点或行业位置」，长出来的就是「…的溢价与账本博弈」
+        这类研报标题——信息对但没有点击欲。这里换成三种流量写法 + 双候选，
+        程序按 _title_score 挑分最高的。
+        """
+        return (
+            "\n标题要求（发布标题，决定观众点不点进来）：格式「股票名（代码）：标题句」，"
+            "冒号后不超过 22 字，三种写法任选其一，**相邻几期换着用**："
+            "① 反差数字句——把本期最拧的一个对比写进标题（如「毛利率三年掉了十七个点，股价反而涨了」）；"
+            "② 具体追问句——追一笔钱、一批货、一个客户的去向（如「钱到底去哪了？」）；"
+            "③ 散户代入句——从看盘人的视角命名（如「散户最该盯的一张表」）。"
+            "禁止研报腔词：博弈、大考、拉锯、变局、错位、阵痛、突围、溢价——它们让标题像研报封面，"
+            "信息流里没人点。title_candidates 给两个与 title **不同写法**的候选（同一套写法限制），"
+            "程序会挑分最高的那个当发布标题。\n"
+        )
+
     def _interactive_fields(self, include_sides: bool = True) -> str:
         """hook / question（/ sides）互动字段的产出规则。
 
@@ -694,7 +793,8 @@ class DialogueGenerator:
             "它是纯上屏元素（不进配音台词），所以数字直接写阿拉伯写法。\n"
         )
 
-    def _user_prompt(self, payload: Mapping[str, Any], arc: Arc | None = None) -> str:
+    def _user_prompt(self, payload: Mapping[str, Any], arc: Arc | None = None,
+                     *, feedback: str = "") -> str:
         choice = self._choice_for(arc, payload)
         min_s, max_s = self.config.min_duration_seconds, self.config.max_duration_seconds
         min_chars = int(min_s * SPEECH_CHARS_PER_SECOND)
@@ -710,7 +810,9 @@ class DialogueGenerator:
         minutes = (f"{self._minutes(min_s)}-{self._minutes(max_s)} 分钟" if max_s > min_s
                    else f"{self._minutes(max_s)} 分钟")
         beat_keys = beats_by_key(choice.beats)
-        schema = {"title": "股票名（代码）：一句话点出这家公司的看点或它在行业里的位置", "turns": [
+        schema = {"title": "股票名（代码）：标题句（冒号后≤22字，见标题要求）",
+                  "title_candidates": ["标题写法B（与 title 不同写法）", "标题写法C（第三种写法）"],
+                  "turns": [
             {"speaker": "bull", "line": f"一句完整自然的话，{floor_chars} 到 {self.config.max_line_chars} 字；"
                                         f"说不下就拆成两轮说；短回应可以只有 2-8 字",
              "beat": f"骨架节拍，只能取：{'/'.join(beat_keys)}",
@@ -737,16 +839,14 @@ class DialogueGenerator:
                if max_s <= 90 else
                "这是一条长视频，不是快讯：观众交出的是几分钟的注意力，每一轮都要让他多懂一点它是怎么赚钱的。")
             + "多轮短交锋，别让一个人一口气讲太久：一轮只讲一个点，讲完就把话头递出去。"
-            # 态度分家与正面交锋（WAN-29）：系统提示里写过一遍，这里在「今天的正文
-            # 该怎么写」这一层再收一次口——模型对紧挨着数据 JSON 的这几句最敏感。
-            "两人的态度要分家（多头热、空头冷）：除开场轮和几个字的短回应之外，每次实质发言都先接住对方刚说的原话或数字再反驳，"
-            "不许写成两段平行独白；全片必须有一次由具体数字掰过来的观点反转，并且把分歧留到片尾。"
-            "但每一轮仍必须有新信息、新角度或新动作，严禁把同一个意思换句话再说一遍；"
-            "数字不再按轮计：它出现在对撞的关键处（谁在掏钱、代价压在哪、对方哪句站不住），"
-            "允许某一轮一个数字都没有，但凡念出来的数字都要被对方接过去用或当场质疑——"
-            "禁止「营收 12.3 亿，同比增长 18%」这种把报表念一遍、没人接的句子。"
+            # 态度分家与正面交锋已在系统提示的「态度与交锋」里写全，这里不再重复
+            # （2026-11-17：user prompt 与 system 大段重复是「工业流水线感」的来源
+            # 之一——模型读到两遍同样的禁令，只会更死板）。只留一句收口。
+            "按系统提示里的「态度与交锋」写：多空态度分家、实质发言先接话再反驳、"
+            "至少一次由具体数字掰过来的观点反转，分歧留到片尾。"
             "素材和数据多就往上限展开，素材少就收得住（不低于下限），不要为凑时长注水，也不要意犹未尽地草草收尾。"
             + self._audience_rules()
+            + self._voice_rules()
             + f"本期必须按这条骨架展开（节拍顺序与分工见系统提示，第 1 拍就是开场）：{'→'.join(beat_keys)}。"
             "节拍只进不退，每拍大致对应一轮：closing 是唯一收束拍，只允许最后一轮、"
             "由上一轮说话人的对方用一句短回应（不超过25字）完成；骨架各拍走完后不得再新增论证轮——"
@@ -755,8 +855,8 @@ class DialogueGenerator:
             "涉及管理层时只能用公司档案里给出的姓名与职务，不评价个人能力、不推测动机；公司动作只说新闻里写了的，并带上出处和时间。"
             "收尾必须是对话收束，不要一方独白结束：最后一拍（closing）由上一拍说话人的对方用一句短回应接住"
             "——一句认可、一句保留，或把最关键的分歧再钉一次。"
-            "「股市有风险」「投资需谨慎」这两句固定风险提示由程序在收尾之后以一人一句的方式追加，"
-            "不要把它们（或同义说法）写进任何台词。"
+            "「股市有风险」「投资需谨慎」这句固定风险提示由程序以一轮短句插在收尾之前，"
+            "不要把它（或同义说法）写进任何台词。"
             "收尾句式每期必须换（2026-09-29 复盘：十期里七期都是「那就看下一期/下一份财报……」收尾，"
             "观众会腻）：禁止再把「那就看下一…」「咱们看下一期……」当结语模板。要盯的变量会打在片尾画面上，"
             "台词点到变量本身即可，说法要从当期的分歧里自然长出来，例如：「行，那就拿交付量说话。」"
@@ -768,6 +868,8 @@ class DialogueGenerator:
             # 数据 JSON 仍留在提示最尾部，模型的"最后读到的是数据"不变。
             + self._message_section()
             + self._episode_section(payload)
+            + self._title_rules()
+            + (f"\n开场整改要求（这次必须换写法避开）：{feedback}\n" if feedback else "")
             + "输出结构必须匹配：\n"
             + f"{json.dumps(schema, ensure_ascii=False)}\n股票数据：\n{json.dumps(payload, ensure_ascii=False, separators=(',', ':'))}"
         )
@@ -873,7 +975,7 @@ class DialogueGenerator:
         entries: list[Mapping[str, Any]] = []
         notes: list[str] = []
         cursor = 0
-        # 片尾风险提示交换轮是双人机制（一人一句接力），独白形态下没有第二个人可接，
+        # 片尾风险提示轮的说话人取「与最后一轮对调」的角色，独白形态下没有第二个人，
         # 且 dialogue.monologue.risk_exchange 默认关闭——这里再挡一层，避免某处配置
         # 单独把它打开后，同一个声音念两句免责声明（合规提示仍打在片尾画面卡上）。
         append_risk = (bool(self.config.risk_exchange) and bool(raw_turns)
@@ -936,18 +1038,19 @@ class DialogueGenerator:
                               "character_name": self._character(speaker, speaker, "")["name"]})
                 entries.append(entry)
         # 章节分配的轮数基准必须是「最终成片有几轮」：超长台词会被 _split_line 拆成
-        # 续轮，拿模型给的轮数当基准时，片尾两轮的 index 会溢出 total，末章判定的
-        # {total, total-1} 匹配不上——收尾两句会落进 R4 章，R5 全片 0 轮，规划好的
-        # timeline 图一次都不出现。片尾风险提示交换轮是程序追加的，同样要算进来，
+        # 续轮，拿模型给的轮数当基准时，片尾轮的 index 会溢出 total，末章判定的
+        # {total, total-1} 匹配不上——收尾会落进 R4 章，R5 全片 0 轮，规划好的
+        # timeline 图一次都不出现。片尾风险提示轮是程序追加的，同样要算进来，
         # 算漏了末章也会被正文的倒数第二轮顶掉。
-        total_turns = len(turns) + (2 if append_risk else 0)
-        # 片尾风险提示交换轮（2026-10-08 第二版）：一人一句的接力——「股市有风险」
-        # 由一位角色说出口，「投资需谨慎」由对方接住，像对话的最后一次交锋而不是
-        # 贴在片尾的免责声明。措辞按个股特征（行业/主营/股名）从模板池挑：有数据
-        # 才用特征模板，合格候选按 (代码, 日期) 稳定分散——同一只票同一天可复现，
-        # 不同票、不同日子不撞形（与骨架选择同一哲学）。全程确定性、不烧 LLM：
-        # 合规底线一期都不能漏，也不能押在模型自觉上。说话人按「与最后一轮对调」
-        # 分配，交替感与 TTS 音色切换天然成立；标 short——两句话不值得重画图板。
+        total_turns = len(turns) + (1 if append_risk else 0)
+        # 片尾风险提示轮（2026-11-15 第三版）：一轮一句、插在内容收束之前——
+        # 「丑话说在前头」，节目的最后一句话还给观点（closing 短回应），不是免责
+        # 声明。两个锚点（「股市有风险」「投资需谨慎」）同轮保留；措辞按个股特征
+        # （行业/主营/股名）从模板池挑：有数据才用特征模板，合格候选按 (代码,
+        # 日期) 稳定分散（与骨架选择同一哲学）。全程确定性、不烧 LLM：合规底线
+        # 一期都不能漏，也不能押在模型自觉上。说话人取「与最后一轮对调」的角色，
+        # 形成「他提醒风险 → 对方下结论」的收束二连；标 short——一句话不值得
+        # 重画图板。
         self._risk_choice: dict[str, str] = {}
         if self.config.risk_exchange and turns:
             quote = stock_data.get("quote") if isinstance(stock_data.get("quote"), Mapping) else {}
@@ -955,15 +1058,17 @@ class DialogueGenerator:
             self._risk_choice = build_risk_exchange(stock_data, code=risk_code,
                                                     day=date.today().isoformat())
             last_speaker = turns[-1]["speaker"]
-            first_speaker = next((name for name in self.speakers if name != last_speaker),
-                                 last_speaker)
-            for offset, (speaker, line) in enumerate(
-                    ((first_speaker, self._risk_choice["a"]), (last_speaker, self._risk_choice["b"]))):
-                turns.append({"speaker": speaker, "line": line,
-                              "beat": "closing", "short": True, "visual": [],
-                              "emotion": "平述",
-                              "character_name": self._character(speaker, speaker, "")["name"]})
-        # 章节标记统一在这里打：此时轮数已经定死（超长台词的续轮、片尾两轮都在里面），
+            risk_speaker = next((name for name in self.speakers if name != last_speaker),
+                                last_speaker)
+            # 单轮剧本（畸形/测试场景）没有「倒二位」：追加到末尾，绝不插到开头
+            # ——第一轮是开场钩子/首帧，不能被风险提示污染。
+            position = len(turns) - 1 if len(turns) >= 2 else len(turns)
+            turns.insert(position, {
+                "speaker": risk_speaker, "line": self._risk_choice["line"],
+                "beat": "closing", "short": True, "visual": [],
+                "emotion": "平述",
+                "character_name": self._character(risk_speaker, risk_speaker, "")["name"]})
+        # 章节标记统一在这里打：此时轮数已经定死（超长台词的续轮、片尾风险轮都在里面），
         # index 与 total 用的是同一个基准，末章判定在 0～N 次拆行下都成立。
         # 按"成片实际有几句"分章、不按"模型逻辑上有几轮"，所以**同一句被拆成两段时
         # 前后半段会落进相邻两章**——这是刻意的：观众听到的是句子，换图就是转场。
@@ -976,7 +1081,7 @@ class DialogueGenerator:
         quote = stock_data.get("quote") if isinstance(stock_data.get("quote"), Mapping) else {}
         code, name = str(stock_data.get("code") or quote.get("code") or ""), str(quote.get("name") or stock_data.get("code") or "股票")
         char_count = sum(len(turn["line"]) for turn in turns)
-        script = {"stock_code": code, "stock_name": name, "title": self._clean_title(response.get("title"), name, code),
+        script = {"stock_code": code, "stock_name": name, "title": self._pick_title(response, name, code),
                 "turns": turns,
                 # 内容形态（debate / monologue）：剧本 JSON 是渲染与审查的契约，
                 # 画面要据此决定"几人卡司、要不要双栏 CTA"，不能只看 config
@@ -992,12 +1097,15 @@ class DialogueGenerator:
                 "sides": self._clean_sides(response.get("sides")),
                 # 首帧/封面冲突数字（上屏专用）；模型没给就 None，画面不硬凑
                 "spotlight": self._clean_spotlight(response),
-                # 片尾风险提示交换（程序追加的两轮）：留痕供审查页核对「这期为什么是这句」
+                # 片尾风险提示轮（程序追加）：留痕供审查页核对「这期为什么是这句」
                 **({"risk_exchange": self._risk_choice} if self._risk_choice else {}),
                 "char_count": char_count,
                 # 按实测语速换算的自估时长。长片最容易出的偏差是模型多写几百字，
                 # 把它留在结果里，pipeline 就能在渲染前提醒（而不是渲完才发现超长）。
                 "estimated_seconds": round(char_count / SPEECH_CHARS_PER_SECOND, 1)}
+        # 合集与标签提示（2026-11-15 P1-3 / P0-4）：发布层取词用，不进配音。
+        script["series"] = self._series_label(script)
+        script["industry"], script["concepts"] = self._tag_hints(stock_data)
         script["quality"] = self._style_audit(turns, on_screen=self._on_screen_texts(script))
         for flag in script["quality"]["flags"]:
             notes.append(f"[文风检查] {flag}")
@@ -1046,7 +1154,7 @@ class DialogueGenerator:
         rid = str(entry.get("round_id") or "")
         selected = next((r for r in rounds if str(r.get("id")) == rid), None)
         if selected is None:
-            # 末章只给片尾两轮（风险提示交换轮），不按剩余 turn 均分。
+            # 末章只给片尾收束段两轮（风险提示轮 + 内容收束轮），不按剩余 turn 均分。
             body = [r for r in rounds if str(r.get("id")) != "r5_open_verdict"] or rounds
             tail = next((r for r in rounds if str(r.get("id")) == "r5_open_verdict"), None)
             if total > len(rounds) and tail is not None:
@@ -1196,6 +1304,85 @@ class DialogueGenerator:
         return title[:60] or f"{name}（{code}）这家公司怎么看"
 
     @staticmethod
+    def _title_score(title: str) -> int:
+        """标题的确定性打分：问句/反差数字加分，研报腔扣分（2026-11-15 P0-2）。"""
+        body = title.split("：", 1)[-1]
+        score = 0
+        if "？" in body or "?" in body:
+            score += 2
+        has_digit = bool(re.search(r"[0-9０-９一二三四五六七八九十百千万亿两成]", body))
+        contrast = re.search(r"反而|却|跌|涨|掉|翻|缩|崩|蒸发|逆势|居然|竟然|去哪|谁来|不看", body)
+        if has_digit and contrast:
+            score += 2
+        elif has_digit:
+            score += 1
+        if 10 <= len(body) <= 26:
+            score += 1
+        if re.search(r"博弈|大考|拉锯|变局|错位|阵痛|突围|溢价", title):
+            score -= 2
+        return score
+
+    @classmethod
+    def _pick_title(cls, response: Any, name: str, code: str) -> str:
+        """title + title_candidates 里挑分最高的（同分取短的）。"""
+        source = response if isinstance(response, Mapping) else {}
+        pool = [str(source.get("title") or "")]
+        candidates = source.get("title_candidates")
+        if isinstance(candidates, list):
+            pool.extend(str(item or "") for item in candidates)
+        cleaned: list[str] = []
+        for item in pool:
+            text = item.strip()
+            if not text:
+                continue
+            title = cls._clean_title(text, name, code)
+            if title not in cleaned:
+                cleaned.append(title)
+        if not cleaned:
+            return cls._clean_title("", name, code)
+        return max(cleaned, key=lambda item: (cls._title_score(item), -len(item)))
+
+    @staticmethod
+    def _tag_hints(payload: Mapping[str, Any]) -> tuple[str, list[str]]:
+        """发布标签用的行业/概念提示（2026-11-15 P0-4）。
+
+        行业取 F10「所属行业」的细分类（"轻工制造-陶瓷" → "陶瓷"），概念取
+        board 的前三个——交易所/TDX 的真实分类，可被搜索。
+        """
+        f10 = payload.get("f10") if isinstance(payload.get("f10"), Mapping) else {}
+        raw = str(f10.get("所属行业") or "").strip()
+        industry = raw.split("-")[-1].strip() if raw else ""
+        board = payload.get("board") if isinstance(payload.get("board"), Mapping) else {}
+        concepts = [str(x).strip() for x in (board.get("concepts") or []) if str(x).strip()][:3]
+        return industry, concepts
+
+    @staticmethod
+    def _series_label(script: Mapping[str, Any]) -> str:
+        """按本期主论点归到一个合集名（2026-11-15 P1-3）。
+
+        合集是抖音的追更入口：观众看完「现金流排雷」会想翻同系列的其它期。
+        归类只用确定性词面匹配（spotlight/标题/前几轮），不烧 LLM；都不匹配
+        就归「生意拆解」——合集名稳定比精巧重要。
+        """
+        haystack = " ".join([
+            str((script.get("spotlight") or {}).get("label") or ""),
+            str(script.get("title") or ""),
+            *(str(t.get("line") or "") for t in script.get("turns", ())[:6] if isinstance(t, Mapping)),
+        ])
+        rules: tuple[tuple[tuple[str, ...], str], ...] = (
+            (("存货", "库存"), "存货真相"),
+            (("现金流", "应收", "回款", "垫资", "账期"), "现金流排雷"),
+            (("毛利",), "毛利换血"),
+            (("研发", "管线", "专利"), "研发赌局"),
+            (("客户", "订单", "大客户", "集中"), "客户依赖"),
+            (("同行", "竞争", "份额", "排名"), "同行对拆"),
+        )
+        for keys, name in rules:
+            if any(key in haystack for key in keys):
+                return name
+        return "生意拆解"
+
+    @staticmethod
     def _clean_text(value: Any, limit: int) -> str:
         """一句用于片尾的短文案（hook / question），去掉换行、限长。"""
         text = re.sub(r"\s+", " ", str(value or "")).strip()
@@ -1342,7 +1529,7 @@ class MonologueGenerator(DialogueGenerator):
     继承而不是复制整条生成链路：数据压缩、骨架剪枝、数字口播修复、超长拆行、
     章节分配、文风审计、合规审查全部复用——它们与"几个人在说"无关。真正按形态
     分叉的只有三处：谁在说话（prompt 头 + speaker 归一）、怎么收尾（没有对方可
-    接）、片尾风险提示（双人接力轮关掉）。
+    接）、片尾风险提示（对调说话人的收束二连关掉）。
     """
 
     format: str = FORMAT_MONOLOGUE
@@ -1386,7 +1573,8 @@ class MonologueGenerator(DialogueGenerator):
             "必须只输出 JSON，不要 Markdown。"
         )
 
-    def _user_prompt(self, payload: Mapping[str, Any], arc: Arc | None = None) -> str:
+    def _user_prompt(self, payload: Mapping[str, Any], arc: Arc | None = None,
+                     *, feedback: str = "") -> str:
         choice = self._choice_for(arc, payload)
         min_s, max_s = self.config.min_duration_seconds, self.config.max_duration_seconds
         min_chars = int(min_s * SPEECH_CHARS_PER_SECOND)
@@ -1401,7 +1589,9 @@ class MonologueGenerator(DialogueGenerator):
                    else f"{self._minutes(max_s)} 分钟")
         beat_keys = beats_by_key(choice.beats)
         narrator = self._character(MONOLOGUE_SPEAKER, "谈股论金", "")
-        schema = {"title": "股票名（代码）：一句话点出这家公司的看点或它在行业里的位置", "turns": [
+        schema = {"title": "股票名（代码）：标题句（冒号后≤22字，见标题要求）",
+                  "title_candidates": ["标题写法B（与 title 不同写法）", "标题写法C（第三种写法）"],
+                  "turns": [
             {"speaker": MONOLOGUE_SPEAKER,
              "line": f"一段完整自然的话，{floor_chars} 到 {self.config.max_line_chars} 字；"
                      "说不下就拆成下一段",
@@ -1451,6 +1641,8 @@ class MonologueGenerator(DialogueGenerator):
             # 数据 JSON 仍留在提示最尾部，模型的"最后读到的是数据"不变。
             + self._message_section()
             + self._episode_section(payload)
+            + self._title_rules()
+            + (f"\n开场整改要求（这次必须换写法避开）：{feedback}\n" if feedback else "")
             + "输出结构必须匹配：\n"
             + f"{json.dumps(schema, ensure_ascii=False)}\n股票数据：\n{json.dumps(payload, ensure_ascii=False, separators=(',', ':'))}"
         )

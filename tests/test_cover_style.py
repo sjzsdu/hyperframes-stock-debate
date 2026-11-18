@@ -163,6 +163,24 @@ def test_debate_cover_is_untouched(tmp_path: Path) -> None:
     assert 'data-style="monologue"' not in shown
 
 
+def test_debate_cover_shows_the_two_names(tmp_path: Path) -> None:
+    """人设上封面（2026-11-15 P1-1）：信息流缩略图里要能看到「谁 × 谁」。"""
+    script = dict(DEBATE_SCRIPT)
+    script["turns"] = [
+        {"speaker": "bull", "line": "品牌与产能是硬底盘。", "character_name": "股市新手"},
+        {"speaker": "bear", "line": "批价一松估值就要退。", "character_name": "股市老登"},
+    ]
+    shown = body(html(tmp_path, script))
+    assert "股市新手 × 股市老登 · 只看生意与数据" in shown
+
+
+def test_debate_cover_series_tag_comes_first(tmp_path: Path) -> None:
+    """合集名占话题行第一个位置（2026-11-15 P1-3）。"""
+    script = dict(DEBATE_SCRIPT, series="现金流排雷")
+    shown = body(html(tmp_path, script))
+    assert "#现金流排雷" in shown
+
+
 def test_monologue_cover_keeps_the_section_rail(tmp_path: Path) -> None:
     """几节、讲多久、一个人讲完——独白封面的身份行。"""
     page = html(tmp_path, MONOLOGUE_SCRIPT)

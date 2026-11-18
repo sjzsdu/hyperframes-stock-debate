@@ -1,14 +1,20 @@
-"""片尾风险提示交换轮的契约测试（2026-10-27 WAN-27）。
+"""片尾风险提示轮的契约测试（2026-11-15 第三版）。
 
 这个模块的 docstring 一直写着"上线前有断言兜底（tests/test_risk_exchange.py）"，
-但这个文件此前并不存在。现在补上，因为它是**用户点名那两句的直接产源**：
-片尾这两轮由程序确定性追加，每期必念，模板写错就是整季复读。
+但这个文件此前并不存在。现在补上，因为它是**用户点名反感的片尾句的直接产源**：
+片尾这轮由程序确定性追加，每期必念，模板写错就是整季复读。
 
-守四件事：
-1. 合规锚点一句都不能少（这是底线，句式怎么变都要有「股市有风险」「投资需谨慎」）；
+版本背景：2026-10-08 两轮「一人一句接力」→ 2026-10-27 WAN-27 重写句池 →
+2026-11-15 用户反馈「听多了有点反感这个结尾」，两轮接力形态退役，改一轮一句、
+插在内容收束之前（详见 risk_exchange.py docstring）。
+
+守五件事：
+1. 合规锚点一句都不能少（这是底线，句式怎么变都要在同一轮里有「股市有风险」
+   「投资需谨慎」）；
 2. 模板池干净：不出现套话，尤其不出现「这门生意」「把…聊透了」（回归哨兵）；
-3. 特征模板占主导、同票同日可复现（原有的"不千篇一律"设计要求）；
-4. 运行时闸门真的会拦：往池子里塞一条含套话的模板，`build` 不会选中它。
+3. 被点名反感的句式不复辟：「账/数字/分歧摆在这儿」族（2026-11-15 退役）；
+4. 特征模板占主导、同票同日可复现（原有的"不千篇一律"设计要求）；
+5. 运行时闸门真的会拦：往池子里塞一条含套话的模板，`build` 不会选中它。
 """
 
 from __future__ import annotations
@@ -34,17 +40,17 @@ FILL = {"industry": "食品饮料与酿酒", "item": "其他系列酒产品", "n
 def _rendered() -> list[str]:
     sentences: list[str] = []
     for exchange in EXCHANGES:
-        for text in (exchange.a, exchange.b):
-            for key, _ in TRAITS:
-                text = text.replace(f"{{{key}}}", FILL.get(key, ""))
-            sentences.append(text)
+        text = exchange.line
+        for key, _ in TRAITS:
+            text = text.replace(f"{{{key}}}", FILL.get(key, ""))
+        sentences.append(text)
     return sentences
 
 
 def test_every_template_keeps_the_compliance_anchors() -> None:
     for exchange in EXCHANGES:
-        assert RISK_A in exchange.a, exchange.id
-        assert RISK_B in exchange.b, exchange.id
+        assert RISK_A in exchange.line, exchange.id
+        assert RISK_B in exchange.line, exchange.id
 
 
 def test_templates_never_name_the_phrases_the_user_called_out() -> None:
@@ -52,6 +58,16 @@ def test_templates_never_name_the_phrases_the_user_called_out() -> None:
     joined = "\n".join(_rendered())
     assert "这门生意" not in joined
     assert "聊透" not in joined
+
+
+def test_retired_signoff_family_never_comes_back() -> None:
+    """「X摆在这儿」族是 10-27 重写的产物，20 天就被用户听腻（2026-11-15 反馈）。
+
+    「账/数字/分歧摆在这儿」三兄弟句式寿命到头了，列进哨兵防止以后手滑复辟。
+    """
+    joined = "\n".join(_rendered())
+    assert "摆在这儿" not in joined
+    assert "摆在这里" not in joined
 
 
 def test_template_pool_is_free_of_cliches_after_placeholders_are_filled() -> None:
@@ -88,16 +104,14 @@ def test_thin_data_falls_back_to_generic_templates_instead_of_forcing_a_trait() 
 
 def test_a_cliche_written_into_a_new_template_is_dropped_at_runtime() -> None:
     """运行时闸门：以后有人往池子里加一句套话，它不会被念出来。"""
-    bad = RiskExchange("regression", "聊完全部生意，股市有风险。",
-                       "投资需谨慎，先看懂再谈其他。")
+    bad = RiskExchange("regression", "聊完全部生意，股市有风险，投资需谨慎。")
     assert _format(bad, RICH) is None
-    clean = RiskExchange("fine", "账摆在这儿，股市有风险。", "投资需谨慎，答案自己去核。")
+    clean = RiskExchange("fine", "丑话说在前头，股市有风险，投资需谨慎。")
     assert _format(clean, RICH) is not None
 
 
 def test_overlong_template_is_dropped() -> None:
-    long_one = RiskExchange("long", "这一句故意写得非常非常长超过了一行字幕的上限，股市有风险。",
-                            "投资需谨慎。")
+    long_one = RiskExchange("long", "这一句故意写得非常非常长超过了一行字幕的上限，股市有风险，投资需谨慎。")
     assert _format(long_one, RICH) is None
 
 

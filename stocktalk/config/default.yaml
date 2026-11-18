@@ -75,12 +75,19 @@ dialogue:
   # 数据真实性要求，也改不了骨架节拍与字数额度（见 dialogue_generator._message_section）。
   # 写在这里的值对每次运行都生效：守护进程（-m 不会跟着子进程走）只能靠它。
   message: ""
-  # 片尾风险提示交换轮（2026-10-08 第二版）：一人一句的接力——「股市有风险」
-  # 一位角色说、「投资需谨慎」对方接。措辞按个股特征（行业/主营/股名）从
-  # stocktalk/modules/risk_exchange.py 的模板池挑：有数据才用特征模板，
-  # 合格候选按 (代码, 日期) 稳定分散——同一只票同一天可复现，不同票不撞形。
-  # 同时打在片尾互动图板与收尾卡上。false 关闭口播轮（画面提示仍在）。
-  risk_exchange: true
+  # 片尾风险提示（2026-11-17 第四版）：口播轮默认关闭——固定格式的「XX，股市
+  # 有风险，投资需谨慎」结尾被听腻了，结尾让位给模型写的精彩收束。合规底线由
+  # 画面三处兜底（outro 卡「股市有风险，投资需谨慎」小字、CTA 图板脚注、发布
+  # 简介的免责声明），不依赖口播轮，所以关掉不违规。
+  # true 可开回口播轮（模板池见 stocktalk/modules/risk_exchange.py，按个股特征
+  # 变化）。false = 默认，结尾纯靠内容收束。
+  risk_exchange: false
+  # 开场门禁（2026-11-15 涨粉改造）：开场命中口头禅/套话、hook 判定未过、或与近几期
+  # 开场同款句式时，自动换写法重生成一次（两次都不行带警告放行）。
+  # opening_ledger 是跨期开场轮转记忆（相对 output.dir）：记下每期开场供「防同款」
+  # 比对，并把最近几期的开场喂进提示词当反面参照。留空 = 只做单期检查不落盘。
+  opening_gate: true
+  opening_ledger: .opening_rotation.json
   # Measured end-to-end `bl text chat` latency for a full 2-5 min script is
   # ~90-100s; a short script is faster, but retries each cost the full
   # timeout, so keep a wide margin.
@@ -181,6 +188,15 @@ tts:
   # synthesis.  Raise only for an explicit voice experiment.
   prosody_pitch_delta: 0.02
   prosody_speed_delta: 0.03
+  # 按轮情绪的表达通道（2026-11-15 音色漂移修复）。
+  #   false（默认）—— 情绪只走语速/音调微调（EMOTION_PROSODY 数值），指令每轮
+  #     恒定：豆包 2.0 的 context_texts 是全演绎风格控制，逐轮换「惊讶/顿悟/
+  #     笃定」表演指令会把声线一起重演，同一角色每轮听起来像换了人（603880
+  #     实测女声各轮 F0 中位 240→264 Hz，用户听感「第二轮语调明显变了」）。
+  #   true —— 旧的强表演风格（情绪短语逐轮拼进指令）。表现力更足但音色漂移
+  #     无解（引擎把指令当风格重演，「音色不变」锚句只能兜底不能根治），
+  #     仅限接受「一人多声」的实验。
+  emotion_in_instruction: false
   volume: 1.0
   seed: 20260911
   trim_silence: true
@@ -326,6 +342,18 @@ publish:
     xiaohongshu: vertical
     tencent: horizontal
     baijiahao: horizontal
+  # 抖音快评版（2026-11-15 P1-2 涨粉改造）：正片中段的铺垫（背景展开、行业介绍）
+  # 在信息流陌生人眼里全是划走点，完播率是抖音推流第一杠杆。快评版只留开场钩子 +
+  # 最狠交锋 + 收束风险轮，60-90 秒；台词一字不改、逐轮 wav 复用（时间轴按轮次
+  # 子集重归零），画面走同一条 HyperFrames 管线，封面/元数据/合规全部沿用正片。
+  # 权衡：88s ≥ 1 分钟，保住抖音中视频伙伴计划「原创横屏 ≥1 分钟」的分成资格
+  # （画幅跟随 platform_canvas.douyin）——用 2-5 分钟正片的完播率换分成时长。
+  # 只对超预算的正片动刀：正片本来就在预算内时不另出片（抖音直接发正片）；
+  # 剪辑/渲染失败一律降级正片，不阻断发布。其余平台仍发正片。
+  short_form:
+    enabled: true
+    platform: douyin
+    max_seconds: 88
   # 每个平台上传的超时；浏览器上传 2-8 分钟视频通常 1-3 分钟完成。
   timeout_seconds: 900
   # 上传失败后在同一轮内自动重试的次数。只重试「上传失败」的平台，

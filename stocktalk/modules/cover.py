@@ -288,6 +288,7 @@ class CoverGenerator:
             spark_end_y=spark_end_y,
             hook=hook,
             tags=tags,
+            duel_line=self._duel_line(script),
             # AI 底图（cover.ai）：data URI 或空串。空串时模板不渲染这一层，
             # 出来的封面与加这个功能之前一模一样。
             ai_art=self._ai_art_uri(stock_name or stock_code, stock_code, stock_data,
@@ -449,14 +450,41 @@ class CoverGenerator:
         return self._clip(self.compliance.sanitize(hook), 26)
 
     @staticmethod
+    def _duel_line(script: Mapping[str, Any]) -> str:
+        """封面身份行（2026-11-15 P1-1）：把两个说话人的名字亮进信息流缩略图。
+
+        视频首帧本来就有「谁 × 谁」的角色行，但封面一直只有「多空对话」四个字——
+        信息流里观众先看到的是封面，人设要立住（涨粉要关注「人」），名字必须在
+        这里出现一次。剧本没给 character_name（旧成片重渲）就退回旧文案，字数
+        与旧行一致，版面不会跳。
+        """
+        names: list[str] = []
+        for turn in script.get("turns", ()):
+            if not isinstance(turn, Mapping):
+                continue
+            name = str(turn.get("character_name") or "").strip()
+            if name and name not in names:
+                names.append(name)
+            if len(names) >= 2:
+                break
+        if len(names) >= 2:
+            return f"{names[0]} × {names[1]} · 只看生意与数据"
+        return "多空对话 · 只看生意与数据"
+
+    @staticmethod
     def _tags(script: Mapping[str, Any]) -> list[str]:
         """A short #话题 行 built from real script keywords.
 
         只取 2 个：feed 缩略图里第三个以后的胶囊读不清，纯噪声。
         带数字成分的关键词（「毛利率18.29」）不上封面——缩略图里观众读不懂，
         也不是可检索的话题词（2026-09-26 003040 实锤）。
+        合集名（series）置顶（2026-11-15 P1-3）：它是可追更的系列入口，
+        比单期关键词更值得占封面那一个位置。
         """
         words: list[str] = []
+        series = str(script.get("series") or "").strip()
+        if series:
+            words.append(series)
         for turn in script.get("turns", ()):
             if not isinstance(turn, Mapping):
                 continue

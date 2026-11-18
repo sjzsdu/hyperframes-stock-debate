@@ -33,6 +33,9 @@ SCRIPT: dict[str, Any] = {
         {"speaker": "bull", "line": "现金流和定价权都在", "beat": "生意本质", "visual": ["生意本质", "现金流"]},
         {"speaker": "bear", "line": "估值位置需要看清楚", "beat": "风险追问", "visual": ["估值"]},
     ],
+    "question": "护城河在渠道还是在定价权？",
+    "spotlight": {"label": "经营现金流", "value": "净利20.59亿→流出4.98亿"},
+    "series": "现金流排雷",
     "disclaimers": ["本内容仅供学习交流，不构成投资建议"],
 }
 
@@ -66,12 +69,22 @@ def _isolated_cooldown_state(monkeypatch: pytest.MonkeyPatch) -> None:
 # Metadata generation
 # ---------------------------------------------------------------------------
 
-def test_metadata_uses_script_title_and_hook_lines() -> None:
+def test_metadata_description_is_structured_not_transcript() -> None:
+    """三段式简介（2026-11-15 P0-3）：问题 + 看点 + 合集 + 合规尾，不拼台词。"""
     meta = PublishMetadataGenerator().generate(SCRIPT, "贵州茅台", "600519")
     assert meta.title == "贵州茅台（600519）：现金流里的护城河"
-    assert "现金流和定价权都在" in meta.description
-    assert "估值位置需要看清楚" in meta.description
+    assert meta.description.startswith("护城河在渠道还是在定价权？")
+    assert "本期看点：经营现金流 净利20.59亿→流出4.98亿" in meta.description
+    assert "合集·现金流排雷" in meta.description
+    assert "现金流和定价权都在" not in meta.description  # 台词不进简介
+    assert meta.description.splitlines()[-1].startswith("观点仅代表个人学习交流")
     assert "不构成投资建议" in meta.full_description
+
+
+def test_metadata_description_falls_back_to_hook() -> None:
+    meta = PublishMetadataGenerator().generate(
+        {"turns": [], "hook": "下期看存货能不能压回来"}, "平安银行", "000001")
+    assert meta.description.startswith("下期看存货能不能压回来")
 
 
 def test_metadata_tags_merge_keywords_defaults_and_extra() -> None:
@@ -81,6 +94,24 @@ def test_metadata_tags_merge_keywords_defaults_and_extra() -> None:
     assert "白酒" in meta.tags  # user extra
     assert "A股" in meta.tags  # defaults
     assert len(meta.tags) <= 8
+
+
+def test_metadata_tags_drop_debate_metaphors() -> None:
+    """辩论比喻词不上标签（2026-11-15 P0-4）：没人搜，还拉低专业感。"""
+    script = {"turns": [{"speaker": "bull", "line": "x",
+                         "visual": ["垫资搬砖", "铺路水管", "医药制造"]}]}
+    meta = PublishMetadataGenerator().generate(script, "海正药业", "600267")
+    assert "垫资搬砖" not in meta.tags
+    assert "铺路水管" not in meta.tags
+    assert "医药制造" in meta.tags
+
+
+def test_metadata_tags_prefer_series_and_concepts() -> None:
+    script = dict(SCRIPT, concepts=["白酒概念", "消费白马"], industry="酿酒")
+    meta = PublishMetadataGenerator().generate(script, "贵州茅台", "600519")
+    assert "现金流排雷" in meta.tags   # 合集名优先于台词关键词
+    assert "白酒概念" in meta.tags
+    assert "酿酒" in meta.tags
 
 
 def test_metadata_is_clamped_per_platform() -> None:
