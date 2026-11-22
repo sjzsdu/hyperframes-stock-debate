@@ -1,0 +1,9 @@
+{
+  "fixture": true,
+  "http": 503,
+  "error": {
+    "code": "QUOTA_EXCEEDED",
+    "message": "QUOTA_EXCEEDED: 网关额度不足，请联系维护方。",
+    "outcome_unknown": false
+  }
+}

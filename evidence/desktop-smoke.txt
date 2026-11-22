@@ -1,0 +1,8 @@
+Environment: macOS, Python 3.12.12, pywebview 6.2.1
+Command: .venv/bin/python -m stocktalk.platform.desktop --url http://127.0.0.1:18765 --task b3f670c0c97c408893377edf2ed46983 --smoke-seconds 3
+Exit code: 0
+Stocktalk desktop 0.1.0 API 1: http://127.0.0.1:18765/desktop#b3f670c0c97c408893377edf2ed46983 · read-only
+Desktop loaded: http://127.0.0.1:18765/desktop#b3f670c0c97c408893377edf2ed46983
+After close: GET /health HTTP 200, api_version=1, status=ok, version=0.1.0
+Native screenshot: unverified; computer-use tool could not bind the unbundled Python executable.
+07-desktop-page.png is the shared desktop page in a browser, not a native-window screenshot.

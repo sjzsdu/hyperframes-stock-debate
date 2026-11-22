@@ -1,0 +1,8 @@
+{
+  "http": 200,
+  "body": {
+    "api_version": 1,
+    "status": "ok",
+    "version": "0.1.0"
+  }
+}

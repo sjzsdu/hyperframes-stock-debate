@@ -1,0 +1,9 @@
+{
+  "fixture": true,
+  "http": 503,
+  "error": {
+    "code": "UPSTREAM_AUTH",
+    "message": "UPSTREAM_AUTH: 网关拒绝授权，请检查令牌和授权范围。",
+    "outcome_unknown": false
+  }
+}

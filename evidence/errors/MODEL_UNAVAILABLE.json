@@ -1,0 +1,9 @@
+{
+  "fixture": true,
+  "http": 503,
+  "error": {
+    "code": "MODEL_UNAVAILABLE",
+    "message": "MODEL_UNAVAILABLE: 模型不在可用清单，请刷新并重选。",
+    "outcome_unknown": false
+  }
+}

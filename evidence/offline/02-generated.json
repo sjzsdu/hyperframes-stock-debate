@@ -1,0 +1,74 @@
+{
+  "artifacts": [
+    {
+      "id": "02a510170bef4f8c94318fa7d3abfc9e",
+      "kind": "png",
+      "name": "cover.png",
+      "sha256": "6cc4227c7127e98fd11f7ef9aef23ce109bcd7e7ff0be9769ed6f0f7f7d8f50e",
+      "size": 1508,
+      "task_id": "9f6c07d8884b4919b9bdeb9845c55452"
+    },
+    {
+      "id": "dd81510749ed4469aa31691fbcd8cb31",
+      "kind": "mp4",
+      "name": "fixture.mp4",
+      "sha256": "3485eae58e1655f1f6cdf0a3424eca756b12d9c18a9eddaef2dde95edbaf92f7",
+      "size": 12549,
+      "task_id": "9f6c07d8884b4919b9bdeb9845c55452"
+    },
+    {
+      "id": "6bbaaf07e7c74acd9794c979f31eb141",
+      "kind": "json",
+      "name": "result.json",
+      "sha256": "2e8004e3a2f89b598f2f3a638e2db4e98b195755a18b8029053b6c59e12682e5",
+      "size": 813,
+      "task_id": "9f6c07d8884b4919b9bdeb9845c55452"
+    },
+    {
+      "id": "1e263a461147427697da27c3597f58c0",
+      "kind": "json",
+      "name": "script.json",
+      "sha256": "dbb0a0f8952f806743affd15eda1dd11b84cf6c6ae69a7c634b66ff59a03634d",
+      "size": 374,
+      "task_id": "9f6c07d8884b4919b9bdeb9845c55452"
+    },
+    {
+      "id": "a920c45a75b143b8a801555cceb66276",
+      "kind": "srt",
+      "name": "subtitles.srt",
+      "sha256": "94a9eaeaea9ac48b770e5980b4f0779c1cee3e9e0571efb928c396b327bbf14a",
+      "size": 72,
+      "task_id": "9f6c07d8884b4919b9bdeb9845c55452"
+    }
+  ],
+  "attempt": 1,
+  "created_at": "2026-11-22T14:28:56.988Z",
+  "error": null,
+  "id": "9f6c07d8884b4919b9bdeb9845c55452",
+  "model": "fixture-model",
+  "result": {
+    "approved_script": {
+      "format": "monologue",
+      "stock_code": "000001",
+      "stock_name": "示例公司",
+      "title": "示例公司：行情与风险",
+      "turns": [
+        {
+          "character_name": "行情主持人",
+          "line": "这是固定验收数据，股市有风险，投资需谨慎。",
+          "speaker": "host"
+        }
+      ],
+      "type_digest": "364ba052a870066f14221a0bd4ad40b445e4bc230c41b6ccf8f69821528e372c",
+      "type_id": "market-brief"
+    },
+    "canvas": "horizontal",
+    "elapsed_seconds": 1,
+    "platform_canvas": null,
+    "stock_name": "示例公司"
+  },
+  "stage": "review",
+  "status": "succeeded",
+  "stock": "000001",
+  "type_id": "market-brief"
+}

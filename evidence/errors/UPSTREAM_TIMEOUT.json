@@ -1,0 +1,9 @@
+{
+  "fixture": true,
+  "http": 503,
+  "error": {
+    "code": "UPSTREAM_TIMEOUT",
+    "message": "UPSTREAM_TIMEOUT: 网关超时；结果可能未知，请核对后显式重试。",
+    "outcome_unknown": true
+  }
+}

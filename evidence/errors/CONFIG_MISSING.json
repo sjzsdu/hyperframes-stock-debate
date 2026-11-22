@@ -1,0 +1,9 @@
+{
+  "fixture": true,
+  "http": 503,
+  "error": {
+    "code": "CONFIG_MISSING",
+    "message": "CONFIG_MISSING: 请在服务进程设置 ONEAPI_API_KEY。",
+    "outcome_unknown": false
+  }
+}

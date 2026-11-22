@@ -1,0 +1,11 @@
+Baseline: e9cddcc:third_party/social-auto-upload
+External snapshot parity: 178 tracked files identical (SHA256 comparison).
+uv sync --locked: exit 0, 15 packages installed.
+Initial sau --help: failed with ModuleNotFoundError: No module named 'playwright'.
+Supplement: uv pip install --python <runtime>/.venv/bin/python -r runtime/sau-requirements.txt
+playwright==1.58.0 installed; sau --help: exit 0.
+Rollback: a second fresh directory exported from Git, uv sync --locked + same supplement, sau --help: exit 0.
+Deterministic archive mtime: 1795321023
+Deterministic archive SHA256: 251ac4f445ad9a5d627fda2fe03c3a44cd518544d508861ace39ee6a26692811
+third_party: before 6.1M; after 156K. 15 historical patches retained; 0 added.
+Real platform login/upload: unverified; no credentials or cookies copied.
