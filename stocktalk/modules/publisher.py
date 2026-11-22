@@ -757,7 +757,8 @@ class SauPublisher:
                  code_prompt: Callable[[str, float], bool] | None = None) -> None:
         self.config = dict(config or {})
         publish = self.config.get("publish", {}) or {}
-        self.sau_dir = Path(publish.get("sau_dir", "third_party/social-auto-upload"))
+        self.sau_dir = Path(publish.get("sau_dir") or Path.home() / ".local/share/stocktalk/sau")
+        self.sau_executable = str(publish.get("sau_executable") or "")
         self.workdir = self.sau_dir if self.sau_dir.is_dir() else Path.cwd()
         self.accounts: dict[str, str] = dict(publish.get("accounts", {}) or {})
         self.headless = bool(publish.get("headless", True))
@@ -1351,7 +1352,9 @@ class SauPublisher:
         file) from taking down the other four platforms in the same run.
         """
         try:
-            return self._publish_one(platform, video, metadata, schedule, covers, attempt=attempt)
+            from stocktalk.modules.runtime_lock import account_lock
+            with account_lock(platform, self.accounts.get(platform, "default")):
+                return self._publish_one(platform, video, metadata, schedule, covers, attempt=attempt)
         except Exception as exc:  # pragma: no cover - defensive
             return PlatformResult(platform=platform, ok=False,
                                   detail=f"{type(exc).__name__}: {exc}")
@@ -1390,7 +1393,7 @@ class SauPublisher:
         # 滑块必死（上传器内直接 raise，无头无法人工拖滑块），转 --headed 用同一
         # 条命令重试一次——人在电脑前能救回；无人值守时损失一次上传时长（与旧行为
         # 弹窗等 5 分钟后失败等价）。限流不兜底：冷却期内再打一发只会加重。
-        if not result.ok and not headed_mode and spec.get("headed_fallback"):
+        if not result.ok and not headed_mode and spec.get("headed_fallback") and not self.config.get("publish", {}).get("no_replay", False):
             verdict = self._classify(platform, result.detail, attempt=attempt)
             if verdict.kind != "rate_limit":
                 headed_result = self._execute_upload(platform, command[:-1] + ["--headed"])
@@ -1456,6 +1459,12 @@ class SauPublisher:
         """Resolve the sau entrypoint inside the vendored project's venv."""
         if self._sau_bin:
             return self._sau_bin
+        if self.sau_executable:
+            executable = Path(self.sau_executable)
+            if not executable.is_absolute() or not executable.is_file() or not self.sau_dir.is_absolute() or not self.sau_dir.is_dir():
+                raise PublishError("publish.sau_executable and sau_dir must identify an installed external runtime")
+            self._sau_bin = str(executable.resolve())
+            return self._sau_bin
         venv_sau = self.sau_dir / ".venv" / "bin" / "sau"
         if venv_sau.is_file():
             # Absolute path is required: the subprocess runs with cwd set to the
@@ -1467,7 +1476,7 @@ class SauPublisher:
             self._sau_bin = found
             return found
         raise PublishError(
-            "sau CLI not found — run `uv sync` inside third_party/social-auto-upload "
+            "sau CLI not found — install the external runtime with `uv sync --locked` "
             "or set publish.sau_dir to the social-auto-upload checkout"
         )
 
