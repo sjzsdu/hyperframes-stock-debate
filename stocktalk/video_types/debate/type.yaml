@@ -1,0 +1,32 @@
+schema_version: 1
+id: debate
+display_name: 牛熊辩论
+summary: 从行情理解公司业务、观察点和风险。
+status: enabled
+cast:
+- speaker_id: bull
+  name: 增长派
+  voice_ref: bull
+- speaker_id: bear
+  name: 审计派
+  voice_ref: bear
+duration:
+  min_seconds: 120
+  max_seconds: 300
+required_data:
+- quote
+visual:
+  scene: debate
+  cover: debate
+sample: sample.json
+compliance_defaults:
+  ai_declaration: true
+  closing_risk_notice: true
+  title_template: '{{ stock_name }}行情解读'
+  tags:
+  - 股票
+  - 行情
+script:
+  strategy: debate
+  arc: mainline
+  prompt: 先讲行情，再交代观察点与风险，只用输入中的事实。
