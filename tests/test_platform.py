@@ -153,3 +153,10 @@ def test_concurrent_idempotent_creation_has_single_winner(tmp_path):
         result=list(pool.map(lambda _:store.create('same',request,{}),range(8)))
     assert len({task_id for task_id,created in result})==1
     assert sum(created for task_id,created in result)==1
+
+
+def test_inline_credentials_rejected_before_database_is_created(tmp_path):
+    config=load_config();config['tts'].setdefault('options',{})['api_key']='fixture-secret'
+    with pytest.raises(ValueError,match='凭据只能'):
+        create_app(config,root=tmp_path/'private',models=lambda:['m'])
+    assert not (tmp_path/'private/tasks.sqlite3').exists()

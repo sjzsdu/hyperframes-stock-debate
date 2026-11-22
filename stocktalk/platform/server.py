@@ -24,9 +24,21 @@ from .worker import Worker
 API_VERSION = 1
 
 
+def reject_inline_credentials(value):
+    if isinstance(value, dict):
+        for key, item in value.items():
+            if str(key).lower() in {"api_key", "access_token", "refresh_token", "token", "password", "cookie", "cookies", "secret", "client_secret", "authorization"} and item:
+                raise ValueError("凭据只能通过服务进程环境或私有账号目录注入，禁止在配置中存储明文")
+            reject_inline_credentials(item)
+    elif isinstance(value, list):
+        for item in value:
+            reject_inline_credentials(item)
+
+
 def create_app(config=None, *, root=Path(".platform"), origin="http://127.0.0.1:8765", models=None,
                pipeline_factory=None, publisher_factory=SauPublisher, demo=False):
     config = deepcopy(config if config is not None else load_config())
+    reject_inline_credentials(config)
     validate_dialogue(config)
     app = Flask(__name__)
     app.secret_key = secrets.token_bytes(32)
