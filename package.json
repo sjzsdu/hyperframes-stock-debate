@@ -1,0 +1,6 @@
+{
+  "name": "stocktalk-local-ui",
+  "private": true,
+  "scripts": {"build": "tsc", "typecheck": "tsc --noEmit"},
+  "devDependencies": {"typescript": "5.9.3"}
+}

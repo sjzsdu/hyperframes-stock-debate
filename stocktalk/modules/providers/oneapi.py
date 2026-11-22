@@ -43,12 +43,14 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
 
 class OneAPIClient:
     def __init__(self, model: str = "", *, base_url: str = BASE_URL, api_key_env: str = KEY_ENV,
-                 urlopen: Callable[..., Any] | None = None, default_timeout: float = 60):
+                 urlopen: Callable[..., Any] | None = None, default_timeout: float = 60, validate_model: bool = False):
         if base_url.rstrip("/") != BASE_URL or api_key_env != KEY_ENV:
             raise OneAPIRequestError("CONFIG_INVALID")
         self.model, self.base_url, self.api_key_env = model, BASE_URL, KEY_ENV
         self._urlopen = urlopen
         self.timeout = min(float(default_timeout), 60.0)
+        self.validate_model = validate_model
+        self._model_ids: list[str] | None = None
 
     def _request(self, route: str, payload: dict[str, Any] | None = None, timeout: float = 5) -> dict[str, Any]:
         key = os.environ.get(KEY_ENV)
@@ -116,6 +118,11 @@ class OneAPIClient:
             raise OneAPIRequestError("UPSTREAM_ERROR") from None
 
     def chat(self, system: str, message: str, *, max_tokens=None, temperature=None, timeout=None) -> str:
+        if self.validate_model:
+            if self._model_ids is None:
+                self._model_ids = self.models()
+            if self.model not in self._model_ids:
+                raise OneAPIRequestError("MODEL_UNAVAILABLE")
         payload: dict[str, Any] = {"model": self.model, "messages": [
             {"role": "system", "content": system}, {"role": "user", "content": message}]}
         if max_tokens is not None:
@@ -138,7 +145,7 @@ def oneapi(source: Mapping[str, Any], default_timeout: float = 60) -> OneAPIClie
     if set(options) - {"base_url", "api_key_env"}:
         raise OneAPIRequestError("CONFIG_INVALID")
     return OneAPIClient(str(source.get("model", "")), base_url=options.get("base_url", BASE_URL),
-                        api_key_env=options.get("api_key_env", KEY_ENV), default_timeout=default_timeout)
+                        api_key_env=options.get("api_key_env", KEY_ENV), default_timeout=default_timeout, validate_model=True)
 
 
 def validate_dialogue(config: Mapping[str, Any]) -> None:

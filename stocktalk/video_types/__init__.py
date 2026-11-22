@@ -7,6 +7,7 @@ import hashlib
 import json
 from pathlib import Path
 import re
+import subprocess
 from typing import Any, Mapping
 
 import yaml
@@ -37,7 +38,10 @@ class VideoType:
 
 
 def _load(path: Path) -> VideoType:
-    d = yaml.safe_load(path.read_text(encoding="utf-8"))
+    raw_declaration = path.read_text(encoding="utf-8")
+    if len(raw_declaration) > 65536:
+        raise TypeContractError("declaration exceeds size limit")
+    d = yaml.safe_load(raw_declaration)
     if not isinstance(d, dict) or d.get("schema_version") != 1:
         raise TypeContractError("schema_version must be 1")
     if not SLUG.fullmatch(str(d.get("id", ""))) or d["id"] != path.parent.name:
@@ -109,13 +113,22 @@ def _load(path: Path) -> VideoType:
         raise TypeContractError("sample: relative script JSON required")
     root = path.parent.resolve()
     sample_path = (root / sample).resolve()
-    if Path(sample).is_absolute() or not sample_path.is_relative_to(root) or sample_path.suffix != ".json":
-        raise TypeContractError("sample: script path escapes type root or is not JSON")
+    if Path(sample).is_absolute() or not sample_path.is_relative_to(root) or sample_path.suffix not in (".json", ".mp4"):
+        raise TypeContractError("sample: script path escapes type root or has unsupported media type")
+    if sample_path.stat().st_size > 10 * 1024 * 1024:
+        raise TypeContractError("sample: exceeds size limit")
     raw = sample_path.read_bytes()
-    turns = json.loads(raw).get("turns")
-    if not isinstance(turns, list) or not turns or any(not isinstance(t, dict) or t.get("speaker") not in ids
-                                                       or not isinstance(t.get("line"), str) or not t["line"].strip() for t in turns):
-        raise TypeContractError("sample: invalid turns/speaker")
+    if sample_path.suffix == ".json":
+        turns = json.loads(raw).get("turns")
+        if not isinstance(turns, list) or not turns or any(not isinstance(t, dict) or t.get("speaker") not in ids
+                                                           or not isinstance(t.get("line"), str) or not t["line"].strip() for t in turns):
+            raise TypeContractError("sample: invalid turns/speaker")
+    else:
+        try:
+            subprocess.run(["ffmpeg", "-v", "error", "-i", str(sample_path), "-frames:v", "1", "-f", "null", "-"],
+                           check=True, capture_output=True, timeout=10)
+        except (OSError, subprocess.SubprocessError):
+            raise TypeContractError("sample: MP4 decode failed or ffmpeg missing") from None
     prompt = script.get("prompt", "")
     if not isinstance(prompt, str) or len(prompt) > 8000:
         raise TypeContractError("script.prompt: expected text up to 8000 characters")
@@ -179,6 +192,8 @@ def bind_type(config: dict[str, Any]) -> VideoType:
             dialogue.setdefault("monologue", {}).update(bounds)
         dialogue["arc"] = d["script"]["arc"]
         config.setdefault("cover", {})["style"] = t.strategy
+        publish = config.setdefault("publish", {})
+        publish["extra_tags"] = list(dict.fromkeys([*d["compliance_defaults"]["tags"], *publish.get("extra_tags", [])]))
     config["characters"] = characters
     config["_type_digest"] = t.digest
     config["_video_type"] = t.public()

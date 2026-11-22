@@ -128,3 +128,19 @@ def test_local_assets_are_sandboxed_snapshotted_and_hashed(tmp_path):
     assert 'market-brief' in TypeCatalog(tmp_path).diagnostics
     asset.unlink();asset.symlink_to('/etc/hosts')
     assert 'market-brief' in TypeCatalog(tmp_path).diagnostics
+
+
+def test_two_custom_roles_bind_semantic_strategy_slots(tmp_path):
+    source=Path(__file__).resolve().parents[1]/'stocktalk/video_types/debate'
+    shutil.copytree(source,tmp_path/'custom-debate')
+    path=tmp_path/'custom-debate/type.yaml';d=yaml.safe_load(path.read_text());d['id']='custom-debate'
+    d['cast'][0].update(speaker_id='optimist',name='乐观分析师');d['cast'][1].update(speaker_id='auditor',name='核验分析师')
+    path.write_text(yaml.safe_dump(d));(path.parent/'sample.json').write_text(json.dumps({'turns':[{'speaker':'optimist','line':'观察业务。'},{'speaker':'auditor','line':'核对风险。'}]}))
+    config=load_config();config['video_types_dir']=str(tmp_path);config['dialogue'].update(type_id='custom-debate',opening_gate=False)
+    class LLM:
+        def chat(self,system,message,**kw):
+            assert 'optimist' in message and 'auditor' in message
+            return json.dumps({'title':'平安银行（000001）：观察业务','turns':[{'speaker':'optimist','line':'平安银行的生意是赚取存贷款息差，利率变化影响这门生意。'},{'speaker':'auditor','line':'但低成本存款能不能守住，需要继续核对公开报表里的变化。'}]})
+    script=create_dialogue_generator(config,llm=LLM()).generate({'code':'000001','quote':{'name':'平安银行'}})
+    assert {t['speaker'] for t in script['turns']}=={'optimist','auditor'}
+    assert HyperFramesBuilder(config)._cast()==('optimist','auditor')

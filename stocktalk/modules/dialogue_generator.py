@@ -301,6 +301,12 @@ class DialogueGenerator:
             raise ValueError("temperature must be in (0, 2]")
         ensure_narrator_character(config)
         self.characters = dict((config or {}).get("characters", {}))
+        self.role_bindings = ({slot: role["speaker_id"] for slot, role in
+                               zip(("bull", "bear"), self.video_type.declaration["cast"])}
+                              if self.format == FORMAT_DEBATE else {})
+        if self.video_type.id != "debate":
+            for slot, role_id in self.role_bindings.items():
+                self.characters[slot] = self.characters[role_id]
         # 说话的只有这两个角色，但"有哪几个角色"由配置决定而不是写死：
         # 之前 {"bull", "bear"} 硬编码在两处（这里与 tts_agent），新增角色会被
         # 静默丢弃——一个不报错的坑。配置里加了角色就自动可用。
@@ -372,8 +378,8 @@ class DialogueGenerator:
         feedback, issues, script = base_feedback, [], None
         for attempt in range(attempts):
             try:
-                raw = self._llm.chat(self._system_prompt(choice.arc),
-                                     self._user_prompt(payload, choice.arc, feedback=feedback)
+                raw = self._llm.chat(self._bind_prompt(self._system_prompt(choice.arc)),
+                                     self._bind_prompt(self._user_prompt(payload, choice.arc, feedback=feedback))
                                      + "\n类型要求：" + self.video_type.declaration["script"].get("prompt", ""),
                                      max_tokens=self.config.max_tokens,
                                      temperature=self.config.temperature,
@@ -402,9 +408,32 @@ class DialogueGenerator:
                                if isinstance(t, Mapping) and str(t.get("line") or "").strip()), "")
             opening_guard.remember(self._opening_ledger, code=str(script.get("stock_code") or ""),
                                    opening=first_line, day=date.today().isoformat())
+        if self.role_bindings and self.video_type.id != "debate":
+            def bind_roles(value):
+                if isinstance(value, str):
+                    return self.role_bindings.get(value, value)
+                if isinstance(value, list):
+                    return [bind_roles(v) for v in value]
+                if isinstance(value, dict):
+                    return {self.role_bindings.get(k, k): bind_roles(v) for k, v in value.items()}
+                return value
+            script = bind_roles(script)
         script["type_id"] = self.video_type.id
         script["type_digest"] = self.video_type.digest
+        if self.video_type.id not in ("debate", "monologue"):
+            defaults = self.video_type.declaration["compliance_defaults"]
+            from jinja2.sandbox import SandboxedEnvironment
+            title_env = SandboxedEnvironment()
+            title_env.globals.clear()
+            script["title"] = title_env.from_string(defaults["title_template"]).render(
+                stock_name=script["stock_name"], stock_code=script["stock_code"])
+            script["type_compliance"] = dict(defaults)
         return script
+
+    def _bind_prompt(self, prompt: str) -> str:
+        if not self.role_bindings or self.video_type.id == "debate":
+            return prompt
+        return re.sub(r"\b(bull|bear)\b", lambda m: self.role_bindings[m.group(0)], prompt)
 
     def _system_prompt(self, arc: Arc | None = None) -> str:
         """对辩形态的系统提示（单人独白见 MonologueGenerator）。
@@ -1009,6 +1038,11 @@ class DialogueGenerator:
                     notes.append(f"[第{index}轮] speaker “{speaker or '空'}” 不是 narrator，"
                                  "已统一归一——独白片只有一个说话人")
                 speaker = self.mono_speaker
+            elif self.role_bindings and self.video_type.id != "debate":
+                inverse = {value: key for key, value in self.role_bindings.items()}
+                speaker = inverse.get(speaker, speaker)
+                if speaker not in self.role_bindings:
+                    raise DialogueGenerationError(f"unknown speaker: {speaker}")
             elif speaker not in self.speakers:
                 raise DialogueGenerationError(
                     f"turn {index} must name one of {', '.join(self.speakers)} as speaker")

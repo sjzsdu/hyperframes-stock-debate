@@ -1,0 +1,4 @@
+{
+  "compilerOptions": {"strict": true, "target": "ES2022", "lib": ["ES2022", "DOM", "DOM.Iterable"], "outDir": "stocktalk/platform/static", "rootDir": "frontend", "module": "none", "noEmitOnError": true},
+  "include": ["frontend/*.ts"]
+}

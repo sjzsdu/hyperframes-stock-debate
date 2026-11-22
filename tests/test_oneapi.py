@@ -31,6 +31,9 @@ def test_factory_configuration_and_auth(flat):
     calls=[]
     def transport(req,timeout):
         calls.append(req)
+        if req.get_method()=='GET':
+            assert req.full_url==BASE_URL+'/models'
+            return response({'data':[{'id':'fixture-model'}]})
         assert req.full_url==BASE_URL+'/chat/completions'
         assert req.get_header('Authorization')=='Bearer fixture-only-not-a-real-key'
         assert json.loads(req.data)['model']=='fixture-model'
@@ -38,7 +41,7 @@ def test_factory_configuration_and_auth(flat):
         return response({'choices':[{'message':{'content':'ok'}}]})
     client._urlopen=transport
     assert client.chat('system','message')=='ok'
-    assert len(calls)==1
+    assert len(calls)==2
 
 
 def test_missing_key_stops_before_network(monkeypatch):
@@ -106,3 +109,14 @@ def test_transport_supervisor_times_out_without_replaying_or_exposing_key(monkey
     monkeypatch.setattr('subprocess.run',timeout)
     with pytest.raises(OneAPIRequestError) as err:OneAPIClient('fixture').chat('s','m')
     assert err.value.outcome_unknown and len(calls)==1
+
+
+def test_registered_provider_rejects_model_before_post():
+    calls=[]
+    client=create_llm_client({'dialogue':{'provider':'oneapi','model':'not-authorized'}})
+    def transport(request,**kwargs):
+        calls.append(request)
+        return response({'data':[{'id':'allowed'}]})
+    client._urlopen=transport
+    with pytest.raises(OneAPIRequestError,match='MODEL_UNAVAILABLE'):client.chat('s','m')
+    assert len(calls)==1 and calls[0].get_method()=='GET'
