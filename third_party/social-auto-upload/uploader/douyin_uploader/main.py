@@ -1325,7 +1325,14 @@ class DouYinVideo(DouYinBaseUploader):
             await self.set_schedule_time_douyin(page, self.publish_date)
 
         sms_prompt_logged = False
-        while True:
+        # 2026-11-21: 旧代码 while True + 裸 except 把每次失败原因吞掉，一旦发布
+        # 按钮点了不跳转就每 3.5s 刷一次「冲刺」，直到外层 900s 超时都看不到根因
+        # （002567 实测刷了 13 分钟）。这里：①打印真实异常/当前 URL（前 5 次，
+        # 限流免刷屏）②设上限，到顶抛明确错误让外层快速失败可 --republish。
+        publish_attempts = 0
+        publish_max_attempts = 40  # ~2 分钟，正常发布 1-3 次就成功
+        while publish_attempts < publish_max_attempts:
+            publish_attempts += 1
             try:
                 # 移除会拦截发布按钮点击的新手引导/话题下拉浮层
                 await page.evaluate(
@@ -1359,12 +1366,23 @@ class DouYinVideo(DouYinBaseUploader):
                 )
                 douyin_logger.success(_msg("🥳", "视频发布成功，小人开心收工"))
                 break
-            except Exception:
+            except Exception as exc:
+                if publish_attempts <= 5:
+                    try:
+                        douyin_logger.warning(_msg("😵", f"发布第 {publish_attempts} 次未成功: "
+                                                  f"{type(exc).__name__}: {str(exc)[:200]} | URL={page.url}"))
+                    except Exception:
+                        douyin_logger.warning(_msg("😵", f"发布第 {publish_attempts} 次未成功（无法读取页面状态）"))
                 await self.handle_auto_video_cover(page)
-                douyin_logger.info(_msg("🏃", "小人正在冲刺发布视频"))
+                if publish_attempts <= 5:
+                    douyin_logger.info(_msg("🏃", "小人正在冲刺发布视频"))
                 if self.debug:
                     await page.screenshot(full_page=True)
                 await asyncio.sleep(0.5)
+        else:
+            raise RuntimeError(
+                f"抖音发布按钮点击后 {publish_max_attempts} 次都没跳到作品管理页（页面停在 {page.url}）；"
+                "已中止，可用 --republish 重试。详见上方前 5 次的异常/URL 日志。")
 
         await context.storage_state(path=self.account_file)
         douyin_logger.success(_msg("🥳", "cookie 更新完毕"))

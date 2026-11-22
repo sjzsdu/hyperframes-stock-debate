@@ -396,6 +396,134 @@ def test_volcengine_tts_builds_request_and_writes_audio(tmp_path):
     assert (tmp_path / "01_bull.wav").read_bytes() == audio
 
 
+# ---------------------------------------------------------------------------
+# 2026-11-19：Clash TUN 重连抛 SSL EOF，单句级传输重试不能降级成静音成片
+# ---------------------------------------------------------------------------
+
+def _ssl_eof() -> Exception:
+    """复刻实际报错 ``<urlopen error [SSL: UNEXPECTED_EOF_WHILE_READING]>``。"""
+    import ssl
+    import urllib.error
+    return urllib.error.URLError(ssl.SSLEOFError("EOF occurred in violation of protocol (_ssl.c:1000)"))
+
+
+def test_volcengine_tts_retries_transient_ssl_eof(tmp_path):
+    import stocktalk.modules.providers.volcengine_tts as mod
+
+    calls: list[int] = []
+    sleeps: list[float] = []
+    fake = _ndjson_urlopen([b"RIFF-ok"])
+
+    def flaky(request, timeout=None):
+        calls.append(1)
+        if len(calls) == 1:
+            raise _ssl_eof()
+        return fake(request, timeout)
+
+    provider = mod.VolcengineTTSProvider(
+        api_key="vk-test", urlopen=flaky, sleep=sleeps.append, network_backoff=2.0)
+    provider.synthesize_lines([_tts_job(tmp_path)])
+
+    assert calls == [1, 1]
+    assert sleeps == [2.0]
+    assert (tmp_path / "01_bull.wav").read_bytes() == b"RIFF-ok"
+
+
+def test_volcengine_tts_does_not_retry_4xx(tmp_path, monkeypatch):
+    """鉴权/参数错误重试无意义，必须立刻抛，让上层按 TTS 硬失败中止。"""
+    import io
+    import urllib.error
+    import pytest
+    import stocktalk.modules.providers.volcengine_tts as mod
+    from stocktalk.modules.providers.base import TTSProviderError
+
+    calls: list[int] = []
+    sleeps: list[float] = []
+
+    def unauthorized(request, timeout=None):
+        calls.append(1)
+        raise urllib.error.HTTPError(mod.TTS_ENDPOINT, 401, "Unauthorized", {}, io.BytesIO(b""))
+
+    provider = mod.VolcengineTTSProvider(
+        api_key="bad", urlopen=unauthorized, sleep=sleeps.append)
+    with pytest.raises(TTSProviderError, match="401"):
+        provider.synthesize_lines([_tts_job(tmp_path)])
+    assert calls == [1]
+    assert sleeps == []
+
+
+def test_volcengine_tts_retries_429_and_5xx(tmp_path):
+    import io
+    import urllib.error
+    import stocktalk.modules.providers.volcengine_tts as mod
+
+    calls: list[int] = []
+    sleeps: list[float] = []
+    fake = _ndjson_urlopen([b"RIFF-ok"])
+
+    def throttled(request, timeout=None):
+        calls.append(1)
+        if len(calls) == 1:
+            raise urllib.error.HTTPError(mod.TTS_ENDPOINT, 503, "busy", {}, io.BytesIO(b""))
+        return fake(request, timeout)
+
+    provider = mod.VolcengineTTSProvider(
+        api_key="vk-test", urlopen=throttled, sleep=sleeps.append, network_backoff=1.0)
+    provider.synthesize_lines([_tts_job(tmp_path)])
+    assert calls == [1, 1]
+    assert sleeps == [1.0]
+
+
+def test_volcengine_tts_gives_up_after_network_retries(tmp_path):
+    """重试耗尽仍抛 TTSProviderError —— 绝不产出静音兜底。"""
+    import pytest
+    import stocktalk.modules.providers.volcengine_tts as mod
+    from stocktalk.modules.providers.base import TTSProviderError
+
+    calls: list[int] = []
+    sleeps: list[float] = []
+
+    def always_down(request, timeout=None):
+        calls.append(1)
+        raise _ssl_eof()
+
+    provider = mod.VolcengineTTSProvider(
+        api_key="vk-test", urlopen=always_down, sleep=sleeps.append, network_backoff=1.0)
+    with pytest.raises(TTSProviderError, match="request failed for bull"):
+        provider.synthesize_lines([_tts_job(tmp_path)])
+    assert len(calls) == 4                 # 1 次首发 + 3 次重试
+    assert sleeps == [1.0, 2.0, 4.0]      # 指数退避
+    assert not (tmp_path / "01_bull.wav").exists()
+
+
+def test_volcengine_tts_retry_is_per_line_not_whole_batch(tmp_path):
+    """已成功的句子不重做：3 句里第 2 句抖一次，总共只发 4 个请求。"""
+    import stocktalk.modules.providers.volcengine_tts as mod
+
+    calls: list[int] = []
+    sleeps: list[float] = []
+    fake = _ndjson_urlopen([b"RIFF-ok"])
+
+    def flaky_once(request, timeout=None):
+        calls.append(1)
+        if len(calls) == 2:
+            raise _ssl_eof()
+        return fake(request, timeout)
+
+    jobs = [
+        _tts_job(tmp_path, label="a", out_path=tmp_path / "a.wav"),
+        _tts_job(tmp_path, label="b", out_path=tmp_path / "b.wav"),
+        _tts_job(tmp_path, label="c", out_path=tmp_path / "c.wav"),
+    ]
+    provider = mod.VolcengineTTSProvider(
+        api_key="vk-test", urlopen=flaky_once, sleep=sleeps.append, network_backoff=1.0)
+    provider.synthesize_lines(jobs)
+
+    assert len(calls) == 4               # 1 + (1 fail + 1 retry) + 1
+    assert sleeps == [1.0]
+    assert all((tmp_path / f"{n}.wav").read_bytes() == b"RIFF-ok" for n in "abc")
+
+
 def test_volcengine_tts_strips_ssml_break_tags(tmp_path):
     import stocktalk.modules.providers.volcengine_tts as mod
 

@@ -496,6 +496,26 @@ class HyperFramesBuilder:
             "HF_CAPTURE_PARALLEL_STREAM": parallel_stream,
             "HF_DE_PARALLEL_STREAM": parallel_stream,
         }
+        # 2026-11-19: npx 缓存重装 / chrome-headless-shell 下载失败时，渲染 worker 不会走
+        # `hyperframes doctor` 那套系统 Chrome 发现逻辑，会直接报 "Chrome not found"
+        # 并卡在 "Still getting Chrome ready"。渲染的 screenshot capture 路径任何 Chrome
+        # build 都能用，显式把本机已装的系统 Chrome 传进去即可恢复。
+        # 用户显式设置过 HYPERFRAMES_BROWSER_PATH 时一律尊重，不覆盖。
+        if not env.get("HYPERFRAMES_BROWSER_PATH"):
+            for candidate in (
+                "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+                "/Applications/Google Chrome Canary.app/Contents/MacOS/Google Chrome Canary",
+                "/Applications/Chromium.app/Contents/MacOS/Chromium",
+            ):
+                if Path(candidate).is_file():
+                    env["HYPERFRAMES_BROWSER_PATH"] = candidate
+                    break
+            else:
+                for name in ("google-chrome", "chromium", "chromium-browser"):
+                    located = shutil.which(name)
+                    if located:
+                        env["HYPERFRAMES_BROWSER_PATH"] = located
+                        break
         # --yes keeps npx from blocking on its interactive install prompt
         # (stdout/stderr are captured here, so the prompt would never be seen).
         command = ("npx", "--yes", "hyperframes", "render", str(directory), "--output", str(destination), "--quality", quality)

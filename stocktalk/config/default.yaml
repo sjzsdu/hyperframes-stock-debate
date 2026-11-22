@@ -176,6 +176,11 @@ tts:
   options:
     api_key_env: VOLCENGINE_TTS_API_KEY
     resource_id: seed-tts-2.0
+    # 2026-11-19：本机 Clash TUN 重连会抛 SSL UNEXPECTED_EOF_WHILE_READING。
+    # 单句级指数退避重试（1s/2s/4s），4xx 鉴权错误不重试；重试耗尽仍按
+    # TTS 硬失败中止，绝不降级成静音成片。抖动严重时可把这两个值调大。
+    network_retries: 3
+    network_backoff: 1.0
   # 下面这些仅 bailian 链路使用，保留作回滚底座
   model: cosyvoice-v3-flash
   output_format: wav
