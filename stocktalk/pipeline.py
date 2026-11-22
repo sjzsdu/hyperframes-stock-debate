@@ -16,6 +16,7 @@ import yaml
 from rich.console import Console
 from rich.progress import BarColumn, Progress, SpinnerColumn, TextColumn, TimeElapsedColumn, TimeRemainingColumn
 
+from stocktalk.modules.providers.oneapi import OneAPIRequestError
 from stocktalk.modules.compliance import ComplianceAgent
 from stocktalk.modules.cover import CoverGenerator
 from stocktalk.modules.dialogue_generator import (create_dialogue_generator,
@@ -74,8 +75,11 @@ class Pipeline:
     def __init__(self, config: dict[str, Any] | None = None, *, console: Console | None = None,
                  sleep: Callable[[float], None] = time.sleep) -> None:
         self.config = config or {}
+        from stocktalk.video_types import bind_type
+        self.video_type = bind_type(self.config)
         self.console = console or Console()
         self._sleep = sleep
+        self.progress_callback: Callable[[str], None] = lambda stage: None
         # 独白形态要在建任何 agent 之前补齐 characters.narrator：TTS 按角色取音色，
         # 缺角色会把该说话人的台词静默过滤掉（成片零配音且不报错）。
         ensure_narrator_character(self.config)
@@ -240,6 +244,8 @@ class Pipeline:
         for attempt in range(1, 4):
             try:
                 return operation()
+            except OneAPIRequestError:
+                raise
             except Exception as exc:  # Concrete remote-client errors vary by provider.
                 last_error = exc
                 if attempt == 3:
@@ -382,6 +388,7 @@ class Pipeline:
         columns = (SpinnerColumn(), TextColumn("{task.description}"), BarColumn(), TimeElapsedColumn(), TimeRemainingColumn())
 
         with Progress(*columns, console=self.console, transient=False) as progress:
+            self.progress_callback("market")
             task = progress.add_task("Fetching stock data", total=6)
             try:
                 stock_data = self.stock_client.get_stock_data(stock_code)
@@ -395,9 +402,15 @@ class Pipeline:
                 raise PipelineError(f"个股数据获取失败：{exc}") from exc
             progress.advance(task)
 
+            self.progress_callback("dialogue")
             progress.update(task, description="Generating debate script (may take ~1 min)")
             episode_plan = self.episode_planner.plan(stock_data)
-            script = self._retry("Dialogue generation", lambda: self.dialogue_gen.generate(stock_data, episode_plan))
+            for data_id in self.video_type.declaration["required_data"]:
+                if not stock_data.get(data_id):
+                    raise PipelineError(f"required data missing: {data_id}")
+            operation = lambda: self.dialogue_gen.generate(stock_data, episode_plan)
+            script = (operation() if self.config.get("dialogue", {}).get("provider") == "oneapi"
+                      else self._retry("Dialogue generation", operation))
             script["episode_plan"] = episode_plan
             self._warn_if_over_budget(script)
             # 锐度判定清单（2026-10-27 WAN-27）：未过的项在控制台点名，不必等
@@ -410,6 +423,7 @@ class Pipeline:
                 self.console.print(f"[{color}]文案{line}[/{color}]")
             progress.advance(task)
 
+            self.progress_callback("compliance")
             progress.update(task, description="Reviewing compliance")
             try:
                 approved = self.compliance.review(script)
@@ -417,6 +431,7 @@ class Pipeline:
                 raise PipelineError(f"Compliance review failed: {exc}") from exc
             progress.advance(task)
 
+            self.progress_callback("tts")
             progress.update(task, description="Synthesizing voice (may take ~1 min)")
             project_dir.mkdir(parents=True, exist_ok=True)
             try:
@@ -438,6 +453,7 @@ class Pipeline:
                 audio["tts_error"] = str(exc)
             progress.advance(task)
 
+            self.progress_callback("build")
             progress.update(task, description="Building HyperFrames project")
             try:
                 self.builder.video_config["project_dir"] = str(project_dir)
@@ -451,6 +467,7 @@ class Pipeline:
             cover_files: dict[str, str] = {}
             review_path: Path | None = None
             if render:
+                self.progress_callback("render")
                 progress.update(task, description="Rendering MP4 (may take several minutes)")
                 try:
                     video_path = self.builder.render_mp4(project, self.output_dir / f"{tag}.mp4")

@@ -1,0 +1,29 @@
+schema_version: 1
+id: market-brief
+display_name: 行情速览
+summary: 从行情理解公司业务、观察点和风险。
+status: enabled
+cast:
+- speaker_id: host
+  name: 行情主持人
+  voice_ref: narrator
+duration:
+  min_seconds: 30
+  max_seconds: 60
+required_data:
+- quote
+visual:
+  scene: monologue
+  cover: monologue
+sample: sample.json
+compliance_defaults:
+  ai_declaration: true
+  closing_risk_notice: true
+  title_template: '{{ stock_name }}行情解读'
+  tags:
+  - 股票
+  - 行情
+script:
+  strategy: monologue
+  arc: deep_dive
+  prompt: 先讲行情，再交代观察点与风险，只用输入中的事实。

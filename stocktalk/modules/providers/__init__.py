@@ -19,6 +19,8 @@ from stocktalk.modules.providers.base import (
 )
 from stocktalk.modules.providers.factory import create_llm_client, create_tts_provider
 
+from stocktalk.modules.providers import oneapi  # noqa: F401,E402
+
 # 实现 import 触发注册（顺序无关，注册表在 base 里）
 from stocktalk.modules.providers import bailian_chat  # noqa: F401,E402
 from stocktalk.modules.providers import openai_chat  # noqa: F401,E402

@@ -1,5 +1,32 @@
 # 谈股论金
 
+当前分支新增本机 Web/桌面工作台，按 `ARCHITECTURE.md` 与 ADR 实现。首版对话统一经 oneapi，TTS 与封面仍沿用既有配置。
+
+```bash
+uv venv --python 3.12 .venv
+uv pip install --python .venv/bin/python -e '.[web,dev]'
+# 无密钥验收，需要 ffmpeg/ffprobe；固定 1 秒带音轨媒体，发布为沙箱替身
+.venv/bin/tangulunjin-web --demo --port 8765 --data-dir .platform/demo
+# 浏览器打开 http://127.0.0.1:8765
+```
+
+选择 `行情速览`、`demo-fixture` 和六位股票代码，生成后审阅成片、脚本及封面，执行发布预检，确认后在报告中看到 `已发布`。界面始终标记离线验收模式；该路径不代表真实行情/对话/TTS/HyperFrames 或真实平台发布通过。无密钥端到端复跑：`.venv/bin/python scripts/verify_platform.py`。
+
+生产使用（仅本机单运营者）：通过进程环境注入 `ONEAPI_API_KEY`，不要写入配置文件或数据库，参见 `.env.example`（程序不会自动加载 `.env`）。运行 `.venv/bin/tangulunjin-web --config config.platform.yaml --data-dir .platform/live`，界面从网关实时读取模型目录。未配置令牌或目录不可用时禁止创建任务；不会切换供应商。CLI 的旧 provider 配置会明确提示迁移。语音、行情、渲染和封面工具仍需按下文准备。
+
+可选桌面查看器：`uv pip install --python .venv/bin/python -e '.[desktop]'`，然后 `.venv/bin/tangulunjin-desktop --url http://127.0.0.1:8765`。服务独立运行，关闭窗口不停止任务。首版桌面只查看同一任务、下载成片和读发布报告，生成/预检/发布从 Web 发起。已验证目标为 macOS；Windows/Linux 分发及签名未验证。
+
+SAU 已从主仓移出。按 [外置发布工具说明](third_party/README.md) 导出固定快照、安装锁定依赖、设置同一个绝对 `publish.sau_dir` 与 `sau_executable`。目录缺失时预检显示可操作提示，生成不受影响。下方历史 CLI 指引中的工具根统一指运营者安装的外置目录。真实登录在服务主机操作。
+
+类型扩展：复制 `examples/video_types/market-brief/{type.yaml,sample.json}` 到运营者的 `video_types/market-brief/`，在配置中设置绝对 `video_types_dir` 并重启。只增加这两个文件即可通过目录发现接入 `host` 单人类型，沿用 `deep_dive` 策略骨架；CLI 使用 `--format market-brief`，Web 从同一目录显示类型。`scripts/verify_types.py --types-dir ...` 输出声明摘要与诊断，非法/重复/停用 ID 不可执行。声明摘要和本地模板内容随任务冻结，后来修改类型不会改写已入队任务。自定义场景/封面可引用同目录 `.html.j2`，仅支持沙箱数据模板与登记的本地资源，拒绝调用/导入/外部 URL/路径逃逸。新增数据源或策略需另行实现适配器。
+
+开发校验：`npm ci && npm run typecheck && npm run build`（TypeScript strict，提交生成的静态 JS，运行时无需 Node 构建链）；`.venv/bin/python -m pytest -q`；安装 dev 依赖后 `.venv/bin/python -m mypy` 检查新增应用边界。原项目未配置 lint/typecheck 或 CI，本次加入 TypeScript 与 Python 边界类型检查。已有 Python 核心仍以全量回归保护。
+
+服务以环回地址和同源会话/CSRF 保护写入，不提供远程访问。数据位于单机 SQLite/WAL 和隔离的产物目录。Ctrl-C/SIGTERM 停止领取并等待当前工作收尾；强制退出后中断任务不会自动重播。出现 `RECOVERY_REQUIRED` 时，确认旧渲染/上传子进程全部退出后才用 `--ack-recovery` 重启；发布结果未知需先核对远端，不能补发。备份前停服务，复制完整数据根；回退到旧版本前保留备份及导出的媒体、sidecar/报告。账号锁位于用户私有状态目录，对 CLI/守护/Web 发布共同生效。不要在服务运行时编辑数据库或移动产物。
+
+部署方式、复跑证据与未验证项见 `docs/platform-validation.md`。首版不提供联网部署、多人登录、桌面安装包或真实发布验收。预验证通过 ≠ PR 已合并 ≠ 产品已验收。
+
+
 全自动 AI 财报对话视频生成工具。输入股票代码，自动完成：数据获取 → 对话脚本生成 → 合规审核 → 双角色语音合成 → HyperFrames 视频工程构建 → 渲染输出 MP4。
 
 ## 功能特性
@@ -34,7 +61,7 @@
 | `ffmpeg` / `ffprobe` | 不做句首句尾静音裁剪与淡入淡出，相邻台词衔接略生硬 |
 | Chrome | 不生成封面图，降级为「不带封面发布」 |
 | `DASHSCOPE_API_KEY`（或 `bl` 登录态） | 不生成 AI 封面底图，封面回落到纯模板渐变 |
-| `sau`（已内置在 `third_party/`） | 不能发布，但出片不受影响 |
+| `sau`（可选外置运行时） | 不能发布，但出片不受影响 |
 
 一条命令全查：`tangulunjin --check`，输出里会分别标注必需项与降级项。
 
@@ -167,7 +194,7 @@ tangulunjin 601689 --publish
 **前置条件（只做一次）：**
 
 ```bash
-cd third_party/social-auto-upload
+cd $HOME/.local/share/stocktalk/sau
 uv sync                                        # 初始化 sau 环境
 uv run sau douyin login --account default      # 每个平台各登录一次，cookie 会保存
 cd ../..
@@ -437,7 +464,7 @@ macOS 通知权限没给（脚本不报错但横幅根本不出现）、webhook 
 跑 `--publish` 时进度条会自动让位，输入过程不会被刷新打断。超时没输入则会给
 出明确原因并跳过该平台（其他平台照发），之后 `--republish` 再补一次即可。
 无人值守（cron）下不弹提示，保留老的救急方式：`echo -n "123456" >
-third_party/social-auto-upload/verify_code.txt`；命令行可加 `--no-interactive`
+$HOME/.local/share/stocktalk/sau/verify_code.txt`；命令行可加 `--no-interactive`
 强制走这条路。
 
 **B站限流**：连着上传会被 biliup 挡回来（`upload rate limit (code: 601)
@@ -563,13 +590,13 @@ tangulunjin --daemon-status && tangulunjin --daemon-install
 ## 多平台自动发布
 
 基于开源工具 [social-auto-upload](https://github.com/dreammis/social-auto-upload)（已内置于
-`third_party/social-auto-upload`，通过浏览器自动化登录并上传）。默认发布平台：抖音、B站、快手、视频号、
+`$HOME/.local/share/stocktalk/sau`，通过浏览器自动化登录并上传）。默认发布平台：抖音、B站、快手、视频号、
 百家号（小红书登录/上传能力保留，默认不在发布列表里）。
 
 **首次使用：逐平台扫码登录一次（cookie 会保存，之后无需再登录）：**
 
 ```bash
-cd third_party/social-auto-upload
+cd $HOME/.local/share/stocktalk/sau
 uv sync                                       # 初始化 sau 环境（首次）
 
 uv run sau douyin    login --account default  # 每个平台各登录一次
@@ -621,9 +648,9 @@ B站自动选择财经分区。五个平台的 AI 生成声明都到位：抖音
 
 1. **抖音短信验证码**：发布瞬间可能触发风控弹窗。交互终端下会直接提示你把验证码
    粘进来（见「发布中遇到风控怎么办」）；无人值守时则在 `verify_code_wait_seconds`
-   的窗口内等 `third_party/social-auto-upload/verify_code.txt`，超时即中止该平台
+   的窗口内等 `$HOME/.local/share/stocktalk/sau/verify_code.txt`，超时即中止该平台
    并给出提示（不再白等到 15 分钟上传超时）。想抢救就在窗口期内写文件：
-   `echo -n "123456" > third_party/social-auto-upload/verify_code.txt`（sau 读到后自动提交并删除）。
+   `echo -n "123456" > $HOME/.local/share/stocktalk/sau/verify_code.txt`（sau 读到后自动提交并删除）。
 2. **cookie 失效**：预检会拦下失效平台并在报告里提示 `sau <platform> login`，不会浪费一次渲染。
 3. **B站首次上传**：会从 GitHub 下载 `biliup` 二进制，网络不通时 B站失败但**不影响其他平台**。
 
@@ -889,7 +916,7 @@ bl auth login --api-key sk-xxx
 **`sau CLI 未找到` 或发布报环境错**
 内嵌的发布工具还没初始化：
 ```bash
-cd third_party/social-auto-upload && uv sync && cd ../..
+cd $HOME/.local/share/stocktalk/sau && uv sync && cd ../..
 ```
 
 **抖音发到一半要短信验证码**

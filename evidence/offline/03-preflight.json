@@ -1,0 +1,9 @@
+{
+  "platforms": {
+    "bilibili": {
+      "code": "READY",
+      "message": "可发布",
+      "ok": true
+    }
+  }
+}

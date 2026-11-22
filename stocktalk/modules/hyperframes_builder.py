@@ -336,15 +336,15 @@ class HyperFramesBuilder:
 
     def __init__(self, config: Mapping[str, Any] | None = None, runner: Runner | None = None) -> None:
         self.config = dict(config or {})
+        from stocktalk.video_types import bind_type
+        self.video_type = bind_type(self.config)
         video = self.config.get("video", {})
         self.video_config = dict(video) if isinstance(video, Mapping) else {}
         self.characters = self.config.get("characters", {})
         # 内容形态：dialogue.format（默认 debate）。builder 只是按值读一次——
         # 归一化在 dialogue_generator.dialogue_format，这里不重复实现。
         dialogue_cfg = self.config.get("dialogue", {})
-        self.format = str((dialogue_cfg or {}).get("format", "debate") or "debate").strip().lower()
-        if self.format != FORMAT_MONOLOGUE:
-            self.format = "debate"
+        self.format = self.video_type.strategy
         self.layout = str(self.video_config.get("canvas", "horizontal")).strip().lower()
         if self.layout not in CANVAS_PRESETS:
             self.layout = "horizontal"
@@ -747,7 +747,9 @@ class HyperFramesBuilder:
         台词白名单、首帧角色行、speakers 渲染上下文都从这里取，不再散落
         ("bull","bear") 硬编码——否则独白成片要么零分段、要么首帧画两个空角色。
         """
-        return (MONOLOGUE_SPEAKER,) if self.format == FORMAT_MONOLOGUE else ("bull", "bear")
+        return (tuple(r["speaker_id"] for r in self.video_type.declaration["cast"])
+                if self.video_type.id not in ("debate", "monologue") else
+                ((MONOLOGUE_SPEAKER,) if self.format == FORMAT_MONOLOGUE else ("bull", "bear")))
 
     def _slots(self, segments: Sequence[Mapping[str, Any]], duration: float = 0.0) -> dict[str, list[dict[str, Any]]]:
         """Split the dialogue into independently-updating stage slots."""
@@ -1065,7 +1067,9 @@ class HyperFramesBuilder:
         stock_name = str(quote.get("name") or stock.get("name") or stock.get("code") or "股票")
         identity = self._identity(stock.get("code") or quote.get("code") or "", history, quote)
         env = Environment(loader=FileSystemLoader(self._asset_dir), autoescape=select_autoescape(("html", "xml")))
-        return env.get_template("index.html.j2").render(
+        from stocktalk.video_types.templates import visual_template
+        template = visual_template(self.video_type.declaration, "scene", env.get_template("index.html.j2"))
+        return template.render(
             name=self._text(stock_name),
             code=self._text(stock.get("code") or quote.get("code") or ""),
             price_line=self._quote_line(quote),

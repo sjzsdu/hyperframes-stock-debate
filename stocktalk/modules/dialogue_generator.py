@@ -6,6 +6,8 @@ OpenAI-compatible 端点）；本模块只负责业务：prompt 构造、骨架�
 """
 from __future__ import annotations
 
+from stocktalk.modules.providers.oneapi import OneAPIRequestError
+
 import json
 import re
 from dataclasses import dataclass
@@ -57,10 +59,14 @@ FORMATS = (FORMAT_DEBATE, FORMAT_MONOLOGUE)
 
 
 def dialogue_format(config: Mapping[str, Any] | None) -> str:
-    """读 dialogue.format；未知值一律回 debate——不猜、不抛，形态是开关不是数据。"""
-    source = dict((config or {}).get("dialogue", config or {}) or {})
-    value = str(source.get("format", FORMAT_DEBATE) or FORMAT_DEBATE).strip().lower()
-    return value if value in FORMATS else FORMAT_DEBATE
+    """Resolve the execution shape for legacy callers; factories validate IDs."""
+    from stocktalk.video_types import selected_type, TypeContractError
+    try:
+        return selected_type(config).strategy
+    except TypeContractError:
+        # Historical callers use this helper as a shape normalizer. Execution
+        # entry points bind the catalog first and reject unknown/disabled IDs.
+        return FORMAT_DEBATE
 
 
 # 独白形态下 narrator 角色的兜底值（配置里没写全时补齐）。
@@ -253,7 +259,11 @@ class DialogueGenerator:
 
     def __init__(self, config: Mapping[str, Any] | None = None, runner: Runner | None = None,
                  llm: Any = None) -> None:
-        source = dict((config or {}).get("dialogue", config or {}))
+        from stocktalk.video_types import bind_type
+        config = config if config is not None else {}
+        self.video_type = bind_type(config)
+        self.mono_speaker = self.video_type.declaration["cast"][0]["speaker_id"]
+        source = dict(config.get("dialogue", config))
         # 独白形态：额度有一套自己的默认（见 MONOLOGUE_DEFAULTS），配置里写了就用配置。
         # 都放在 dialogue.monologue 这一层下，于是默认配置文件能同时写死两种形态，
         # 而 dialogue.format 只是一个开关，不承载任何额度语义。
@@ -291,13 +301,19 @@ class DialogueGenerator:
             raise ValueError("temperature must be in (0, 2]")
         ensure_narrator_character(config)
         self.characters = dict((config or {}).get("characters", {}))
+        self.role_bindings = ({slot: role["speaker_id"] for slot, role in
+                               zip(("bull", "bear"), self.video_type.declaration["cast"])}
+                              if self.format == FORMAT_DEBATE else {})
+        if self.video_type.id != "debate":
+            for slot, role_id in self.role_bindings.items():
+                self.characters[slot] = self.characters[role_id]
         # 说话的只有这两个角色，但"有哪几个角色"由配置决定而不是写死：
         # 之前 {"bull", "bear"} 硬编码在两处（这里与 tts_agent），新增角色会被
         # 静默丢弃——一个不报错的坑。配置里加了角色就自动可用。
         # 独白形态是唯一例外：脚本合同里的 speaker 必须恒等于 narrator（一个稳定
         # 的 id），因为 TTS / 画面 / 合规三层都靠它对齐；所以这里不是"允许 narrator
         # 参与"，而是"只允许 narrator"。
-        self.speakers = ((MONOLOGUE_SPEAKER,) if self.format == FORMAT_MONOLOGUE
+        self.speakers = ((self.mono_speaker,) if self.format == FORMAT_MONOLOGUE
                          else resolve_speakers(self.characters))
         self._active: ArcChoice | None = None
         # 开场轮转记忆（2026-11-15）：只在显式配置了 opening_ledger 时启用，
@@ -362,11 +378,14 @@ class DialogueGenerator:
         feedback, issues, script = base_feedback, [], None
         for attempt in range(attempts):
             try:
-                raw = self._llm.chat(self._system_prompt(choice.arc),
-                                     self._user_prompt(payload, choice.arc, feedback=feedback),
+                raw = self._llm.chat(self._bind_prompt(self._system_prompt(choice.arc)),
+                                     self._bind_prompt(self._user_prompt(payload, choice.arc, feedback=feedback))
+                                     + "\n类型要求：" + self.video_type.declaration["script"].get("prompt", ""),
                                      max_tokens=self.config.max_tokens,
                                      temperature=self.config.temperature,
                                      timeout=self.config.timeout_seconds)
+            except OneAPIRequestError:
+                raise
             except ProviderError as exc:
                 raise DialogueGenerationError(str(exc)) from exc
             script = self._normalize_script(self._decode_response(raw), payload, choice, episode_plan)
@@ -389,7 +408,32 @@ class DialogueGenerator:
                                if isinstance(t, Mapping) and str(t.get("line") or "").strip()), "")
             opening_guard.remember(self._opening_ledger, code=str(script.get("stock_code") or ""),
                                    opening=first_line, day=date.today().isoformat())
+        if self.role_bindings and self.video_type.id != "debate":
+            def bind_roles(value):
+                if isinstance(value, str):
+                    return self.role_bindings.get(value, value)
+                if isinstance(value, list):
+                    return [bind_roles(v) for v in value]
+                if isinstance(value, dict):
+                    return {self.role_bindings.get(k, k): bind_roles(v) for k, v in value.items()}
+                return value
+            script = bind_roles(script)
+        script["type_id"] = self.video_type.id
+        script["type_digest"] = self.video_type.digest
+        if self.video_type.id not in ("debate", "monologue"):
+            defaults = self.video_type.declaration["compliance_defaults"]
+            from jinja2.sandbox import SandboxedEnvironment
+            title_env = SandboxedEnvironment()
+            title_env.globals.clear()
+            script["title"] = title_env.from_string(defaults["title_template"]).render(
+                stock_name=script["stock_name"], stock_code=script["stock_code"])
+            script["type_compliance"] = dict(defaults)
         return script
+
+    def _bind_prompt(self, prompt: str) -> str:
+        if not self.role_bindings or self.video_type.id == "debate":
+            return prompt
+        return re.sub(r"\b(bull|bear)\b", lambda m: self.role_bindings[m.group(0)], prompt)
 
     def _system_prompt(self, arc: Arc | None = None) -> str:
         """对辩形态的系统提示（单人独白见 MonologueGenerator）。
@@ -988,10 +1032,17 @@ class DialogueGenerator:
             # "分析师"），这里归一而不是报错——形态是产品决策，不该因为模型多写
             # 一个词就废掉一整期生成（一整轮 LLM + 数据抓取都要重来）。
             if self.format == FORMAT_MONOLOGUE:
-                if speaker != MONOLOGUE_SPEAKER:
+                if self.video_type.id != "monologue" and speaker not in (self.mono_speaker, "narrator"):
+                    raise DialogueGenerationError(f"unknown speaker: {speaker}")
+                if speaker != self.mono_speaker:
                     notes.append(f"[第{index}轮] speaker “{speaker or '空'}” 不是 narrator，"
                                  "已统一归一——独白片只有一个说话人")
-                speaker = MONOLOGUE_SPEAKER
+                speaker = self.mono_speaker
+            elif self.role_bindings and self.video_type.id != "debate":
+                inverse = {value: key for key, value in self.role_bindings.items()}
+                speaker = inverse.get(speaker, speaker)
+                if speaker not in self.role_bindings:
+                    raise DialogueGenerationError(f"unknown speaker: {speaker}")
             elif speaker not in self.speakers:
                 raise DialogueGenerationError(
                     f"turn {index} must name one of {', '.join(self.speakers)} as speaker")
@@ -1536,13 +1587,13 @@ class MonologueGenerator(DialogueGenerator):
 
     def _system_prompt(self, arc: Arc | None = None) -> str:
         choice = self._choice_for(arc)
-        narrator = self._character(MONOLOGUE_SPEAKER, "谈股论金",
+        narrator = self._character(self.mono_speaker, "谈股论金",
                                    "一个人把一家公司掰开讲的财经讲述人")
         return (
             "你是财经短视频编导，为对投资感兴趣的普通观众写一段**一个人把一家公司掰开讲**的中文独白。"
             "只依据提供的数据发言；不编造数字、新闻或事实，不预测涨跌，不给出买卖或仓位建议，不承诺收益。\n"
             f"讲述人：{narrator['name']}，人设：{narrator['persona']}。\n"
-            f"全片只有这一个说话人：每一轮的 speaker 都写 {MONOLOGUE_SPEAKER}。"
+            f"全片只有这一个说话人：每一轮的 speaker 都写 {self.mono_speaker}。"
             "不要虚构第二个角色，也不要写成「一人分饰两角的辩论」——"
             "这是一个人把这家公司讲给观众听，不是把一份对辩剧本一个人念完。\n"
             + self._content_rules(emotion_close="独白没有对手接话，情绪起伏就是唯一的节奏")
@@ -1588,11 +1639,11 @@ class MonologueGenerator(DialogueGenerator):
         minutes = (f"{self._minutes(min_s)}-{self._minutes(max_s)} 分钟" if max_s > min_s
                    else f"{self._minutes(max_s)} 分钟")
         beat_keys = beats_by_key(choice.beats)
-        narrator = self._character(MONOLOGUE_SPEAKER, "谈股论金", "")
+        narrator = self._character(self.mono_speaker, "谈股论金", "")
         schema = {"title": "股票名（代码）：标题句（冒号后≤22字，见标题要求）",
                   "title_candidates": ["标题写法B（与 title 不同写法）", "标题写法C（第三种写法）"],
                   "turns": [
-            {"speaker": MONOLOGUE_SPEAKER,
+            {"speaker": self.mono_speaker,
              "line": f"一段完整自然的话，{floor_chars} 到 {self.config.max_line_chars} 字；"
                      "说不下就拆成下一段",
              "beat": f"骨架节拍，只能取：{'/'.join(beat_keys)}",
@@ -1605,7 +1656,7 @@ class MonologueGenerator(DialogueGenerator):
             }
         return (
             f"生成一段成片时长在 {min_s}-{max_s} 秒（约 {minutes}）的**单人独白**："
-            f"全片由 {narrator['name']} 一个人从头讲到尾，每一轮的 speaker 都写 {MONOLOGUE_SPEAKER}，"
+            f"全片由 {narrator['name']} 一个人从头讲到尾，每一轮的 speaker 都写 {self.mono_speaker}，"
             "不要出现第二个说话人。\n"
             f"正文总字数控制在 {min_chars}-{budget_chars} 字之间（配音约 4.8 字/秒，超字数就会超时长），"
             f"分 {min_turns}-{max_turns} 段，单段 {floor_chars}-{self.config.max_line_chars} 字。"
@@ -1649,7 +1700,7 @@ class MonologueGenerator(DialogueGenerator):
 
     def _lead_label(self, lead: str) -> str:
         """独白片没有"谁领讲"：五章仍是有用的叙事地图，但 lead 是双人片的产物。"""
-        name = self._character(MONOLOGUE_SPEAKER, "谈股论金", "")["name"]
+        name = self._character(self.mono_speaker, "谈股论金", "")["name"]
         return f"本章由{name}一个人从头讲到尾"
 
     def _seed_opener(self, side: str) -> str:

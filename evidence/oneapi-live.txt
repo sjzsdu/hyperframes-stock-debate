@@ -1,0 +1,6 @@
+ONEAPI_API_KEY present: False
+anonymous /v1/models HTTP 401
+Authorized model catalog: unverified
+Authentication scheme: Bearer candidate, unverified with authorized credentials
+Successful real chat response: unverified
+Required from gateway owner: authorized model IDs, authentication confirmation, one redacted success response, quota codes, capability/billing/time limits.

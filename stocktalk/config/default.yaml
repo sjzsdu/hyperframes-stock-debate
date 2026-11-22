@@ -5,7 +5,10 @@ dialogue:
   # LLM 供应商（2026-09-30 抽象）：bailian-cli（默认，`bl text chat` 子进程）或
   # openai-compatible（任何 OpenAI 格式的 HTTP 端点，见 providers/openai_chat.py）。
   # 新增供应商：在 stocktalk/modules/providers/ 写实现 + @register_llm 登记。
-  provider: bailian-cli
+  provider: oneapi
+  options:
+    base_url: https://oneapi.wnbgj.com/v1
+    api_key_env: ONEAPI_API_KEY
   model: qwen3.6-plus
   # 供应商专属参数（openai-compatible 才需要）：
   # options:
@@ -269,7 +272,7 @@ topics:
 
 # 多平台自动发布（基于 social-auto-upload 的浏览器自动化）。
 # 首次使用需逐平台人工扫码登录一次（cookie 会保存）:
-#   cd third_party/social-auto-upload && uv run sau <platform> login
+#   在外置 publish.sau_dir 内运行 .venv/bin/sau <platform> login
 # --account 可省略（默认 default）；多账号才需要显式传 --account <名字>。
 # accounts 里每个平台对应一个账号名；headless=true 时上传在后台浏览器执行。
 publish:

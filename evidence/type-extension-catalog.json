@@ -1,0 +1,133 @@
+{
+  "types": [
+    {
+      "schema_version": 1,
+      "id": "debate",
+      "display_name": "牛熊辩论",
+      "summary": "从行情理解公司业务、观察点和风险。",
+      "status": "enabled",
+      "cast": [
+        {
+          "speaker_id": "bull",
+          "name": "增长派",
+          "voice_ref": "bull"
+        },
+        {
+          "speaker_id": "bear",
+          "name": "审计派",
+          "voice_ref": "bear"
+        }
+      ],
+      "duration": {
+        "min_seconds": 120,
+        "max_seconds": 300
+      },
+      "required_data": [
+        "quote"
+      ],
+      "visual": {
+        "scene": "debate",
+        "cover": "debate"
+      },
+      "sample": "sample.json",
+      "compliance_defaults": {
+        "ai_declaration": true,
+        "closing_risk_notice": true,
+        "title_template": "{{ stock_name }}行情解读",
+        "tags": [
+          "股票",
+          "行情"
+        ]
+      },
+      "script": {
+        "strategy": "debate",
+        "arc": "mainline",
+        "prompt": "先讲行情，再交代观察点与风险，只用输入中的事实。"
+      },
+      "digest": "12810b39b34c5c7b671eaccc5975aa8dbfcdfab68bc070f08395e2b2109ece62"
+    },
+    {
+      "schema_version": 1,
+      "id": "monologue",
+      "display_name": "公司独白",
+      "summary": "从行情理解公司业务、观察点和风险。",
+      "status": "enabled",
+      "cast": [
+        {
+          "speaker_id": "narrator",
+          "name": "谈股论金",
+          "voice_ref": "narrator"
+        }
+      ],
+      "duration": {
+        "min_seconds": 120,
+        "max_seconds": 240
+      },
+      "required_data": [
+        "quote"
+      ],
+      "visual": {
+        "scene": "monologue",
+        "cover": "monologue"
+      },
+      "sample": "sample.json",
+      "compliance_defaults": {
+        "ai_declaration": true,
+        "closing_risk_notice": true,
+        "title_template": "{{ stock_name }}行情解读",
+        "tags": [
+          "股票",
+          "行情"
+        ]
+      },
+      "script": {
+        "strategy": "monologue",
+        "arc": "deep_dive",
+        "prompt": "先讲行情，再交代观察点与风险，只用输入中的事实。"
+      },
+      "digest": "4307968e16a25ebca1a4c112d29bfef1fea199f1a3bee843f531aa8a9512752a"
+    },
+    {
+      "schema_version": 1,
+      "id": "market-brief",
+      "display_name": "行情速览",
+      "summary": "从行情理解公司业务、观察点和风险。",
+      "status": "enabled",
+      "cast": [
+        {
+          "speaker_id": "host",
+          "name": "行情主持人",
+          "voice_ref": "narrator"
+        }
+      ],
+      "duration": {
+        "min_seconds": 30,
+        "max_seconds": 60
+      },
+      "required_data": [
+        "quote"
+      ],
+      "visual": {
+        "scene": "monologue",
+        "cover": "monologue"
+      },
+      "sample": "sample.json",
+      "compliance_defaults": {
+        "ai_declaration": true,
+        "closing_risk_notice": true,
+        "title_template": "{{ stock_name }}行情解读",
+        "tags": [
+          "股票",
+          "行情"
+        ]
+      },
+      "script": {
+        "strategy": "monologue",
+        "arc": "deep_dive",
+        "prompt": "先讲行情，再交代观察点与风险，只用输入中的事实。"
+      },
+      "digest": "364ba052a870066f14221a0bd4ad40b445e4bc230c41b6ccf8f69821528e372c"
+    }
+  ],
+  "diagnostics": {}
+}

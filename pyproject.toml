@@ -17,18 +17,32 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+web = ["flask>=3.1,<4", "waitress>=3,<4"]
+desktop = ["pywebview>=6,<7"]
 dev = [
     "pytest>=8.0",
+    "mypy>=1.15,<2",
+    "types-PyYAML>=6",
+    "types-waitress>=3",
+    "Pillow>=11,<13",
 ]
 
 [project.scripts]
 tangulunjin = "stocktalk.cli:main"
+tangulunjin-web = "stocktalk.platform.server:main"
+tangulunjin-desktop = "stocktalk.platform.desktop:main"
 
 [tool.setuptools.packages.find]
 include = ["stocktalk*"]
 
 [tool.setuptools.package-data]
-stocktalk = ["templates/hyperframes/*"]
+stocktalk = ["templates/hyperframes/*", "templates/cover/*", "templates/review/*", "config/*.yaml", "video_types/*/*.yaml", "video_types/*/*.json", "platform/templates/*", "platform/static/*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+[tool.mypy]
+files = ["stocktalk/platform", "stocktalk/video_types", "stocktalk/modules/providers/oneapi.py", "stocktalk/modules/providers/oneapi_http.py", "stocktalk/modules/runtime_lock.py"]
+follow_imports = "silent"
+ignore_missing_imports = true
+check_untyped_defs = true

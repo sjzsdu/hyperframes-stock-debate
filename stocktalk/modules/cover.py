@@ -272,6 +272,9 @@ class CoverGenerator:
         hook = self._hook(script, stock_name, stock_code)
         tags = self._tags(script)
         template = self._env.get_template(COVER_TEMPLATES[style])
+        from stocktalk.video_types import selected_type
+        from stocktalk.video_types.templates import visual_template
+        template = visual_template(selected_type(self.config).declaration, "cover", template)
         return template.render(
             name=stock_name or stock_code,
             code=stock_code,

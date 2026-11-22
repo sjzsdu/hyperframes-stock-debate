@@ -1,0 +1,5 @@
+Baseline source: 03353d50ef68b25e548acb27967291de088a4a39 (separate archive checkout)
+Command: ../hyperframes-stock-debate/.venv/bin/python -m pytest -q
+854 passed in 42.41s
+Final source adds 51 dedicated tests. Existing copy-guard parametrization also covers 11 new Python modules.
+Existing test files were not modified.

@@ -1,0 +1,26 @@
+{
+  "publications": [
+    {
+      "account": "default",
+      "created_at": "2026-11-22T14:28:57.155Z",
+      "id": "e81b98fe372b49d1b42823493a83f1ed",
+      "options": {
+        "ai_declaration": true,
+        "canvas": "horizontal",
+        "schedule": null
+      },
+      "platform": "bilibili",
+      "report": {
+        "code": "PUBLISHED",
+        "message": "发布完成",
+        "ok": true,
+        "platform": "bilibili",
+        "task_id": "9f6c07d8884b4919b9bdeb9845c55452"
+      },
+      "retry_of": null,
+      "status": "succeeded",
+      "task_id": "9f6c07d8884b4919b9bdeb9845c55452"
+    }
+  ],
+  "task_id": "9f6c07d8884b4919b9bdeb9845c55452"
+}

@@ -90,7 +90,7 @@ def main(argv: list[str] | None = None) -> None:
                         help="画幅：horizontal=桌面版（1920×1080 横屏），"
                              "vertical=手机版（1080×1920 竖屏，适配抖音/快手全屏）；"
                              "覆盖配置里的 video.canvas")
-    parser.add_argument("--format", choices=["debate", "monologue"], default=None, dest="dialogue_format",
+    parser.add_argument("--format", default=None, dest="dialogue_format",
                         help="内容形态：debate=双人对辩，monologue=单人独白讲一家公司；"
                              "覆盖配置里的 dialogue.format，等价于 --config config.monologue.yaml，"
                              "但不用每次带配置文件")
@@ -185,6 +185,15 @@ def main(argv: list[str] | None = None) -> None:
         # 其余（独白时长额度、narrator 人设、封面版式）都由 default.yaml 决定。
         # 命令行显式给了就以命令行为准，覆盖配置文件里的 dialogue.format。
         config.setdefault("dialogue", {})["format"] = args.dialogue_format
+
+    from stocktalk.modules.providers.base import LLMProviderError
+    from stocktalk.video_types import TypeContractError, bind_type
+    try:
+        bind_type(config)
+        from stocktalk.modules.providers.oneapi import validate_dialogue
+        validate_dialogue(config)
+    except (TypeContractError, LLMProviderError) as exc:
+        parser.error(str(exc))
 
     if args.duration_minutes is not None:
         if args.duration_minutes < 1:
@@ -363,7 +372,7 @@ def _check(config: dict) -> int:
           + (f"，{len(unconfirmed)} 个状态未知" if unconfirmed else "")
           + (f"，环境缺 {len(blocked)} 项必需工具" if blocked else ""))
     if failed:
-        print("  需要重新登录的平台（在 third_party/social-auto-upload 下执行）:")
+        print("  需要重新登录的平台（在 publish.sau_dir 配置的外置运行目录下执行）:")
         for platform in failed:
             print(f"    uv run sau {platform} login --account {account.get(platform, 'default')}")
     if unconfirmed:

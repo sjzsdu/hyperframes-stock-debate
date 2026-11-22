@@ -1,0 +1,2 @@
+video_types/market-brief/sample.json
+video_types/market-brief/type.yaml

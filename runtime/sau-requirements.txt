@@ -1,0 +1,3 @@
+# Baseline SAU imports playwright in several uploaders but its uv.lock omits it.
+# Supplement the archived lock without modifying the reviewed vendor source.
+playwright==1.58.0

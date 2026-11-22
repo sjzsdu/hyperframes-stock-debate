@@ -1,0 +1,11 @@
+{
+  "kind": "same-build repeatability only; no approved prior UI baseline",
+  "size": [
+    1440,
+    1884
+  ],
+  "changed_pixels": 0,
+  "total_pixels": 2712960,
+  "changed_ratio": 0.0,
+  "bbox": null
+}

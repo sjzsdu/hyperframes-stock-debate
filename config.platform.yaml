@@ -1,0 +1,10 @@
+# Nonsecret operator configuration; edit expanded absolute paths for your machine.
+dialogue:
+  provider: oneapi
+  options:
+    base_url: https://oneapi.wnbgj.com/v1
+    api_key_env: ONEAPI_API_KEY
+# video_types_dir: /absolute/path/to/video_types
+# publish:
+#   sau_dir: /absolute/path/to/sau
+#   sau_executable: /absolute/path/to/sau/.venv/bin/sau
