@@ -27,7 +27,7 @@
 | `visual` | `scene`、`cover` 取内置版式键或同目录相对资产引用。禁止绝对路径与逃逸链接，声明的模板只在受限渲染上下文取数据 |
 | `sample` | 可解析的相对脚本 JSON 或样例 MP4。示例使用脚本以匹配说话人与校验数据；MP4 检查媒体类型和可解码性 |
 | `compliance_defaults` | AI 声明、片尾风险提示开关、标题与标签模板规则。最终发布门禁和平台限制由既有核心校验 |
-| 执行元数据 | `schema_version: 1` 与可选的 `script` 声明，可声明 `strategy`、`arc` 及行内 `prompt`。`monologue` 策略接受恰好一个角色，`deep-dive` 为 S1 对既有独白骨架登记的键。策略、配套版式及数据源的签名须在加载时校验 |
+| 执行元数据 | `schema_version: 1` 与可选的 `script` 声明，可声明 `strategy`、`arc` 及行内 `prompt`。`monologue` 策略接受恰好一个角色，`deep_dive` 沿用既有独白骨架 ID（`stocktalk/modules/arcs.py:242`）。策略、配套版式及数据源的签名须在加载时校验 |
 
 S1 一次性迁移所有现有类型分支，内置声明复用既有辩论、独白策略与模板。对引用 `dialogue.format`、`--format` 和历史 sidecar 的 CLI 保留行为，已有类型的时长、合规、配音、画幅与封面以 793 条基线和代表性 fixture 保护。新 API 仅接受一个类型 ID，同名冲突显式报错。初始版本只允许受控模板语法和有限本地资产，禁止插件任意 Python 导入、网络请求或读取配置。
 
@@ -68,7 +68,7 @@ compliance_defaults:
   tags: [行情速览, 股票]
 script:
   strategy: monologue
-  arc: deep-dive
+  arc: deep_dive
   prompt: 先讲观察到的行情，再交代关键观察点，最后给出风险提示。只用输入中的事实。
 ```
 
