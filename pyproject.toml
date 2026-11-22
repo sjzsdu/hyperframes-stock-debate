@@ -23,6 +23,7 @@ dev = [
     "pytest>=8.0",
     "mypy>=1.15,<2",
     "types-PyYAML>=6",
+    "types-waitress>=3",
     "Pillow>=11,<13",
 ]
 
