@@ -20,7 +20,7 @@ SAU 已从主仓移出。按 [外置发布工具说明](third_party/README.md) �
 
 类型扩展：复制 `examples/video_types/market-brief/{type.yaml,sample.json}` 到运营者的 `video_types/market-brief/`，在配置中设置绝对 `video_types_dir` 并重启。只增加这两个文件即可通过目录发现接入 `host` 单人类型，沿用 `deep_dive` 策略骨架；CLI 使用 `--format market-brief`，Web 从同一目录显示类型。`scripts/verify_types.py --types-dir ...` 输出声明摘要与诊断，非法/重复/停用 ID 不可执行。声明摘要和本地模板内容随任务冻结，后来修改类型不会改写已入队任务。自定义场景/封面可引用同目录 `.html.j2`，仅支持沙箱数据模板与登记的本地资源，拒绝调用/导入/外部 URL/路径逃逸。新增数据源或策略需另行实现适配器。
 
-任务列表接口 `GET /api/tasks` 接受 `type_id`、`stock`、`status`、`since`、`until` 筛选；未知参数（包括 `type`）返回 400 / `INVALID_INPUT`。OneAPI 使用 `dialogue.timeout_seconds` 作为请求总时限（默认 300 秒），显式调用超时覆盖该默认值；必须是有限正数，不再截断到 60 秒，仍保持超时后不自动重播。
+任务列表接口 `GET /api/tasks` 接受 `type_id`、`stock`、`status`、`since`、`until` 筛选，以及 `limit`（默认 50，限制为 1–100）和 `offset`（默认 0，负数按 0）分页；未知参数（包括 `type`）返回 400 / `INVALID_INPUT`。OneAPI 使用 `dialogue.timeout_seconds` 作为请求总时限（默认 300 秒），显式调用超时覆盖该默认值；必须是有限正数（拒绝布尔值），不再截断到 60 秒，仍保持超时后不自动重播。
 
 开发校验：`npm ci && npm run typecheck && npm run build`（TypeScript strict，提交生成的静态 JS，运行时无需 Node 构建链）；`.venv/bin/python -m pytest -q`；安装 dev 依赖后 `.venv/bin/python -m mypy` 检查新增应用边界。原项目未配置 lint/typecheck 或 CI，本次加入 TypeScript 与 Python 边界类型检查。已有 Python 核心仍以全量回归保护。
 

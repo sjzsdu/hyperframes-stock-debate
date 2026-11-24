@@ -37,6 +37,18 @@ class OneAPIRequestError(LLMProviderError):
         return {"code": self.code, "message": str(self), "outcome_unknown": self.outcome_unknown}
 
 
+def parse_timeout(value) -> float:
+    if isinstance(value, bool):
+        raise OneAPIRequestError("CONFIG_INVALID")
+    try:
+        timeout = float(value)
+    except (TypeError, ValueError, OverflowError):
+        raise OneAPIRequestError("CONFIG_INVALID") from None
+    if not math.isfinite(timeout) or timeout <= 0:
+        raise OneAPIRequestError("CONFIG_INVALID")
+    return timeout
+
+
 class NoRedirect(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         raise OneAPIRequestError("UPSTREAM_ERROR")
@@ -49,19 +61,9 @@ class OneAPIClient:
             raise OneAPIRequestError("CONFIG_INVALID")
         self.model, self.base_url, self.api_key_env = model, BASE_URL, KEY_ENV
         self._urlopen = urlopen
-        self.timeout = self._timeout(default_timeout)
+        self.timeout = parse_timeout(default_timeout)
         self.validate_model = validate_model
         self._model_ids: list[str] | None = None
-
-    @staticmethod
-    def _timeout(value) -> float:
-        try:
-            timeout = float(value)
-        except (TypeError, ValueError, OverflowError):
-            raise OneAPIRequestError("CONFIG_INVALID") from None
-        if not math.isfinite(timeout) or timeout <= 0:
-            raise OneAPIRequestError("CONFIG_INVALID")
-        return timeout
 
     def _request(self, route: str, payload: dict[str, Any] | None = None, timeout: float = 5) -> dict[str, Any]:
         key = os.environ.get(KEY_ENV)
@@ -129,7 +131,7 @@ class OneAPIClient:
             raise OneAPIRequestError("UPSTREAM_ERROR") from None
 
     def chat(self, system: str, message: str, *, max_tokens=None, temperature=None, timeout=None) -> str:
-        request_timeout = self.timeout if timeout is None else self._timeout(timeout)
+        request_timeout = self.timeout if timeout is None else parse_timeout(timeout)
         if self.validate_model:
             if self._model_ids is None:
                 self._model_ids = self.models()

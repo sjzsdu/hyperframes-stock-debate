@@ -21,6 +21,10 @@ class Conflict(ValueError):
 
 
 class Store:
+    EXACT_FILTERS = ("type_id", "stock", "status")
+    DATE_FILTERS = (("since", ">="), ("until", "<="))
+    PAGE_DEFAULTS = {"limit": 50, "offset": 0}
+
     def __init__(self, root: Path):
         self.root = root.resolve()
         self.root.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -96,17 +100,21 @@ class Store:
             return data
 
     def list(self, filters: dict[str, str]) -> list[dict[str, Any]]:
+        supported = {*self.EXACT_FILTERS, *dict(self.DATE_FILTERS), *self.PAGE_DEFAULTS}
+        if filters.keys() - supported:
+            raise ValueError("任务筛选仅接受 " + "/".join(sorted(supported)))
         where, values = [], []
-        for field in ("type_id", "stock", "status"):
+        for field in self.EXACT_FILTERS:
             if filters.get(field):
                 where.append(f"{field}=?")
                 values.append(filters[field])
-        for key, op in (("since", ">="), ("until", "<=")):
+        for key, op in self.DATE_FILTERS:
             if filters.get(key):
                 where.append(f"created_at {op} ?")
                 values.append(filters[key])
-        limit = max(1, min(int(filters.get("limit", 50)), 100))
-        offset = max(0, int(filters.get("offset", 0)))
+        page = {key: int(filters.get(key, default)) for key, default in self.PAGE_DEFAULTS.items()}
+        limit = max(1, min(page["limit"], 100))
+        offset = max(0, page["offset"])
         with self.connection() as db:
             return [dict(r) for r in db.execute("SELECT id,stock,type_id,model,status,stage,created_at FROM task" +
                     (" WHERE " + " AND ".join(where) if where else "") + " ORDER BY created_at DESC LIMIT ? OFFSET ?", (*values, limit, offset))]

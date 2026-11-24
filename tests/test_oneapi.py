@@ -147,3 +147,20 @@ def test_invalid_timeout_is_explicit_configuration_error(timeout):
         OneAPIClient(default_timeout=timeout)
     with pytest.raises(OneAPIRequestError, match='CONFIG_INVALID'):
         OneAPIClient().chat('s', 'm', timeout=timeout)
+
+
+@pytest.mark.parametrize('timeout', [True, False])
+def test_boolean_timeout_is_rejected_at_provider_boundaries(timeout):
+    with pytest.raises(OneAPIRequestError, match='CONFIG_INVALID'):
+        OneAPIClient(default_timeout=timeout)
+    with pytest.raises(OneAPIRequestError, match='CONFIG_INVALID'):
+        OneAPIClient().chat('s', 'm', timeout=timeout)
+
+
+@pytest.mark.parametrize('timeout', [True, False, 0, -1, None, 'invalid', float('nan'), float('inf')])
+def test_dialogue_configuration_rejects_invalid_timeout_before_coercion(timeout):
+    from stocktalk.modules.dialogue_generator import DialogueGenerator
+    config = load_config()
+    config['dialogue']['timeout_seconds'] = timeout
+    with pytest.raises(OneAPIRequestError, match='CONFIG_INVALID'):
+        DialogueGenerator(config)

@@ -6,7 +6,7 @@ OpenAI-compatible 端点）；本模块只负责业务：prompt 构造、骨架�
 """
 from __future__ import annotations
 
-from stocktalk.modules.providers.oneapi import OneAPIRequestError
+from stocktalk.modules.providers.oneapi import OneAPIRequestError, parse_timeout
 
 import json
 import re
@@ -280,7 +280,7 @@ class DialogueGenerator:
             max_line_chars=int(merged.get("max_line_chars", DialogueConfig.max_line_chars)),
             max_tokens=int(source.get("max_tokens", DialogueConfig.max_tokens)),
             temperature=float(source.get("temperature", DialogueConfig.temperature)),
-            timeout_seconds=float(source.get("timeout_seconds", DialogueConfig.timeout_seconds)),
+            timeout_seconds=parse_timeout(source.get("timeout_seconds", DialogueConfig.timeout_seconds)),
             arc=str(source.get("arc", DialogueConfig.arc) or DialogueConfig.arc),
             short_line_chars=int(source.get("short_line_chars", DialogueConfig.short_line_chars)),
             message=self._normalize_message(source.get("message")),

@@ -105,8 +105,6 @@ def create_app(config=None, *, root=Path(".platform"), origin="http://127.0.0.1:
     @app.route("/api/tasks", methods=["GET", "POST"])
     def tasks():
         if request.method == "GET":
-            if set(request.args) - {"type_id", "stock", "status", "since", "until"}:
-                raise ValueError("任务筛选仅接受 type_id/stock/status/since/until")
             return jsonify(tasks=store.list(request.args.to_dict()))
         data = request.get_json()
         if not isinstance(data, dict) or set(data) - {"stock", "type_id", "model"}:
