@@ -160,3 +160,35 @@ def test_inline_credentials_rejected_before_database_is_created(tmp_path):
     with pytest.raises(ValueError,match='凭据只能'):
         create_app(config,root=tmp_path/'private',models=lambda:['m'])
     assert not (tmp_path/'private/tasks.sqlite3').exists()
+
+
+@pytest.mark.parametrize('query', ['type=market-brief', 'unknown=value', 'stock=000001&typo=x'])
+def test_unknown_task_filters_rejected(app, query):
+    client, headers = browser(app)
+    assert submit(client, headers).status_code == 202
+    result = client.get('/api/tasks?' + query, base_url=ORIGIN)
+    assert result.status_code == 400
+    assert result.json['error']['code'] == 'INVALID_INPUT'
+
+
+@pytest.mark.parametrize('query,count,start', [
+    ('limit=20&offset=0', 20, 104),
+    ('type_id=market-brief&limit=200&offset=0', 100, 104),
+    ('stock=000001&limit=20&offset=20', 20, 84),
+])
+def test_workbench_task_pagination(app, query, count, start):
+    store = app.extensions['store']
+    task_ids = [store.create(str(index), {'stock': '000001', 'type_id': 'market-brief', 'model': 'fixture-model'}, {})[0]
+                for index in range(105)]
+    with store.connection() as db:
+        for index, task_id in enumerate(task_ids):
+            db.execute('UPDATE task SET created_at=? WHERE id=?', (f'2026-01-01T00:{index // 60:02}:{index % 60:02}Z', task_id))
+    client, _ = browser(app)
+    result = client.get('/api/tasks?' + query, base_url=ORIGIN)
+    assert result.status_code == 200
+    tasks = result.json['tasks']
+    assert len(tasks) == count
+    assert [task['created_at'] for task in tasks] == [
+        f'2026-01-01T00:{index // 60:02}:{index % 60:02}Z'
+        for index in range(start, start - count, -1)
+    ]
