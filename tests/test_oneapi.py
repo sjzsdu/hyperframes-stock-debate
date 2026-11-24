@@ -120,3 +120,30 @@ def test_registered_provider_rejects_model_before_post():
     client._urlopen=transport
     with pytest.raises(OneAPIRequestError,match='MODEL_UNAVAILABLE'):client.chat('s','m')
     assert len(calls)==1 and calls[0].get_method()=='GET'
+
+
+@pytest.mark.parametrize('override,expected', [(None, 300), (120, 120), (600, 600)])
+def test_configured_timeout_reaches_supervised_transport(monkeypatch, override, expected):
+    from stocktalk.modules.dialogue_generator import DialogueGenerator
+    import subprocess
+    config = load_config()
+    config['dialogue'].update(provider='oneapi', model='fixture-model', timeout_seconds=300)
+    client = DialogueGenerator(config)._llm
+    client._model_ids = ['fixture-model']
+    calls = []
+    def run(argv, **kwargs):
+        calls.append(kwargs)
+        return subprocess.CompletedProcess(argv, 0, stdout=json.dumps(
+            {'data': {'choices': [{'message': {'content': 'ok'}}]}}))
+    monkeypatch.setattr('subprocess.run', run)
+    assert client.chat('s', 'm', timeout=override) == 'ok'
+    assert calls[0]['timeout'] == expected
+    assert json.loads(calls[0]['input'])['timeout'] == expected
+
+
+@pytest.mark.parametrize('timeout', [0, -1, float('nan'), float('inf'), 'invalid'])
+def test_invalid_timeout_is_explicit_configuration_error(timeout):
+    with pytest.raises(OneAPIRequestError, match='CONFIG_INVALID'):
+        OneAPIClient(default_timeout=timeout)
+    with pytest.raises(OneAPIRequestError, match='CONFIG_INVALID'):
+        OneAPIClient().chat('s', 'm', timeout=timeout)

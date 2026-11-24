@@ -2,6 +2,7 @@
 from contextlib import contextmanager
 import fcntl
 import hashlib
+import os
 from pathlib import Path
 
 
@@ -11,7 +12,12 @@ class AccountBusy(RuntimeError):
 
 @contextmanager
 def account_lock(platform: str, account: str):
-    root = Path.home() / ".local/state/stocktalk/account-locks"
+    state = os.environ.get("STOCKTALK_STATE_DIR")
+    if state:
+        root = Path(state)
+    else:
+        root = Path(os.environ.get("XDG_STATE_HOME") or Path.home() / ".local/state") / "stocktalk"
+    root /= "account-locks"
     root.mkdir(parents=True, exist_ok=True, mode=0o700)
     key = hashlib.sha256(f"{platform}\0{account}".encode()).hexdigest()
     with (root / key).open("a+") as handle:

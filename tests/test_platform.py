@@ -160,3 +160,12 @@ def test_inline_credentials_rejected_before_database_is_created(tmp_path):
     with pytest.raises(ValueError,match='凭据只能'):
         create_app(config,root=tmp_path/'private',models=lambda:['m'])
     assert not (tmp_path/'private/tasks.sqlite3').exists()
+
+
+@pytest.mark.parametrize('query', ['type=market-brief', 'unknown=value', 'stock=000001&typo=x'])
+def test_unknown_task_filters_rejected(app, query):
+    client, headers = browser(app)
+    assert submit(client, headers).status_code == 202
+    result = client.get('/api/tasks?' + query, base_url=ORIGIN)
+    assert result.status_code == 400
+    assert result.json['error']['code'] == 'INVALID_INPUT'

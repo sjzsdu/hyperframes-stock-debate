@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import socket
 import time
@@ -23,7 +24,7 @@ class OneAPIRequestError(LLMProviderError):
         self.outcome_unknown = outcome_unknown
         super().__init__(f"{code}: " + {
             "CONFIG_MISSING": "请在服务进程设置 ONEAPI_API_KEY。",
-            "CONFIG_INVALID": "请迁移 dialogue.provider/options 到 oneapi。",
+            "CONFIG_INVALID": "请检查 dialogue.provider/options（仅支持 oneapi）及 timeout_seconds（有限正数）。",
             "UPSTREAM_AUTH": "网关拒绝授权，请检查令牌和授权范围。",
             "UPSTREAM_TIMEOUT": "网关超时；结果可能未知，请核对后显式重试。",
             "MODEL_UNAVAILABLE": "模型不在可用清单，请刷新并重选。",
@@ -48,9 +49,19 @@ class OneAPIClient:
             raise OneAPIRequestError("CONFIG_INVALID")
         self.model, self.base_url, self.api_key_env = model, BASE_URL, KEY_ENV
         self._urlopen = urlopen
-        self.timeout = min(float(default_timeout), 60.0)
+        self.timeout = self._timeout(default_timeout)
         self.validate_model = validate_model
         self._model_ids: list[str] | None = None
+
+    @staticmethod
+    def _timeout(value) -> float:
+        try:
+            timeout = float(value)
+        except (TypeError, ValueError, OverflowError):
+            raise OneAPIRequestError("CONFIG_INVALID") from None
+        if not math.isfinite(timeout) or timeout <= 0:
+            raise OneAPIRequestError("CONFIG_INVALID")
+        return timeout
 
     def _request(self, route: str, payload: dict[str, Any] | None = None, timeout: float = 5) -> dict[str, Any]:
         key = os.environ.get(KEY_ENV)
@@ -118,6 +129,7 @@ class OneAPIClient:
             raise OneAPIRequestError("UPSTREAM_ERROR") from None
 
     def chat(self, system: str, message: str, *, max_tokens=None, temperature=None, timeout=None) -> str:
+        request_timeout = self.timeout if timeout is None else self._timeout(timeout)
         if self.validate_model:
             if self._model_ids is None:
                 self._model_ids = self.models()
@@ -129,7 +141,7 @@ class OneAPIClient:
             payload["max_tokens"] = max_tokens
         if temperature is not None:
             payload["temperature"] = temperature
-        data = self._request("/chat/completions", payload, min(float(timeout or self.timeout), self.timeout))
+        data = self._request("/chat/completions", payload, request_timeout)
         try:
             content = data["choices"][0]["message"]["content"]
             if not isinstance(content, str):

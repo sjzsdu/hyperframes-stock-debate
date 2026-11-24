@@ -20,9 +20,11 @@ SAU 已从主仓移出。按 [外置发布工具说明](third_party/README.md) �
 
 类型扩展：复制 `examples/video_types/market-brief/{type.yaml,sample.json}` 到运营者的 `video_types/market-brief/`，在配置中设置绝对 `video_types_dir` 并重启。只增加这两个文件即可通过目录发现接入 `host` 单人类型，沿用 `deep_dive` 策略骨架；CLI 使用 `--format market-brief`，Web 从同一目录显示类型。`scripts/verify_types.py --types-dir ...` 输出声明摘要与诊断，非法/重复/停用 ID 不可执行。声明摘要和本地模板内容随任务冻结，后来修改类型不会改写已入队任务。自定义场景/封面可引用同目录 `.html.j2`，仅支持沙箱数据模板与登记的本地资源，拒绝调用/导入/外部 URL/路径逃逸。新增数据源或策略需另行实现适配器。
 
+任务列表接口 `GET /api/tasks` 接受 `type_id`、`stock`、`status`、`since`、`until` 筛选；未知参数（包括 `type`）返回 400 / `INVALID_INPUT`。OneAPI 使用 `dialogue.timeout_seconds` 作为请求总时限（默认 300 秒），显式调用超时覆盖该默认值；必须是有限正数，不再截断到 60 秒，仍保持超时后不自动重播。
+
 开发校验：`npm ci && npm run typecheck && npm run build`（TypeScript strict，提交生成的静态 JS，运行时无需 Node 构建链）；`.venv/bin/python -m pytest -q`；安装 dev 依赖后 `.venv/bin/python -m mypy` 检查新增应用边界。原项目未配置 lint/typecheck 或 CI，本次加入 TypeScript 与 Python 边界类型检查。已有 Python 核心仍以全量回归保护。
 
-服务以环回地址和同源会话/CSRF 保护写入，不提供远程访问。数据位于单机 SQLite/WAL 和隔离的产物目录。Ctrl-C/SIGTERM 停止领取并等待当前工作收尾；强制退出后中断任务不会自动重播。出现 `RECOVERY_REQUIRED` 时，确认旧渲染/上传子进程全部退出后才用 `--ack-recovery` 重启；发布结果未知需先核对远端，不能补发。备份前停服务，复制完整数据根；回退到旧版本前保留备份及导出的媒体、sidecar/报告。账号锁位于用户私有状态目录，对 CLI/守护/Web 发布共同生效。不要在服务运行时编辑数据库或移动产物。
+服务以环回地址和同源会话/CSRF 保护写入，不提供远程访问。数据位于单机 SQLite/WAL 和隔离的产物目录。Ctrl-C/SIGTERM 停止领取并等待当前工作收尾；强制退出后中断任务不会自动重播。出现 `RECOVERY_REQUIRED` 时，确认旧渲染/上传子进程全部退出后才用 `--ack-recovery` 重启；发布结果未知需先核对远端，不能补发。备份前停服务，复制完整数据根；回退到旧版本前保留备份及导出的媒体、sidecar/报告。账号锁位于用户私有状态目录，对 CLI/守护/Web 发布共同生效。 默认路径为 `$HOME/.local/state/stocktalk/account-locks`；支持 `XDG_STATE_HOME`，优先使用 `STOCKTALK_STATE_DIR`（锁位于其 `account-locks/`）。HOME 只读时将 `STOCKTALK_STATE_DIR` 指向可写的私有绝对路径，所有发布进程须使用相同目录，避免分裂账号锁。不要在服务运行时编辑数据库或移动产物。
 
 部署方式、复跑证据与未验证项见 `docs/platform-validation.md`。首版不提供联网部署、多人登录、桌面安装包或真实发布验收。预验证通过 ≠ PR 已合并 ≠ 产品已验收。
 
